@@ -907,4 +907,335 @@ test('15. Backend UI readiness: ejecutarFacturacionMensual valida formato YYYY-M
   assert.ok(resumen.facturasGeneradas.some((f) => f.medidor_id === medidor.id));
 });
 
+test('16. Opción B: lectura de "2026-10" → facturar "2026-11" genera factura con periodo_consumo "2026-10" y periodo_facturado "2026-11", ignorando facturas anuladas', async () => {
+  db.clearData();
+
+  const cli = db.agregarCliente({
+    nombre_completo: 'María González',
+    documento: '4567890',
+    direccion: 'Av. San José 100',
+    telefono: '0981111222',
+    email: 'maria@example.com',
+  });
+
+  const medidores = [1, 2, 3, 4].map((num) =>
+    db.agregarMedidor({
+      cliente_id: cli.id,
+      numero_medidor: num,
+      fecha_instalacion: '2026-01-01',
+      direccion: `Lote ${num}`,
+      zona: 'Centro',
+      latitud: -25.34,
+      longitud: -57.51,
+      estado: 'activo',
+    })
+  );
+
+  // Registrar 4 lecturas confirmadas en octubre (2026-10)
+  const lecturasOct = medidores.map((med, idx) =>
+    db.registrarLectura({
+      numeroMedidor: med.numero_medidor,
+      lecturaActual: 100 + (idx + 1) * 10,
+      fechaLectura: '2026-10-25',
+      fotoUrl: `https://example.com/oct-${med.numero_medidor}.jpg`,
+      registradoPor: 'Lector',
+      estado: 'confirmada',
+    }).lectura
+  );
+
+  // Simular 4 facturas viejas ANULADAS (tanto vinculadas a 2026-11 como a las lecturas de 2026-10)
+  const data = db.getFullData();
+  medidores.forEach((med, idx) => {
+    data.facturas.push({
+      id: `fac-anulada-${idx + 1}`,
+      medidor_id: med.id,
+      cliente_id: cli.id,
+      periodo_facturado: '2026-11',
+      periodo_consumo: '2026-10',
+      lectura_id: lecturasOct[idx].id,
+      fecha_emision: '2026-11-01',
+      fecha_vencimiento: '2026-11-30',
+      estado: 'anulada',
+      total: 40800,
+      saldo_pendiente: 0,
+      saldo: 0,
+      es_tercera_boleta: false,
+      alerta_consumo_elevado: false,
+      numero_boleta_medidor: 1,
+      motivo_anulacion: 'Regeneración con Opción B',
+    });
+  });
+
+  // Facturar 2026-11: debe ignorar las 4 facturas anuladas y regenerar las 4 facturas usando lecturas 2026-10
+  const resumen = await db.ejecutarFacturacionMensualAsync('2026-11');
+
+  assert.equal(resumen.totalGeneradas, 4, 'Debe regenerar las 4 facturas de los 4 medidores');
+  assert.equal(resumen.totalOmitidos, 0);
+  assert.equal(resumen.periodo, '2026-11');
+
+  resumen.facturasGeneradas.forEach((fac, idx) => {
+    assert.equal(fac.periodo_consumo, '2026-10');
+    assert.equal(fac.periodo_facturado, '2026-11');
+    assert.equal(fac.lectura_id, lecturasOct[idx].id);
+    assert.equal(fac.fecha_emision, '2026-11-01');
+    assert.equal(fac.fecha_vencimiento, '2026-11-30');
+    assert.equal(fac.numero_boleta_medidor, 2, 'Debe respetar correlativo MAX(1)+1 = 2');
+  });
+});
+
+test('17. Opción B: facturar "2026-11" dos veces → la segunda omite los medidores con motivo "ya_facturado" (no "sin_lectura_confirmada")', async () => {
+  db.clearData();
+
+  const cli = db.agregarCliente({
+    nombre_completo: 'Carlos Benítez',
+    documento: '3344556',
+    direccion: 'Calle Palma 200',
+    telefono: '0982222333',
+    email: 'carlos@example.com',
+  });
+  const med = db.agregarMedidor({
+    cliente_id: cli.id,
+    numero_medidor: 10,
+    fecha_instalacion: '2026-01-01',
+    direccion: 'Calle Palma 200',
+    zona: 'Centro',
+    latitud: -25.34,
+    longitud: -57.51,
+    estado: 'activo',
+  });
+
+  db.registrarLectura({
+    numeroMedidor: med.numero_medidor,
+    lecturaActual: 112,
+    fechaLectura: '2026-10-28',
+    fotoUrl: 'https://example.com/oct-10.jpg',
+    registradoPor: 'Lector',
+    estado: 'confirmada',
+  });
+
+  const primera = await db.ejecutarFacturacionMensualAsync('2026-11');
+  assert.equal(primera.totalGeneradas, 1);
+
+  const segunda = await db.ejecutarFacturacionMensualAsync('2026-11');
+  assert.equal(segunda.totalGeneradas, 0);
+  assert.equal(segunda.totalOmitidos, 1);
+  assert.equal(segunda.medidoresOmitidos[0].medidor_id, med.id);
+  assert.equal(segunda.medidoresOmitidos[0].motivo, 'ya_facturado');
+});
+
+test('18. Opción B: lectura "2026-10" ya facturada + nueva lectura "2026-11" → facturar "2026-12" usa "2026-11" y medidor sin lectura pendiente omite con mensaje correcto', async () => {
+  db.clearData();
+
+  const cli = db.agregarCliente({
+    nombre_completo: 'Juan Pérez',
+    documento: '1122001',
+    direccion: 'Ruta 2 Km 18',
+    telefono: '0983333444',
+    email: 'juan@example.com',
+  });
+
+  const medConNuevaLectura = db.agregarMedidor({
+    cliente_id: cli.id,
+    numero_medidor: 21,
+    fecha_instalacion: '2026-01-01',
+    direccion: 'Lote A',
+    zona: 'Centro',
+    latitud: -25.34,
+    longitud: -57.51,
+    estado: 'activo',
+  });
+
+  const medSinLecturaNueva = db.agregarMedidor({
+    cliente_id: cli.id,
+    numero_medidor: 22,
+    fecha_instalacion: '2026-01-01',
+    direccion: 'Lote B',
+    zona: 'Centro',
+    latitud: -25.35,
+    longitud: -57.52,
+    estado: 'activo',
+  });
+
+  // Ambos medidores tienen lectura en 2026-10
+  db.registrarLectura({
+    numeroMedidor: medConNuevaLectura.numero_medidor,
+    lecturaActual: 110,
+    fechaLectura: '2026-10-25',
+    fotoUrl: 'https://example.com/21-oct.jpg',
+    registradoPor: 'Lector',
+    estado: 'confirmada',
+  });
+  db.registrarLectura({
+    numeroMedidor: medSinLecturaNueva.numero_medidor,
+    lecturaActual: 205,
+    fechaLectura: '2026-10-25',
+    fotoUrl: 'https://example.com/22-oct.jpg',
+    registradoPor: 'Lector',
+    estado: 'confirmada',
+  });
+
+  // Facturar 2026-11 → consume ambas lecturas de 2026-10
+  const loteNov = await db.ejecutarFacturacionMensualAsync('2026-11');
+  assert.equal(loteNov.totalGeneradas, 2);
+
+  // Solo el medidor 21 recibe nueva lectura confirmada en 2026-11 (consumo 15 m³: 110 -> 125)
+  const lecNov21 = db.registrarLectura({
+    numeroMedidor: medConNuevaLectura.numero_medidor,
+    lecturaActual: 125,
+    fechaLectura: '2026-11-25',
+    fotoUrl: 'https://example.com/21-nov.jpg',
+    registradoPor: 'Lector',
+    estado: 'confirmada',
+  }).lectura;
+
+  // Facturar 2026-12:
+  // - Medidor 21 debe usar lectura 2026-11 (NO la 2026-10 ya facturada)
+  // - Medidor 22 no tiene lectura sin facturar → omitir con "sin_lectura_confirmada" y mensaje esperado
+  const loteDic = await db.ejecutarFacturacionMensualAsync('2026-12');
+  assert.equal(loteDic.totalGeneradas, 1);
+  assert.equal(loteDic.totalOmitidos, 1);
+
+  const facDic21 = loteDic.facturasGeneradas[0];
+  assert.equal(facDic21.medidor_id, medConNuevaLectura.id);
+  assert.equal(facDic21.lectura_id, lecNov21.id);
+  assert.equal(facDic21.periodo_consumo, '2026-11');
+  assert.equal(facDic21.periodo_facturado, '2026-12');
+  assert.equal(facDic21.consumo_m3, 15);
+  assert.equal(facDic21.fecha_emision, '2026-12-01');
+  assert.equal(facDic21.fecha_vencimiento, '2026-12-31');
+
+  const omitido22 = loteDic.medidoresOmitidos[0];
+  assert.equal(omitido22.medidor_id, medSinLecturaNueva.id);
+  assert.equal(omitido22.motivo, 'sin_lectura_confirmada');
+  assert.equal(omitido22.detalle, 'No posee lectura confirmada pendiente de facturar.');
+});
+
+test('19. Persistencia Supabase: buildFacturaInsertPayload incluye periodo_consumo y todos los NOT NULL, y el retry por lectura_id/monto_pagado ausente NO elimina periodo_consumo', async () => {
+  const insertedPayloads: Record<string, any>[] = [];
+  let updatedMedidorEstado: string | null = null;
+
+  const mockSupabase = {
+    from(table: string) {
+      if (table === 'facturas') {
+        return {
+          async insert(payload: Record<string, any>) {
+            insertedPayloads.push({ ...payload });
+            if ('lectura_id' in payload) {
+              return {
+                error: {
+                  message: "Could not find the 'lectura_id' column of 'facturas' in the schema cache",
+                },
+              };
+            }
+            if ('monto_pagado' in payload) {
+              return {
+                error: {
+                  message: "Could not find the 'monto_pagado' column of 'facturas' in the schema cache",
+                },
+              };
+            }
+            // Simular restricción NOT NULL real de Postgres sobre periodo_consumo
+            if (!payload.periodo_consumo) {
+              return {
+                error: {
+                  message: 'null value in column "periodo_consumo" of relation "facturas" violates not-null constraint',
+                },
+              };
+            }
+            return { error: null };
+          },
+        };
+      }
+      if (table === 'detalle_factura') {
+        return {
+          async insert() {
+            return { error: null };
+          },
+        };
+      }
+      if (table === 'cargos_pendientes') {
+        return {
+          update() {
+            return {
+              async in() {
+                return { error: null };
+              },
+            };
+          },
+        };
+      }
+      if (table === 'medidores') {
+        return {
+          update(vals: { estado: string }) {
+            updatedMedidorEstado = vals.estado;
+            return {
+              async eq() {
+                return { error: null };
+              },
+            };
+          },
+        };
+      }
+      throw new Error(`Tabla inesperada: ${table}`);
+    },
+  };
+
+  const facturaDemo: Factura = {
+    id: '4b45a8b2-8c4f-48f4-a4d2-0dc23f5c88f8',
+    medidor_id: 'med-1',
+    cliente_id: 'cli-1',
+    periodo_consumo: '2026-10',
+    periodo_facturado: '2026-11',
+    lectura_id: 'lec-1',
+    fecha_emision: '2026-11-01',
+    fecha_vencimiento: '2026-11-30',
+    estado: 'pendiente',
+    total: 40800,
+    saldo_pendiente: 40800,
+    saldo: 40800,
+    monto_pagado: 0,
+    es_tercera_boleta: false,
+    alerta_consumo_elevado: false,
+    texto_alerta_consumo: null,
+    numero_boleta_medidor: 1,
+    lectura_anterior: 100,
+    lectura_actual: 110,
+    consumo_m3: 10,
+  };
+
+  const payload = db.buildFacturaInsertPayload(facturaDemo);
+  assert.equal(payload.periodo_consumo, '2026-10');
+  assert.equal(payload.periodo_facturado, '2026-11');
+  assert.equal(payload.saldo_pendiente, 40800);
+  assert.equal(payload.monto_pagado, 0);
+  assert.equal(payload.numero_boleta_medidor, 1);
+
+  const errMsg = await db.persistirFacturaGeneradaSupabase({
+    factura: facturaDemo,
+    detalles: [
+      {
+        id: 'det-1',
+        factura_id: facturaDemo.id,
+        concepto: 'consumo_agua',
+        descripcion: 'Consumo de agua (10 m³)',
+        monto: 40000,
+      },
+    ],
+    cargosFacturadosIds: [],
+    medidorId: 'med-1',
+    estadoMedidor: 'activo',
+    clientOverride: mockSupabase,
+  });
+
+  assert.equal(errMsg, null, `No debe fallar la persistencia: ${errMsg}`);
+  assert.equal(insertedPayloads.length, 3);
+  // Todos los reintentos deben conservar periodo_consumo
+  insertedPayloads.forEach((attempt) => {
+    assert.equal(attempt.periodo_consumo, '2026-10');
+    assert.equal(attempt.periodo_facturado, '2026-11');
+  });
+  assert.equal('lectura_id' in insertedPayloads[2], false);
+  assert.equal('monto_pagado' in insertedPayloads[2], false);
+  assert.equal(updatedMedidorEstado, 'activo');
+});
 

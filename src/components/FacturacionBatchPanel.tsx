@@ -91,9 +91,10 @@ export const FacturacionBatchPanel: React.FC<FacturacionBatchPanelProps> = ({
             </div>
             <p className="text-xs text-stone-600 max-w-2xl leading-relaxed">
               Procesa todos los medidores en estado <span className="font-semibold text-stone-800">activo</span> o{' '}
-              <span className="font-semibold text-stone-800">moroso</span> que cuenten con lectura confirmada en el
-              período seleccionado, calculando consumo mínimo, deuda anterior, mora, cargos pendientes, cuotas de
-              financiamiento y ERSSAN 2%.
+              <span className="font-semibold text-stone-800">moroso</span> que cuenten con una lectura confirmada
+              pendiente de facturar (toma la lectura confirmada más reciente sin factura activa y usa su período como{' '}
+              <span className="font-semibold text-stone-800">período de consumo</span>), calculando consumo mínimo,
+              deuda anterior, mora, cargos pendientes, cuotas de financiamiento y ERSSAN 2%.
             </p>
           </div>
 

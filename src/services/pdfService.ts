@@ -102,7 +102,11 @@ export function generarBoletaPDF(params: {
 
   y += 4.5;
   doc.text(`Dirección del terreno: ${medidor.direccion}`, margin, y, { maxWidth: 90 });
-  doc.text(`Período facturado: ${factura.periodo_facturado}`, margin + 95, y);
+  const textoPeriodo =
+    factura.periodo_consumo && factura.periodo_consumo !== factura.periodo_facturado
+      ? `Facturado: ${factura.periodo_facturado} (Consumo: ${factura.periodo_consumo})`
+      : `Período facturado: ${factura.periodo_facturado}`;
+  doc.text(textoPeriodo, margin + 95, y);
 
   y += 4.5;
   doc.setFont('helvetica', 'bold');

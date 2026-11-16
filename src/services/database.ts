@@ -42,6 +42,8 @@ import {
 import {
   calcularFacturaIndividual,
   calcularFechaVencimiento,
+  buscarLecturaConfirmadaPendienteDeFacturar,
+  lecturaTieneFacturaActiva,
   ResumenFacturacionMensual,
   MedidorOmitidoFacturacion,
   ErrorFacturacionMedidor,
@@ -439,6 +441,8 @@ class DatabaseEngine {
           cliente_id: f.cliente_id,
           numero_boleta_medidor: Number(f.numero_boleta_medidor),
           periodo_facturado: f.periodo_facturado,
+          periodo_consumo: f.periodo_consumo || null,
+          lectura_id: f.lectura_id || null,
           fecha_emision: f.fecha_emision,
           fecha_vencimiento: f.fecha_vencimiento,
           total: totalNum,
@@ -798,6 +802,8 @@ class DatabaseEngine {
           cargosPendientes: [],
           correlativoPorMedidor: 1,
         });
+        facEne.factura.periodo_consumo = '2025-01';
+        facEne.factura.lectura_id = idLectEne;
 
         // Febrero Factura
         const facFeb = calcularFacturaMedidor({
@@ -813,6 +819,8 @@ class DatabaseEngine {
           cargosPendientes: [],
           correlativoPorMedidor: 2,
         });
+        facFeb.factura.periodo_consumo = '2025-02';
+        facFeb.factura.lectura_id = idLectFeb;
 
         // Si el estado es activo, Enero y Febrero están pagadas
         if (estado === 'activo') {
@@ -866,6 +874,8 @@ class DatabaseEngine {
           fac3ra.factura.estado = 'vencida';
           fac3ra.factura.es_tercera_boleta = true;
           fac3ra.factura.fecha_vencimiento = '2025-03-11';
+          fac3ra.factura.periodo_consumo = '2025-03';
+          fac3ra.factura.lectura_id = idLectMar;
           facturas.push(fac3ra.factura);
         }
 
@@ -1746,8 +1756,13 @@ class DatabaseEngine {
     const enriched = slice.map((l) => {
       const med = medidoresMap.get(l.medidor_id);
       const cli = med ? clientesMap.get(med.cliente_id) : null;
-      const factura = (l.factura_id ? facturasMap.get(l.factura_id) : null) ||
-        this.data.facturas.find((f) => f.medidor_id === l.medidor_id && f.periodo_facturado === l.periodo);
+      const facturaPorId = l.factura_id ? facturasMap.get(l.factura_id) : undefined;
+      const factura =
+        (facturaPorId && facturaPorId.estado !== 'anulada' ? facturaPorId : undefined) ||
+        this.data.facturas.find(
+          (f) => f.estado !== 'anulada' && lecturaTieneFacturaActiva(l, [f])
+        ) ||
+        null;
 
       return {
         ...l,
@@ -1920,36 +1935,83 @@ class DatabaseEngine {
     return true;
   }
 
-  private async persistirFacturaGeneradaSupabase(params: {
+  public buildFacturaInsertPayload(factura: Factura): Record<string, any> {
+    const periodoConsumo = factura.periodo_consumo || factura.periodo_facturado;
+    const saldoPendiente = factura.saldo_pendiente ?? factura.saldo ?? factura.total;
+
+    return {
+      id: factura.id,
+      medidor_id: factura.medidor_id,
+      cliente_id: factura.cliente_id,
+      periodo_consumo: periodoConsumo,
+      periodo_facturado: factura.periodo_facturado,
+      lectura_id: factura.lectura_id ?? null,
+      fecha_emision: factura.fecha_emision,
+      fecha_vencimiento: factura.fecha_vencimiento,
+      estado: factura.estado,
+      total: factura.total,
+      saldo_pendiente: saldoPendiente,
+      monto_pagado: factura.monto_pagado ?? 0,
+      es_tercera_boleta: Boolean(factura.es_tercera_boleta),
+      alerta_consumo_elevado: Boolean(factura.alerta_consumo_elevado),
+      texto_alerta_consumo: factura.texto_alerta_consumo ?? null,
+      numero_boleta_medidor: factura.numero_boleta_medidor ?? 1,
+      lectura_anterior: factura.lectura_anterior ?? null,
+      lectura_actual: factura.lectura_actual ?? null,
+      consumo_m3: factura.consumo_m3 ?? null,
+    };
+  }
+
+  public async persistirFacturaGeneradaSupabase(params: {
     factura: Factura;
     detalles: DetalleFactura[];
     cargosFacturadosIds: string[];
     medidorId: string;
     estadoMedidor: EstadoMedidor;
+    clientOverride?: any;
   }): Promise<string | null> {
-    if (!supabase || !isSupabaseConfigured) return null;
-    const sb = supabase;
+    const sb = params.clientOverride || (isSupabaseConfigured ? supabase : null);
+    if (!sb) return null;
     const { factura, detalles, cargosFacturadosIds, medidorId, estadoMedidor } = params;
 
     // 1. Insertar factura primero (padre requerido por FK de detalle_factura y cargos_pendientes)
-    const { error: facErr } = await sb.from('facturas').insert({
-      id: factura.id,
-      medidor_id: factura.medidor_id,
-      cliente_id: factura.cliente_id,
-      periodo_facturado: factura.periodo_facturado,
-      fecha_emision: factura.fecha_emision,
-      fecha_vencimiento: factura.fecha_vencimiento,
-      estado: factura.estado,
-      total: factura.total,
-      saldo_pendiente: factura.saldo_pendiente ?? factura.saldo ?? factura.total,
-      es_tercera_boleta: factura.es_tercera_boleta,
-      alerta_consumo_elevado: factura.alerta_consumo_elevado,
-      texto_alerta_consumo: factura.texto_alerta_consumo,
-      numero_boleta_medidor: factura.numero_boleta_medidor,
-      lectura_anterior: factura.lectura_anterior,
-      lectura_actual: factura.lectura_actual,
-      consumo_m3: factura.consumo_m3,
-    });
+    const insertPayload = this.buildFacturaInsertPayload(factura);
+
+    const extraerColumnaFaltante = (msg?: string | null): string | null => {
+      if (!msg) return null;
+      const pgrstMatch = msg.match(/Could not find the '([a-zA-Z0-9_]+)' column/i);
+      if (pgrstMatch?.[1]) return pgrstMatch[1];
+      const pgMatch = msg.match(/column "([a-zA-Z0-9_]+)" of relation/i);
+      if (pgMatch?.[1]) return pgMatch[1];
+      const pgDotMatch = msg.match(/column (?:facturas\.)?([a-zA-Z0-9_]+) does not exist/i);
+      if (pgDotMatch?.[1]) return pgDotMatch[1];
+      return null;
+    };
+
+    // Solo columnas opcionales/transicionales pueden omitirse si NO existen en la tabla remota.
+    // NUNCA quitar periodo_consumo porque falte lectura_id o monto_pagado.
+    const columnasTransicionalesOpcionales = new Set(['lectura_id', 'monto_pagado', 'periodo_consumo']);
+    let facErr: { message?: string } | null = null;
+
+    for (let intento = 0; intento < 4; intento++) {
+      const res = await sb.from('facturas').insert({ ...insertPayload });
+      facErr = res.error || null;
+      if (!facErr) break;
+
+      const columnaFaltante = extraerColumnaFaltante(facErr.message);
+      if (
+        columnaFaltante &&
+        columnasTransicionalesOpcionales.has(columnaFaltante) &&
+        columnaFaltante in insertPayload
+      ) {
+        console.warn(
+          `[DatabaseEngine] Columna opcional "${columnaFaltante}" ausente en public.facturas; reintentando inserción sin "${columnaFaltante}".`
+        );
+        delete insertPayload[columnaFaltante];
+        continue;
+      }
+      break;
+    }
 
     if (facErr) {
       console.warn('[DatabaseEngine] Error persistiendo factura en Supabase:', facErr);
@@ -2093,28 +2155,37 @@ class DatabaseEngine {
         continue;
       }
 
-      // 3. Buscar lectura confirmada del período
-      const lecturaMes = this.data.lecturas.find(
-        (l) => l.medidor_id === medidor.id && l.periodo === periodo && l.estado === 'confirmada'
+      // 3. Opción B: Buscar la lectura más reciente en estado "confirmada"
+      //    que NO tenga ninguna factura activa asociada (ignorando facturas anuladas)
+      const lecturaMes = buscarLecturaConfirmadaPendienteDeFacturar(
+        medidor.id,
+        this.data.lecturas,
+        this.data.facturas
       );
 
-      // Si no hay lectura confirmada para ese período: saltear el medidor
+      // Si no hay lectura confirmada pendiente de facturar: saltear el medidor
       if (!lecturaMes) {
         medidoresOmitidos.push({
           medidor_id: medidor.id,
           numero_medidor: medidor.numero_medidor,
           cliente_id: medidor.cliente_id,
           motivo: 'sin_lectura_confirmada',
-          detalle: `No posee lectura confirmada para el período ${periodo}. Requiere toma de lectura antes de facturar.`,
+          detalle: 'No posee lectura confirmada pendiente de facturar.',
         });
         continue;
       }
 
       try {
-        // Historial de lecturas previas
+        // Historial de lecturas previas al período de consumo de lecturaMes
         const lecturasAnteriores = this.data.lecturas
-          .filter((l) => l.medidor_id === medidor.id && l.periodo !== periodo && l.estado === 'confirmada')
-          .sort((a, b) => b.fecha_lectura.localeCompare(a.fecha_lectura));
+          .filter(
+            (l) =>
+              l.medidor_id === medidor.id &&
+              l.estado === 'confirmada' &&
+              l.id !== lecturaMes.id &&
+              l.periodo < lecturaMes.periodo
+          )
+          .sort((a, b) => b.periodo.localeCompare(a.periodo) || b.fecha_lectura.localeCompare(a.fecha_lectura));
 
         // Facturas impagas anteriores
         const facturasImpagas = this.data.facturas.filter(
@@ -2162,8 +2233,9 @@ class DatabaseEngine {
           correlativoPorMedidor: correlativo,
         });
 
-        // Registrar factura en memoria
+        // Registrar factura en memoria y vincular lectura
         this.data.facturas.push(resultado.factura);
+        lecturaMes.factura_id = resultado.factura.id;
         facturasGeneradas.push(resultado.factura);
 
         // Marcar cargos pendientes como facturados
@@ -2579,12 +2651,15 @@ class DatabaseEngine {
 
       // Re-consultar factura y medidor desde Supabase para reflejar exactamente el trigger procesar_pago_factura
       const [facRes, medRes] = await Promise.all([
-        sb.from('facturas').select('estado, saldo_pendiente, fecha_pago').eq('id', factura.id).maybeSingle(),
+        sb.from('facturas').select('*').eq('id', factura.id).maybeSingle(),
         sb.from('medidores').select('estado').eq('id', medidor.id).maybeSingle(),
       ]);
 
       const estadoAnterior = medidor.estado;
-      const nuevoMontoPagado = (factura.monto_pagado || 0) + montoCobrado;
+      const nuevoMontoPagado =
+        facRes.data && facRes.data.monto_pagado !== undefined && facRes.data.monto_pagado !== null
+          ? Number(facRes.data.monto_pagado)
+          : (factura.monto_pagado || 0) + montoCobrado;
       const nuevoSaldo =
         facRes.data && facRes.data.saldo_pendiente !== undefined && facRes.data.saldo_pendiente !== null
           ? Number(facRes.data.saldo_pendiente)
@@ -2793,6 +2868,13 @@ class DatabaseEngine {
       factura.saldo = 0;
     }
 
+    // Liberar vínculo en memoria de cualquier lectura asociada a la factura anulada
+    for (const l of this.data.lecturas) {
+      if (l.factura_id === factura.id || (factura.lectura_id && l.id === factura.lectura_id)) {
+        l.factura_id = null;
+      }
+    }
+
     // 3. Re-evaluar estado del medidor con las facturas activas restantes
     const facturasRestantes = this.data.facturas.filter(
       (f) => f.medidor_id === medidor.id && f.estado !== 'pagada' && f.estado !== 'anulada'
@@ -2947,6 +3029,13 @@ class DatabaseEngine {
     factura.saldo_pendiente = 0;
     factura.saldo = 0;
     medidor.estado = nuevoEstadoMedidor;
+
+    // Liberar vínculo en memoria de la lectura asociada para permitir regenerar
+    for (const l of this.data.lecturas) {
+      if (l.factura_id === factura.id || (factura.lectura_id && l.id === factura.lectura_id)) {
+        l.factura_id = null;
+      }
+    }
 
     this.saveData(this.data);
 

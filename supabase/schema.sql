@@ -304,11 +304,14 @@ CREATE TABLE IF NOT EXISTS public.facturas (
     medidor_id UUID NOT NULL REFERENCES public.medidores(id) ON DELETE RESTRICT,
     cliente_id UUID NOT NULL REFERENCES public.clientes(id) ON DELETE RESTRICT,
     periodo_facturado VARCHAR(7) NOT NULL, -- YYYY-MM o REGULARIZACION
+    periodo_consumo VARCHAR(7), -- YYYY-MM del período de lectura consumido (ej: 2026-10)
+    lectura_id UUID REFERENCES public.lecturas(id) ON DELETE SET NULL,
     fecha_emision DATE NOT NULL DEFAULT CURRENT_DATE,
     fecha_vencimiento DATE NOT NULL,
     estado VARCHAR(20) NOT NULL DEFAULT 'pendiente' CHECK (estado IN ('pendiente', 'pagada', 'vencida', 'anulada')),
     total INTEGER NOT NULL,
     saldo_pendiente INTEGER NOT NULL,
+    monto_pagado INTEGER NOT NULL DEFAULT 0,
     es_tercera_boleta BOOLEAN NOT NULL DEFAULT FALSE,
     alerta_consumo_elevado BOOLEAN NOT NULL DEFAULT FALSE,
     texto_alerta_consumo TEXT,
@@ -323,12 +326,25 @@ CREATE TABLE IF NOT EXISTS public.facturas (
 
 -- Migración idempotente para bases existentes y unicidad por medidor+período (excluyendo anuladas)
 ALTER TABLE public.facturas ADD COLUMN IF NOT EXISTS motivo_anulacion TEXT;
+ALTER TABLE public.facturas ADD COLUMN IF NOT EXISTS periodo_consumo VARCHAR(7);
+ALTER TABLE public.facturas ADD COLUMN IF NOT EXISTS lectura_id UUID REFERENCES public.lecturas(id) ON DELETE SET NULL;
+ALTER TABLE public.facturas ADD COLUMN IF NOT EXISTS monto_pagado INTEGER NOT NULL DEFAULT 0;
+UPDATE public.facturas f
+SET monto_pagado = COALESCE(
+    (SELECT SUM(p.monto) FROM public.pagos p WHERE p.factura_id = f.id),
+    0
+)
+WHERE COALESCE(f.monto_pagado, 0) = 0
+  AND EXISTS (SELECT 1 FROM public.pagos p WHERE p.factura_id = f.id);
 ALTER TABLE public.facturas DROP CONSTRAINT IF EXISTS facturas_estado_check;
 ALTER TABLE public.facturas ADD CONSTRAINT facturas_estado_check CHECK (estado IN ('pendiente', 'pagada', 'vencida', 'anulada'));
 ALTER TABLE public.facturas DROP CONSTRAINT IF EXISTS uq_medidor_periodo_facturado;
 CREATE UNIQUE INDEX IF NOT EXISTS uq_medidor_periodo_facturado
     ON public.facturas (medidor_id, periodo_facturado)
     WHERE estado <> 'anulada';
+CREATE UNIQUE INDEX IF NOT EXISTS uq_facturas_lectura_activa
+    ON public.facturas (lectura_id)
+    WHERE estado <> 'anulada' AND lectura_id IS NOT NULL;
 
 -- ---------------------------------------------------------------------
 -- 8. TABLA DE DETALLE DE FACTURA (Conceptos ordenados 1 al 8)
@@ -467,7 +483,8 @@ BEGIN
         v_nuevo_saldo := GREATEST(0, v_factura.total - v_total_pagado);
 
         UPDATE public.facturas
-        SET saldo_pendiente = v_nuevo_saldo,
+        SET monto_pagado = v_total_pagado,
+            saldo_pendiente = v_nuevo_saldo,
             estado = CASE WHEN v_nuevo_saldo = 0 THEN 'pagada' ELSE estado END,
             fecha_pago = CASE WHEN v_nuevo_saldo = 0 THEN NEW.fecha_pago ELSE fecha_pago END
         WHERE id = NEW.factura_id;
@@ -614,6 +631,7 @@ CREATE INDEX IF NOT EXISTS idx_lecturas_fecha ON public.lecturas(fecha_lectura);
 
 CREATE INDEX IF NOT EXISTS idx_facturas_medidor_id ON public.facturas(medidor_id);
 CREATE INDEX IF NOT EXISTS idx_facturas_cliente_id ON public.facturas(cliente_id);
+CREATE INDEX IF NOT EXISTS idx_facturas_lectura_id ON public.facturas(lectura_id);
 CREATE INDEX IF NOT EXISTS idx_facturas_periodo ON public.facturas(periodo_facturado);
 CREATE INDEX IF NOT EXISTS idx_facturas_estado ON public.facturas(estado);
 CREATE INDEX IF NOT EXISTS idx_facturas_fecha_vencimiento ON public.facturas(fecha_vencimiento);

@@ -636,15 +636,18 @@ export function generarFacturaRegularizacion(params: {
     });
   }
 
+  const fechaEmisionReg = params.fechaEmision || ahora;
   const factura: Factura = {
     id: facturaId,
     medidor_id: params.medidor.id,
     cliente_id: params.clienteId,
     periodo_facturado: 'REGULARIZACION',
-    fecha_emision: params.fechaEmision || ahora,
-    fecha_vencimiento: params.fechaEmision || ahora,
+    periodo_consumo: fechaEmisionReg.slice(0, 7),
+    fecha_emision: fechaEmisionReg,
+    fecha_vencimiento: fechaEmisionReg,
     estado: 'pendiente',
     total,
+    saldo_pendiente: total,
     saldo: total,
     monto_pagado: 0,
     es_tercera_boleta: false,

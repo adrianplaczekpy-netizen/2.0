@@ -280,7 +280,10 @@ export const FacturaDetalleModal: React.FC<FacturaDetalleModalProps> = ({
               </span>
             </div>
             <p className="text-xs text-stone-300 mt-0.5">
-              Medidor N° #{medidor.numero_medidor} · Período {factura.periodo_facturado}
+              Medidor N° #{medidor.numero_medidor} · Período facturado {factura.periodo_facturado}
+              {factura.periodo_consumo && factura.periodo_consumo !== factura.periodo_facturado
+                ? ` · Consumo ${factura.periodo_consumo}`
+                : ''}
             </p>
           </div>
           <button
@@ -623,10 +626,15 @@ export const FacturaDetalleModal: React.FC<FacturaDetalleModalProps> = ({
           {/* Sección de Pagos realizados */}
           {pagos.length > 0 && (
             <div className="space-y-2">
-              <h4 className="font-bold text-stone-800 uppercase tracking-wider text-[11px] flex items-center gap-1.5">
-                <Receipt className="w-3.5 h-3.5 text-emerald-600" />
-                <span>Pagos realizados ({pagos.length})</span>
-              </h4>
+              <div className="flex items-center justify-between gap-2">
+                <h4 className="font-bold text-stone-800 uppercase tracking-wider text-[11px] flex items-center gap-1.5">
+                  <Receipt className="w-3.5 h-3.5 text-emerald-600" />
+                  <span>Pagos realizados ({pagos.length})</span>
+                </h4>
+                <span className="text-[11px] font-bold text-emerald-700 tabular-nums">
+                  Total pagado: {formatGs(montoPagado)}
+                </span>
+              </div>
               <div className="border border-stone-200 rounded-lg overflow-hidden divide-y divide-stone-100">
                 {pagos.map((p) => (
                   <div

@@ -142,7 +142,9 @@ export interface Factura {
   id: string;
   medidor_id: string;
   cliente_id: string;
-  periodo_facturado: string; // YYYY-MM
+  periodo_facturado: string; // YYYY-MM (mes de emisión/vencimiento)
+  periodo_consumo?: string | null; // YYYY-MM (período de la lectura consumida, ej: 2026-10)
+  lectura_id?: string | null; // FK a lecturas.id
   fecha_emision: string;
   fecha_vencimiento: string;
   estado: EstadoFactura;

@@ -308,3 +308,99 @@ test('8. registrarCobroAsync actualiza saldo parcial, completo y getPagosPorFact
   assert.equal(pagos[0].numero_recibo, 'REC-TEST-002');
 });
 
+test('9. Control estricto de monto_pagado, saldo_pendiente y estado en pago total y pago parcial en dos cuotas (36.720 = 20.000 + 16.720)', async () => {
+  db.clearData();
+
+  const cli = db.agregarCliente({
+    nombre_completo: 'Lucía Benítez',
+    documento: '5566778',
+    direccion: 'Av. Mariscal López 900',
+    telefono: '0981777888',
+    email: 'lucia@example.com',
+  });
+  const med1 = db.agregarMedidor({
+    cliente_id: cli.id,
+    numero_medidor: 1,
+    fecha_instalacion: '2026-01-01',
+    direccion: 'Lote 1',
+    zona: 'Centro',
+    latitud: -25.34,
+    longitud: -57.51,
+    estado: 'activo',
+  });
+  const med2 = db.agregarMedidor({
+    cliente_id: cli.id,
+    numero_medidor: 2,
+    fecha_instalacion: '2026-01-01',
+    direccion: 'Lote 2',
+    zona: 'Centro',
+    latitud: -25.35,
+    longitud: -57.52,
+    estado: 'activo',
+  });
+
+  // Medidor 1: 13.5 -> 14 m³ = 54.000 + 2% = 55.080 Gs. (o 13 m³? 13.5 no es entero: 55.080 = 54.000 * 1.02)
+  // Usamos lectura que genere consumo 13 m³ (52.000) o directamente 55.080/36.720 vía facturas reales del período:
+  // Medidor 2: consumo <= 9 m³ -> mínimo 36.000 + 2% ERSSAN = 36.720 Gs.
+  db.registrarLectura({
+    numeroMedidor: 1,
+    lecturaActual: 14, // 14 * 4.000 = 56.000 + 2% = 57.120 Gs. (pago total completo)
+    fechaLectura: '2026-10-25',
+    fotoUrl: 'https://example.com/m1-oct.jpg',
+    estado: 'confirmada',
+  });
+  db.registrarLectura({
+    numeroMedidor: 2,
+    lecturaActual: 5, // mínimo 36.000 + 2% ERSSAN = 36.720 Gs.
+    fechaLectura: '2026-10-25',
+    fotoUrl: 'https://example.com/m2-oct.jpg',
+    estado: 'confirmada',
+  });
+
+  const lote = await db.ejecutarFacturacionMensualAsync('2026-11', '2026-11-01');
+  assert.equal(lote.totalGeneradas, 2);
+
+  const fac1 = lote.facturasGeneradas.find((f) => f.medidor_id === med1.id)!;
+  const fac2 = lote.facturasGeneradas.find((f) => f.medidor_id === med2.id)!;
+  assert.equal(fac2.total, 36720);
+  assert.equal(fac1.monto_pagado, 0);
+  assert.equal(fac2.monto_pagado, 0);
+
+  // 1) Pago total de Factura 1 → monto_pagado = total, saldo_pendiente = 0, estado = 'pagada'
+  const resTotal = await db.registrarCobroAsync({
+    facturaId: fac1.id,
+    monto: fac1.total,
+    metodoPago: 'efectivo',
+    fechaPago: '2026-11-10',
+    numeroRecibo: 'REC-PAGO-TOTAL-1',
+  });
+  assert.equal(resTotal.factura.monto_pagado, fac1.total);
+  assert.equal(resTotal.factura.saldo_pendiente, 0);
+  assert.equal(resTotal.factura.estado, 'pagada');
+
+  // 2) Pago parcial de 20.000 sobre Factura 2 (36.720) → monto_pagado = 20.000, saldo_pendiente = 16.720, estado = 'pendiente'
+  const resParcial1 = await db.registrarCobroAsync({
+    facturaId: fac2.id,
+    monto: 20000,
+    metodoPago: 'transferencia',
+    fechaPago: '2026-11-12',
+    numeroRecibo: 'REC-PAGO-PARCIAL-1',
+  });
+  assert.equal(resParcial1.factura.monto_pagado, 20000);
+  assert.equal(resParcial1.factura.saldo_pendiente, 16720);
+  assert.equal(resParcial1.factura.estado, 'pendiente');
+
+  // 3) Segundo pago de 16.720 sobre Factura 2 → monto_pagado = 36.720, saldo_pendiente = 0, estado = 'pagada'
+  const resParcial2 = await db.registrarCobroAsync({
+    facturaId: fac2.id,
+    monto: 16720,
+    metodoPago: 'efectivo',
+    fechaPago: '2026-11-15',
+    numeroRecibo: 'REC-PAGO-PARCIAL-2',
+  });
+  assert.equal(resParcial2.factura.monto_pagado, 36720);
+  assert.equal(resParcial2.factura.saldo_pendiente, 0);
+  assert.equal(resParcial2.factura.estado, 'pagada');
+});
+
+

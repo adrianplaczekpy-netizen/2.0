@@ -136,6 +136,70 @@ export function calcularFechaVencimiento(
 }
 
 /**
+ * Determina si una lectura confirmada ya está asociada a una factura activa (estado !== 'anulada').
+ * Ignora explícitamente facturas anuladas para permitir regenerar/refacturar lecturas liberadas.
+ */
+export function lecturaTieneFacturaActiva(lectura: Lectura, facturas: Factura[]): boolean {
+  return facturas.some((f) => {
+    if (f.estado === 'anulada') return false;
+    if (f.medidor_id !== lectura.medidor_id) return false;
+
+    // 1. Vínculo directo por lectura_id (criterio principal y más limpio)
+    if (f.lectura_id) {
+      return f.lectura_id === lectura.id;
+    }
+
+    // 2. Respaldo por factura_id en memoria
+    if (lectura.factura_id && f.id === lectura.factura_id) {
+      return true;
+    }
+
+    // 3. Vínculo por periodo_consumo explícito
+    if (f.periodo_consumo) {
+      return f.periodo_consumo === lectura.periodo;
+    }
+
+    // 4. Respaldo para facturas históricas anteriores a Opción B (sin lectura_id ni periodo_consumo):
+    //    solo se considera coincidencia si coincide período facturado y valores de lectura (si existen)
+    if (f.periodo_facturado !== lectura.periodo) return false;
+    if (f.lectura_anterior !== undefined && f.lectura_actual !== undefined) {
+      return (
+        f.lectura_anterior === lectura.lectura_anterior &&
+        f.lectura_actual === lectura.lectura_actual
+      );
+    }
+    return true;
+  });
+}
+
+/**
+ * Opción B: Busca la lectura más reciente en estado 'confirmada' de un medidor
+ * que NO tenga ninguna factura activa asociada (estado !== 'anulada').
+ */
+export function buscarLecturaConfirmadaPendienteDeFacturar(
+  medidorId: string,
+  lecturas: Lectura[],
+  facturas: Factura[]
+): Lectura | null {
+  const candidatas = lecturas
+    .filter(
+      (l) =>
+        l.medidor_id === medidorId &&
+        l.estado === 'confirmada' &&
+        !lecturaTieneFacturaActiva(l, facturas)
+    )
+    .sort((a, b) => {
+      const cmpPeriodo = (b.periodo || '').localeCompare(a.periodo || '');
+      if (cmpPeriodo !== 0) return cmpPeriodo;
+      const cmpFecha = (b.fecha_lectura || '').localeCompare(a.fecha_lectura || '');
+      if (cmpFecha !== 0) return cmpFecha;
+      return (b.fecha_registro || '').localeCompare(a.fecha_registro || '');
+    });
+
+  return candidatas[0] || null;
+}
+
+/**
  * Orden estricto de cálculo de factura por medidor:
  * a) Consumo de agua (con mínimo aplicado)
  * b) Deuda anterior (saldos de boletas previas pendientes o vencidas)
@@ -407,14 +471,23 @@ export function calcularFacturaIndividual(params: CalculoFacturaParams): Calculo
 
   // -------------------------------------------------------------------------
   // 6. Alerta de consumo elevado
-  // Al menos 3 meses de historial de lecturas confirmadas
+  // Al menos 3 meses de historial de lecturas confirmadas previas al consumo actual
   // -------------------------------------------------------------------------
   let alertaConsumoElevado = false;
   let textoAlertaConsumo: string | null = null;
 
+  const lecturaIdActual = params.lecturaMes?.id;
+  const periodoConsumoActual = params.lecturaMes?.periodo || params.periodo;
+
   const lecturasPrevias = (params.lecturasAnteriores || [])
-    .filter((l) => l.medidor_id === params.medidor.id && l.periodo !== params.periodo && l.estado === 'confirmada')
-    .sort((a, b) => b.fecha_lectura.localeCompare(a.fecha_lectura));
+    .filter(
+      (l) =>
+        l.medidor_id === params.medidor.id &&
+        l.estado === 'confirmada' &&
+        (!lecturaIdActual || l.id !== lecturaIdActual) &&
+        l.periodo < periodoConsumoActual
+    )
+    .sort((a, b) => b.periodo.localeCompare(a.periodo) || b.fecha_lectura.localeCompare(a.fecha_lectura));
 
   if (consumoM3 > 0 && lecturasPrevias.length >= 3) {
     const ultimos3Consumos = lecturasPrevias.slice(0, 3).map((l) => l.consumo_m3);
@@ -435,6 +508,8 @@ export function calcularFacturaIndividual(params: CalculoFacturaParams): Calculo
     medidor_id: params.medidor.id,
     cliente_id: params.clienteId,
     periodo_facturado: params.periodo,
+    periodo_consumo: params.lecturaMes ? params.lecturaMes.periodo : null,
+    lectura_id: params.lecturaMes ? params.lecturaMes.id : null,
     fecha_emision: fechaEmision,
     fecha_vencimiento: fechaVencimiento,
     estado: 'pendiente',

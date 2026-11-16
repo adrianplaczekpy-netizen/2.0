@@ -89,7 +89,10 @@ export const FacturacionView: React.FC = () => {
   }
 
   const lecturas = db.getFullData().lecturas;
-  const defaultPeriodoBatch = resolverPeriodoPorDefecto(lecturas);
+  const periodoLecturas = resolverPeriodoPorDefecto(lecturas);
+  const now = new Date();
+  const mesActual = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}`;
+  const defaultPeriodoBatch = mesActual > periodoLecturas ? mesActual : periodoLecturas;
   const { periodosDisponibles } = db.getPeriodosFacturacion();
 
   const limit = 50;
@@ -489,7 +492,12 @@ export const FacturacionView: React.FC = () => {
                               #{f.numeroMedidor}
                             </td>
                             <td className="px-3 py-3 font-medium text-stone-700 whitespace-nowrap tabular-nums">
-                              {f.periodo_facturado}
+                              <span>{f.periodo_facturado}</span>
+                              {f.periodo_consumo && f.periodo_consumo !== f.periodo_facturado && (
+                                <span className="block text-[10px] text-stone-500">
+                                  Consumo {f.periodo_consumo}
+                                </span>
+                              )}
                             </td>
                             <td className="px-3 py-3 text-stone-600 whitespace-nowrap tabular-nums">
                               {f.fecha_emision}
@@ -604,7 +612,11 @@ export const FacturacionView: React.FC = () => {
                         <div>
                           <span className="text-[11px] text-stone-500 block">Período / Vencimiento</span>
                           <span className="font-semibold text-stone-800 tabular-nums">
-                            {f.periodo_facturado} · {f.fecha_vencimiento}
+                            {f.periodo_facturado}
+                            {f.periodo_consumo && f.periodo_consumo !== f.periodo_facturado
+                              ? ` (Consumo ${f.periodo_consumo})`
+                              : ''}{' '}
+                            · {f.fecha_vencimiento}
                           </span>
                         </div>
                         <div className="text-right">

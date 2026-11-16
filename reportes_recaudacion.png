@@ -1,0 +1,84 @@
+- generic [ref=f3e3]:
+  - complementary [ref=f3e4]:
+    - generic [ref=f3e10]:
+      - generic [ref=f3e11]: AguateríaPY
+      - generic [ref=f3e12]: Sistema Interno
+    - navigation [ref=f3e13]:
+      - button "Dashboard" [ref=f3e14]
+      - button "Clientes" [ref=f3e21]
+      - button "Medidores" [ref=f3e28]
+      - button "Lecturas" [ref=f3e33]
+      - button "Otros Trabajos" [ref=f3e38]
+      - button "Mapa" [ref=f3e42]
+      - button "Facturación" [ref=f3e47]
+      - button "Pagos" [ref=f3e52]
+      - button "Reportes" [ref=f3e56]
+    - generic [ref=f3e60]:
+      - generic [ref=f3e61]:
+        - generic [ref=f3e62]: "Escala:"
+        - generic [ref=f3e63]: 1.000 Medidores
+      - generic [ref=f3e64]:
+        - generic [ref=f3e65]: "Marco:"
+        - generic [ref=f3e66]: Normativa ERSSAN
+      - button "/admin/configuracion/tarifas" [ref=f3e68]
+  - generic [ref=f3e72]:
+    - banner [ref=f3e73]:
+      - generic [ref=f3e74]: Aguatería — Gestión Operativa
+      - generic [ref=f3e76]:
+        - generic [ref=f3e77]:
+          - generic [ref=f3e78]: "Rol:"
+          - button "admin" [ref=f3e79]
+          - button "cobrador" [ref=f3e80]
+          - button "lectura" [ref=f3e81]
+        - button "Restablecer datos demo" [ref=f3e82]
+        - generic [ref=f3e86]:
+          - generic [ref=f3e87]:
+            - generic [ref=f3e88]:
+              - generic [ref=f3e89]: Ing. Carlos Mendoza
+              - generic [ref=f3e90]: Admin
+            - generic [ref=f3e91]: admin@aguateria.py
+          - button "Salir" [ref=f3e92]
+    - main [ref=f3e97]:
+      - generic [ref=f3e1437]:
+        - generic [ref=f3e1438]:
+          - generic [ref=f3e1439]:
+            - heading "Reportes Operativos y Financieros" [level=1] [ref=f3e1440]
+            - paragraph [ref=f3e1441]: Auditoría de cortes pendientes, morosidad acumulada, consumos por zona geográfica y recaudación regulada por ERSSAN
+          - button "Imprimir Reporte" [ref=f3e1443] [cursor=pointer]
+        - generic [ref=f3e1449]:
+          - button "Medidores a Cortar (37)" [ref=f3e1450] [cursor=pointer]
+          - button "Medidores Morosos (100)" [ref=f3e1458] [cursor=pointer]
+          - button "Cortados a Reconectar (36)" [ref=f3e1462] [cursor=pointer]
+          - button "Consumos por Zona (8)" [ref=f3e1468] [cursor=pointer]
+          - button "Recaudación del Mes" [active] [ref=f3e1473] [cursor=pointer]
+          - button "Cargos a Facturar (50)" [ref=f3e1477] [cursor=pointer]
+        - generic [ref=f3e2014]:
+          - generic [ref=f3e2015]:
+            - generic [ref=f3e2016]:
+              - generic [ref=f3e2017]: Recaudación Total Registrada
+              - generic [ref=f3e2018]: 115.078 Gs.
+              - paragraph [ref=f3e2019]: Total cobrado en ventanilla y cuentas (1 recibos emitidos)
+            - generic [ref=f3e2020]:
+              - generic [ref=f3e2021]: Deuda Exigible en la Red
+              - generic [ref=f3e2022]: 44.193.043 Gs.
+              - paragraph [ref=f3e2023]: Suma total de facturas pendientes y mora congelada
+            - generic [ref=f3e2024]:
+              - generic [ref=f3e2025]: Aporte Regulador ERSSAN (2%)
+              - generic [ref=f3e2026]: 2.302 Gs.
+              - paragraph [ref=f3e2027]: Canon regulatorio del 2% calculado sobre lo percibido
+          - generic [ref=f3e2028]:
+            - heading "Desglose de Cobranza por Medio de Pago" [level=3] [ref=f3e2029]
+            - generic [ref=f3e2033]:
+              - generic [ref=f3e2034]:
+                - generic [ref=f3e2035]: Efectivo en Caja
+                - text: 115.078 Gs.
+                - generic [ref=f3e2036]: Cobranza directa en mostrador
+              - generic [ref=f3e2037]:
+                - generic [ref=f3e2038]: Transferencias Bancarias
+                - text: 0 Gs.
+                - generic [ref=f3e2039]: Pagos electrónicos SIPAP / QR
+              - generic [ref=f3e2040]:
+                - generic [ref=f3e2041]: Cheques al Día
+                - text: 0 Gs.
+                - generic [ref=f3e2042]: Comprobantes bancarios
+    - contentinfo [ref=f3e259]: AguateríaPY — Sistema Operativo de Gestión de Agua Potable • Diseñado conforme a normativas de ERSSAN (Paraguay)

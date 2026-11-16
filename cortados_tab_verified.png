@@ -1,0 +1,520 @@
+- generic [ref=f3e3]:
+  - complementary [ref=f3e4]:
+    - generic [ref=f3e10]:
+      - generic [ref=f3e11]: AguateríaPY
+      - generic [ref=f3e12]: Sistema Interno
+    - navigation [ref=f3e13]:
+      - button "Dashboard" [ref=f3e14]
+      - button "Clientes" [ref=f3e21]
+      - button "Medidores" [ref=f3e28]
+      - button "Lecturas" [ref=f3e33]
+      - button "Otros Trabajos" [ref=f3e38]
+      - button "Mapa" [ref=f3e42]
+      - button "Facturación" [ref=f3e47]
+      - button "Pagos" [ref=f3e52]
+      - button "Reportes" [ref=f3e56]
+    - generic [ref=f3e60]:
+      - generic [ref=f3e61]:
+        - generic [ref=f3e62]: "Escala:"
+        - generic [ref=f3e63]: 1.000 Medidores
+      - generic [ref=f3e64]:
+        - generic [ref=f3e65]: "Marco:"
+        - generic [ref=f3e66]: Normativa ERSSAN
+      - button "/admin/configuracion/tarifas" [ref=f3e68]
+  - generic [ref=f3e72]:
+    - banner [ref=f3e73]:
+      - generic [ref=f3e74]: Aguatería — Gestión Operativa
+      - generic [ref=f3e76]:
+        - generic [ref=f3e77]:
+          - generic [ref=f3e78]: "Rol:"
+          - button "admin" [ref=f3e79]
+          - button "cobrador" [ref=f3e80]
+          - button "lectura" [ref=f3e81]
+        - button "Restablecer datos demo" [ref=f3e82]
+        - generic [ref=f3e86]:
+          - generic [ref=f3e87]:
+            - generic [ref=f3e88]:
+              - generic [ref=f3e89]: Ing. Carlos Mendoza
+              - generic [ref=f3e90]: Admin
+            - generic [ref=f3e91]: admin@aguateria.py
+          - button "Salir" [ref=f3e92]
+    - main [ref=f3e97]:
+      - generic [ref=f3e260]:
+        - generic [ref=f3e261]:
+          - generic [ref=f3e262]:
+            - heading "Reportes Operativos y Financieros" [level=1] [ref=f3e263]
+            - paragraph [ref=f3e264]: Auditoría de cortes pendientes, morosidad acumulada, consumos por zona geográfica y recaudación regulada por ERSSAN
+          - button "Imprimir Reporte" [ref=f3e266] [cursor=pointer]
+        - generic [ref=f3e1033]:
+          - generic [ref=f3e1034]: Corte físico confirmado para Medidor N° 90. El medidor pasa a estado CORTADO con mora congelada en 9.000 Gs.. No recibirá facturas mensuales.
+          - button "Cerrar" [ref=f3e1039] [cursor=pointer]
+        - generic [ref=f3e272]:
+          - button "Medidores a Cortar (36)" [ref=f3e1040] [cursor=pointer]
+          - button "Medidores Morosos (100)" [ref=f3e281] [cursor=pointer]
+          - button "Cortados a Reconectar (37)" [active] [ref=f3e1041] [cursor=pointer]
+          - button "Consumos por Zona (8)" [ref=f3e291] [cursor=pointer]
+          - button "Recaudación del Mes" [ref=f3e296] [cursor=pointer]
+          - button "Cargos a Facturar (50)" [ref=f3e300] [cursor=pointer]
+        - generic [ref=f3e1042]:
+          - generic [ref=f3e1043]:
+            - generic [ref=f3e1044]:
+              - heading "Medidores Cortados Pendientes de Reconexión" [level=2] [ref=f3e1045]
+              - paragraph [ref=f3e1051]: Servicio suspendido físicamente. La mora se encuentra congelada. Requiere abono de deuda + reconexión (60.000 Gs) + ERSSAN (2%).
+            - generic [ref=f3e1052]: 37 medidores cortados
+          - table [ref=f3e1054]:
+            - rowgroup [ref=f3e1055]:
+              - row [ref=f3e1056]:
+                - columnheader "N° Medidor" [ref=f3e1057]
+                - columnheader "Titular" [ref=f3e1058]
+                - columnheader "Fecha de Corte" [ref=f3e1059]
+                - columnheader "Facturas Vencidas" [ref=f3e1060]
+                - columnheader "Mora Congelada" [ref=f3e1061]
+                - columnheader "Tasa Reconexión" [ref=f3e1062]
+                - columnheader "Liquidación Total" [ref=f3e1063]
+                - columnheader "Acción" [ref=f3e1064]
+            - rowgroup [ref=f3e1065]:
+              - row [ref=f3e1066]:
+                - cell "#90" [ref=f3e1067]
+                - cell "Rubén Darío Valdez Valdez Calle General Genes N° 165, Barrio San José" [ref=f3e1068]:
+                  - generic [ref=f3e1069]: Rubén Darío Valdez Valdez
+                  - text: Calle General Genes N° 165, Barrio San José
+                - cell "2026-11-06" [ref=f3e1070]
+                - cell "409.797 Gs." [ref=f3e1071]
+                - cell "9.000 Gs." [ref=f3e1072]
+                - cell "60.000 Gs." [ref=f3e1073]
+                - cell "488.373 Gs." [ref=f3e1074]
+                - cell [ref=f3e1075]:
+                  - button "Reconectar y Cobrar" [ref=f3e1076] [cursor=pointer]
+              - row [ref=f3e1081]:
+                - cell "#94" [ref=f3e1082]
+                - cell "Carlos Alberto Barreto Villalba Calle 10 de Agosto N° 168 - Salón 2 / Terreno Trasero, Cuarto Barrio - Luque" [ref=f3e1083]:
+                  - generic [ref=f3e1084]: Carlos Alberto Barreto Villalba
+                  - text: Calle 10 de Agosto N° 168 - Salón 2 / Terreno Trasero, Cuarto Barrio - Luque
+                - cell "2025-02-14" [ref=f3e1085]
+                - cell "387.927 Gs." [ref=f3e1086]
+                - cell "9.000 Gs." [ref=f3e1087]
+                - cell "60.000 Gs." [ref=f3e1088]
+                - cell "466.066 Gs." [ref=f3e1089]
+                - cell [ref=f3e1090]:
+                  - button "Reconectar y Cobrar" [ref=f3e1091] [cursor=pointer]
+              - row [ref=f3e1096]:
+                - cell "#95" [ref=f3e1097]
+                - cell "Carmen Beatriz López Cáceres Av. San José N° 169, Posta Ybycuá - Capiatá" [ref=f3e1098]:
+                  - generic [ref=f3e1099]: Carmen Beatriz López Cáceres
+                  - text: Av. San José N° 169, Posta Ybycuá - Capiatá
+                - cell "2025-02-14" [ref=f3e1100]
+                - cell "425.221 Gs." [ref=f3e1101]
+                - cell "9.000 Gs." [ref=f3e1102]
+                - cell "60.000 Gs." [ref=f3e1103]
+                - cell "504.105 Gs." [ref=f3e1104]
+                - cell [ref=f3e1105]:
+                  - button "Reconectar y Cobrar" [ref=f3e1106] [cursor=pointer]
+              - row [ref=f3e1111]:
+                - cell "#96" [ref=f3e1112]
+                - cell "Miguel Ángel Rojas Rojas Calle Cerro Corá N° 170, Ruta 2 Km 18" [ref=f3e1113]:
+                  - generic [ref=f3e1114]: Miguel Ángel Rojas Rojas
+                  - text: Calle Cerro Corá N° 170, Ruta 2 Km 18
+                - cell "2025-02-14" [ref=f3e1115]
+                - cell "396.580 Gs." [ref=f3e1116]
+                - cell "9.000 Gs." [ref=f3e1117]
+                - cell "60.000 Gs." [ref=f3e1118]
+                - cell "474.892 Gs." [ref=f3e1119]
+                - cell [ref=f3e1120]:
+                  - button "Reconectar y Cobrar" [ref=f3e1121] [cursor=pointer]
+              - row [ref=f3e1126]:
+                - cell "#97" [ref=f3e1127]
+                - cell "Miguel Ángel Rojas Rojas Calle Cerro Corá N° 170 - Salón 2 / Terreno Trasero, Ruta 2 Km 18" [ref=f3e1128]:
+                  - generic [ref=f3e1129]: Miguel Ángel Rojas Rojas
+                  - text: Calle Cerro Corá N° 170 - Salón 2 / Terreno Trasero, Ruta 2 Km 18
+                - cell "2025-02-14" [ref=f3e1130]
+                - cell "458.353 Gs." [ref=f3e1131]
+                - cell "9.000 Gs." [ref=f3e1132]
+                - cell "60.000 Gs." [ref=f3e1133]
+                - cell "537.900 Gs." [ref=f3e1134]
+                - cell [ref=f3e1135]:
+                  - button "Reconectar y Cobrar" [ref=f3e1136] [cursor=pointer]
+              - row [ref=f3e1141]:
+                - cell "#194" [ref=f3e1142]
+                - cell "Rubén Darío González González Av. Avelino Martínez N° 240, Cuarto Barrio - Luque" [ref=f3e1143]:
+                  - generic [ref=f3e1144]: Rubén Darío González González
+                  - text: Av. Avelino Martínez N° 240, Cuarto Barrio - Luque
+                - cell "2025-02-14" [ref=f3e1145]
+                - cell "462.349 Gs." [ref=f3e1146]
+                - cell "9.000 Gs." [ref=f3e1147]
+                - cell "60.000 Gs." [ref=f3e1148]
+                - cell "541.976 Gs." [ref=f3e1149]
+                - cell [ref=f3e1150]:
+                  - button "Reconectar y Cobrar" [ref=f3e1151] [cursor=pointer]
+              - row [ref=f3e1156]:
+                - cell "#195" [ref=f3e1157]
+                - cell "Rubén Darío González González Av. Avelino Martínez N° 240 - Salón 2 / Terreno Trasero, Cuarto Barrio - Luque" [ref=f3e1158]:
+                  - generic [ref=f3e1159]: Rubén Darío González González
+                  - text: Av. Avelino Martínez N° 240 - Salón 2 / Terreno Trasero, Cuarto Barrio - Luque
+                - cell "2025-02-14" [ref=f3e1160]
+                - cell "433.710 Gs." [ref=f3e1161]
+                - cell "9.000 Gs." [ref=f3e1162]
+                - cell "60.000 Gs." [ref=f3e1163]
+                - cell "512.764 Gs." [ref=f3e1164]
+                - cell [ref=f3e1165]:
+                  - button "Reconectar y Cobrar" [ref=f3e1166] [cursor=pointer]
+              - row [ref=f3e1171]:
+                - cell "#196" [ref=f3e1172]
+                - cell "Rubén Darío González González Av. Avelino Martínez N° 240 - Salón 3 / Terreno Trasero, Cuarto Barrio - Luque" [ref=f3e1173]:
+                  - generic [ref=f3e1174]: Rubén Darío González González
+                  - text: Av. Avelino Martínez N° 240 - Salón 3 / Terreno Trasero, Cuarto Barrio - Luque
+                - cell "2025-02-14" [ref=f3e1175]
+                - cell "371.115 Gs." [ref=f3e1176]
+                - cell "9.000 Gs." [ref=f3e1177]
+                - cell "60.000 Gs." [ref=f3e1178]
+                - cell "448.917 Gs." [ref=f3e1179]
+                - cell [ref=f3e1180]:
+                  - button "Reconectar y Cobrar" [ref=f3e1181] [cursor=pointer]
+              - row [ref=f3e1186]:
+                - cell "#197" [ref=f3e1187]
+                - cell "Fátima Soledad Duarte Cardozo Calle Fortín Arce N° 241, Posta Ybycuá - Capiatá" [ref=f3e1188]:
+                  - generic [ref=f3e1189]: Fátima Soledad Duarte Cardozo
+                  - text: Calle Fortín Arce N° 241, Posta Ybycuá - Capiatá
+                - cell "2025-02-14" [ref=f3e1190]
+                - cell "391.760 Gs." [ref=f3e1191]
+                - cell "9.000 Gs." [ref=f3e1192]
+                - cell "60.000 Gs." [ref=f3e1193]
+                - cell "469.975 Gs." [ref=f3e1194]
+                - cell [ref=f3e1195]:
+                  - button "Reconectar y Cobrar" [ref=f3e1196] [cursor=pointer]
+              - row [ref=f3e1201]:
+                - cell "#294" [ref=f3e1202]
+                - cell "Rosa Isabel Rojas Rojas Calle Julia Miranda Cueto N° 310 - Salón 3 / Terreno Trasero, Reducto" [ref=f3e1203]:
+                  - generic [ref=f3e1204]: Rosa Isabel Rojas Rojas
+                  - text: Calle Julia Miranda Cueto N° 310 - Salón 3 / Terreno Trasero, Reducto
+                - cell "2025-02-14" [ref=f3e1205]
+                - cell "346.472 Gs." [ref=f3e1206]
+                - cell "9.000 Gs." [ref=f3e1207]
+                - cell "60.000 Gs." [ref=f3e1208]
+                - cell "423.781 Gs." [ref=f3e1209]
+                - cell [ref=f3e1210]:
+                  - button "Reconectar y Cobrar" [ref=f3e1211] [cursor=pointer]
+              - row [ref=f3e1216]:
+                - cell "#295" [ref=f3e1217]
+                - cell "Jorge Antonio Franco Benítez Calle 10 de Agosto N° 311, Barcequillo" [ref=f3e1218]:
+                  - generic [ref=f3e1219]: Jorge Antonio Franco Benítez
+                  - text: Calle 10 de Agosto N° 311, Barcequillo
+                - cell "2025-02-14" [ref=f3e1220]
+                - cell "391.596 Gs." [ref=f3e1221]
+                - cell "9.000 Gs." [ref=f3e1222]
+                - cell "60.000 Gs." [ref=f3e1223]
+                - cell "469.808 Gs." [ref=f3e1224]
+                - cell [ref=f3e1225]:
+                  - button "Reconectar y Cobrar" [ref=f3e1226] [cursor=pointer]
+              - row [ref=f3e1231]:
+                - cell "#296" [ref=f3e1232]
+                - cell "Lourdes Patricia Giménez Gómez Av. San José N° 312, Cuarto Barrio - Luque" [ref=f3e1233]:
+                  - generic [ref=f3e1234]: Lourdes Patricia Giménez Gómez
+                  - text: Av. San José N° 312, Cuarto Barrio - Luque
+                - cell "2025-02-14" [ref=f3e1235]
+                - cell "362.957 Gs." [ref=f3e1236]
+                - cell "9.000 Gs." [ref=f3e1237]
+                - cell "60.000 Gs." [ref=f3e1238]
+                - cell "440.596 Gs." [ref=f3e1239]
+                - cell [ref=f3e1240]:
+                  - button "Reconectar y Cobrar" [ref=f3e1241] [cursor=pointer]
+              - row [ref=f3e1246]:
+                - cell "#297" [ref=f3e1247]
+                - cell "Lourdes Patricia Giménez Gómez Av. San José N° 312 - Salón 2 / Terreno Trasero, Cuarto Barrio - Luque" [ref=f3e1248]:
+                  - generic [ref=f3e1249]: Lourdes Patricia Giménez Gómez
+                  - text: Av. San José N° 312 - Salón 2 / Terreno Trasero, Cuarto Barrio - Luque
+                - cell "2025-02-14" [ref=f3e1250]
+                - cell "502.249 Gs." [ref=f3e1251]
+                - cell "9.000 Gs." [ref=f3e1252]
+                - cell "60.000 Gs." [ref=f3e1253]
+                - cell "582.674 Gs." [ref=f3e1254]
+                - cell [ref=f3e1255]:
+                  - button "Reconectar y Cobrar" [ref=f3e1256] [cursor=pointer]
+              - row [ref=f3e1261]:
+                - cell "#394" [ref=f3e1262]
+                - cell "Mirtha Graciela Caballero Martínez Calle San Lorenzo N° 382, Reducto" [ref=f3e1263]:
+                  - generic [ref=f3e1264]: Mirtha Graciela Caballero Martínez
+                  - text: Calle San Lorenzo N° 382, Reducto
+                - cell "2025-02-14" [ref=f3e1265]
+                - cell "404.247 Gs." [ref=f3e1266]
+                - cell "9.000 Gs." [ref=f3e1267]
+                - cell "60.000 Gs." [ref=f3e1268]
+                - cell "482.712 Gs." [ref=f3e1269]
+                - cell [ref=f3e1270]:
+                  - button "Reconectar y Cobrar" [ref=f3e1271] [cursor=pointer]
+              - row [ref=f3e1276]:
+                - cell "#395" [ref=f3e1277]
+                - cell "Héctor Fabián Benítez Aquino Av. Avelino Martínez N° 383, Barcequillo" [ref=f3e1278]:
+                  - generic [ref=f3e1279]: Héctor Fabián Benítez Aquino
+                  - text: Av. Avelino Martínez N° 383, Barcequillo
+                - cell "2025-02-14" [ref=f3e1280]
+                - cell "375.606 Gs." [ref=f3e1281]
+                - cell "9.000 Gs." [ref=f3e1282]
+                - cell "60.000 Gs." [ref=f3e1283]
+                - cell "453.498 Gs." [ref=f3e1284]
+                - cell [ref=f3e1285]:
+                  - button "Reconectar y Cobrar" [ref=f3e1286] [cursor=pointer]
+              - row [ref=f3e1291]:
+                - cell "#396" [ref=f3e1292]
+                - cell "José Ramón Villalba Giménez Calle Fortín Arce N° 384, Cuarto Barrio - Luque" [ref=f3e1293]:
+                  - generic [ref=f3e1294]: José Ramón Villalba Giménez
+                  - text: Calle Fortín Arce N° 384, Cuarto Barrio - Luque
+                - cell "2025-02-14" [ref=f3e1295]
+                - cell "412.899 Gs." [ref=f3e1296]
+                - cell "9.000 Gs." [ref=f3e1297]
+                - cell "60.000 Gs." [ref=f3e1298]
+                - cell "491.537 Gs." [ref=f3e1299]
+                - cell [ref=f3e1300]:
+                  - button "Reconectar y Cobrar" [ref=f3e1301] [cursor=pointer]
+              - row [ref=f3e1306]:
+                - cell "#397" [ref=f3e1307]
+                - cell "José Ramón Villalba Giménez Calle Fortín Arce N° 384 - Salón 2 / Terreno Trasero, Cuarto Barrio - Luque" [ref=f3e1308]:
+                  - generic [ref=f3e1309]: José Ramón Villalba Giménez
+                  - text: Calle Fortín Arce N° 384 - Salón 2 / Terreno Trasero, Cuarto Barrio - Luque
+                - cell "2025-02-14" [ref=f3e1310]
+                - cell "474.671 Gs." [ref=f3e1311]
+                - cell "9.000 Gs." [ref=f3e1312]
+                - cell "60.000 Gs." [ref=f3e1313]
+                - cell "554.544 Gs." [ref=f3e1314]
+                - cell [ref=f3e1315]:
+                  - button "Reconectar y Cobrar" [ref=f3e1316] [cursor=pointer]
+              - row [ref=f3e1321]:
+                - cell "#494" [ref=f3e1322]
+                - cell "Gladys Noemí Cardozo López Calle Julia Miranda Cueto N° 453, Barrio San José" [ref=f3e1323]:
+                  - generic [ref=f3e1324]: Gladys Noemí Cardozo López
+                  - text: Calle Julia Miranda Cueto N° 453, Barrio San José
+                - cell "2025-02-14" [ref=f3e1325]
+                - cell "412.736 Gs." [ref=f3e1326]
+                - cell "9.000 Gs." [ref=f3e1327]
+                - cell "60.000 Gs." [ref=f3e1328]
+                - cell "491.371 Gs." [ref=f3e1329]
+                - cell [ref=f3e1330]:
+                  - button "Reconectar y Cobrar" [ref=f3e1331] [cursor=pointer]
+              - row [ref=f3e1336]:
+                - cell "#495" [ref=f3e1337]
+                - cell "Diego Manuel Acosta Caballero Calle 10 de Agosto N° 454, Reducto" [ref=f3e1338]:
+                  - generic [ref=f3e1339]: Diego Manuel Acosta Caballero
+                  - text: Calle 10 de Agosto N° 454, Reducto
+                - cell "2025-02-14" [ref=f3e1340]
+                - cell "450.028 Gs." [ref=f3e1341]
+                - cell "9.000 Gs." [ref=f3e1342]
+                - cell "60.000 Gs." [ref=f3e1343]
+                - cell "529.409 Gs." [ref=f3e1344]
+                - cell [ref=f3e1345]:
+                  - button "Reconectar y Cobrar" [ref=f3e1346] [cursor=pointer]
+              - row [ref=f3e1351]:
+                - cell "#496" [ref=f3e1352]
+                - cell "Ramona Antonia Romero Romero Av. San José N° 455, Barcequillo" [ref=f3e1353]:
+                  - generic [ref=f3e1354]: Ramona Antonia Romero Romero
+                  - text: Av. San José N° 455, Barcequillo
+                - cell "2025-02-14" [ref=f3e1355]
+                - cell "421.389 Gs." [ref=f3e1356]
+                - cell "9.000 Gs." [ref=f3e1357]
+                - cell "60.000 Gs." [ref=f3e1358]
+                - cell "500.197 Gs." [ref=f3e1359]
+                - cell [ref=f3e1360]:
+                  - button "Reconectar y Cobrar" [ref=f3e1361] [cursor=pointer]
+              - row [ref=f3e1366]:
+                - cell "#497" [ref=f3e1367]
+                - cell "Gustavo Adolfo Gómez Barreto Calle Cerro Corá N° 456, Cuarto Barrio - Luque" [ref=f3e1368]:
+                  - generic [ref=f3e1369]: Gustavo Adolfo Gómez Barreto
+                  - text: Calle Cerro Corá N° 456, Cuarto Barrio - Luque
+                - cell "2025-02-14" [ref=f3e1370]
+                - cell "358.793 Gs." [ref=f3e1371]
+                - cell "9.000 Gs." [ref=f3e1372]
+                - cell "60.000 Gs." [ref=f3e1373]
+                - cell "436.349 Gs." [ref=f3e1374]
+                - cell [ref=f3e1375]:
+                  - button "Reconectar y Cobrar" [ref=f3e1376] [cursor=pointer]
+              - row [ref=f3e1381]:
+                - cell "#594" [ref=f3e1382]
+                - cell "Juan Carlos Valdez Valdez Calle San Lorenzo N° 525, Barrio San José" [ref=f3e1383]:
+                  - generic [ref=f3e1384]: Juan Carlos Valdez Valdez
+                  - text: Calle San Lorenzo N° 525, Barrio San José
+                - cell "2025-02-14" [ref=f3e1385]
+                - cell "576.918 Gs." [ref=f3e1386]
+                - cell "9.000 Gs." [ref=f3e1387]
+                - cell "60.000 Gs." [ref=f3e1388]
+                - cell "658.836 Gs." [ref=f3e1389]
+                - cell [ref=f3e1390]:
+                  - button "Reconectar y Cobrar" [ref=f3e1391] [cursor=pointer]
+              - row [ref=f3e1396]:
+                - cell "#595" [ref=f3e1397]
+                - cell "Ana Gladys Martínez Vera Av. Avelino Martínez N° 526, Reducto" [ref=f3e1398]:
+                  - generic [ref=f3e1399]: Ana Gladys Martínez Vera
+                  - text: Av. Avelino Martínez N° 526, Reducto
+                - cell "2025-02-14" [ref=f3e1400]
+                - cell "358.630 Gs." [ref=f3e1401]
+                - cell "9.000 Gs." [ref=f3e1402]
+                - cell "60.000 Gs." [ref=f3e1403]
+                - cell "436.183 Gs." [ref=f3e1404]
+                - cell [ref=f3e1405]:
+                  - button "Reconectar y Cobrar" [ref=f3e1406] [cursor=pointer]
+              - row [ref=f3e1411]:
+                - cell "#596" [ref=f3e1412]
+                - cell "Luis Fernando Fernández Franco Calle Fortín Arce N° 527, Barcequillo" [ref=f3e1413]:
+                  - generic [ref=f3e1414]: Luis Fernando Fernández Franco
+                  - text: Calle Fortín Arce N° 527, Barcequillo
+                - cell "2025-02-14" [ref=f3e1415]
+                - cell "379.275 Gs." [ref=f3e1416]
+                - cell "9.000 Gs." [ref=f3e1417]
+                - cell "60.000 Gs." [ref=f3e1418]
+                - cell "457.241 Gs." [ref=f3e1419]
+                - cell [ref=f3e1420]:
+                  - button "Reconectar y Cobrar" [ref=f3e1421] [cursor=pointer]
+              - row [ref=f3e1426]:
+                - cell "#597" [ref=f3e1427]
+                - cell "Gladys Noemí Barreto Villalba Calle General Genes N° 528, Cuarto Barrio - Luque" [ref=f3e1428]:
+                  - generic [ref=f3e1429]: Gladys Noemí Barreto Villalba
+                  - text: Calle General Genes N° 528, Cuarto Barrio - Luque
+                - cell "2025-02-14" [ref=f3e1430]
+                - cell "416.568 Gs." [ref=f3e1431]
+                - cell "9.000 Gs." [ref=f3e1432]
+                - cell "60.000 Gs." [ref=f3e1433]
+                - cell "495.279 Gs." [ref=f3e1434]
+                - cell [ref=f3e1435]:
+                  - button "Reconectar y Cobrar" [ref=f3e1436] [cursor=pointer]
+              - row [ref=f3e1441]:
+                - cell "#694" [ref=f3e1442]
+                - cell "Silvia Maribel Gómez Barreto Calle Julia Miranda Cueto N° 596 - Salón 2 / Terreno Trasero, Zona Centro San Lorenzo" [ref=f3e1443]:
+                  - generic [ref=f3e1444]: Silvia Maribel Gómez Barreto
+                  - text: Calle Julia Miranda Cueto N° 596 - Salón 2 / Terreno Trasero, Zona Centro San Lorenzo
+                - cell "2025-02-14" [ref=f3e1445]
+                - cell "354.632 Gs." [ref=f3e1446]
+                - cell "9.000 Gs." [ref=f3e1447]
+                - cell "60.000 Gs." [ref=f3e1448]
+                - cell "432.105 Gs." [ref=f3e1449]
+                - cell [ref=f3e1450]:
+                  - button "Reconectar y Cobrar" [ref=f3e1451] [cursor=pointer]
+              - row [ref=f3e1456]:
+                - cell "#695" [ref=f3e1457]
+                - cell "Hugo Daniel Cáceres Duarte Calle 10 de Agosto N° 597, Barrio San José" [ref=f3e1458]:
+                  - generic [ref=f3e1459]: Hugo Daniel Cáceres Duarte
+                  - text: Calle 10 de Agosto N° 597, Barrio San José
+                - cell "2025-02-14" [ref=f3e1460]
+                - cell "391.925 Gs." [ref=f3e1461]
+                - cell "9.000 Gs." [ref=f3e1462]
+                - cell "60.000 Gs." [ref=f3e1463]
+                - cell "470.144 Gs." [ref=f3e1464]
+                - cell [ref=f3e1465]:
+                  - button "Reconectar y Cobrar" [ref=f3e1466] [cursor=pointer]
+              - row [ref=f3e1471]:
+                - cell "#696" [ref=f3e1472]
+                - cell "Norma Cristina Vera Acosta Av. San José N° 598, Reducto" [ref=f3e1473]:
+                  - generic [ref=f3e1474]: Norma Cristina Vera Acosta
+                  - text: Av. San José N° 598, Reducto
+                - cell "2025-02-14" [ref=f3e1475]
+                - cell "363.284 Gs." [ref=f3e1476]
+                - cell "9.000 Gs." [ref=f3e1477]
+                - cell "60.000 Gs." [ref=f3e1478]
+                - cell "440.930 Gs." [ref=f3e1479]
+                - cell [ref=f3e1480]:
+                  - button "Reconectar y Cobrar" [ref=f3e1481] [cursor=pointer]
+              - row [ref=f3e1486]:
+                - cell "#697" [ref=f3e1487]
+                - cell "Oscar Raúl Aquino Fernández Calle Cerro Corá N° 599, Barcequillo" [ref=f3e1488]:
+                  - generic [ref=f3e1489]: Oscar Raúl Aquino Fernández
+                  - text: Calle Cerro Corá N° 599, Barcequillo
+                - cell "2025-02-14" [ref=f3e1490]
+                - cell "425.058 Gs." [ref=f3e1491]
+                - cell "9.000 Gs." [ref=f3e1492]
+                - cell "60.000 Gs." [ref=f3e1493]
+                - cell "503.939 Gs." [ref=f3e1494]
+                - cell [ref=f3e1495]:
+                  - button "Reconectar y Cobrar" [ref=f3e1496] [cursor=pointer]
+              - row [ref=f3e1501]:
+                - cell "#794" [ref=f3e1502]
+                - cell "Carlos Alberto Barreto Villalba Calle San Lorenzo N° 668 - Salón 2 / Terreno Trasero, Zona Centro San Lorenzo" [ref=f3e1503]:
+                  - generic [ref=f3e1504]: Carlos Alberto Barreto Villalba
+                  - text: Calle San Lorenzo N° 668 - Salón 2 / Terreno Trasero, Zona Centro San Lorenzo
+                - cell "2025-02-14" [ref=f3e1505]
+                - cell "429.054 Gs." [ref=f3e1506]
+                - cell "9.000 Gs." [ref=f3e1507]
+                - cell "60.000 Gs." [ref=f3e1508]
+                - cell "508.015 Gs." [ref=f3e1509]
+                - cell [ref=f3e1510]:
+                  - button "Reconectar y Cobrar" [ref=f3e1511] [cursor=pointer]
+              - row [ref=f3e1516]:
+                - cell "#795" [ref=f3e1517]
+                - cell "Carmen Beatriz López Cáceres Av. Avelino Martínez N° 669, Barrio San José" [ref=f3e1518]:
+                  - generic [ref=f3e1519]: Carmen Beatriz López Cáceres
+                  - text: Av. Avelino Martínez N° 669, Barrio San José
+                - cell "2025-02-14" [ref=f3e1520]
+                - cell "400.414 Gs." [ref=f3e1521]
+                - cell "9.000 Gs." [ref=f3e1522]
+                - cell "60.000 Gs." [ref=f3e1523]
+                - cell "478.802 Gs." [ref=f3e1524]
+                - cell [ref=f3e1525]:
+                  - button "Reconectar y Cobrar" [ref=f3e1526] [cursor=pointer]
+              - row [ref=f3e1531]:
+                - cell "#796" [ref=f3e1532]
+                - cell "Miguel Ángel Rojas Rojas Calle Fortín Arce N° 670, Reducto" [ref=f3e1533]:
+                  - generic [ref=f3e1534]: Miguel Ángel Rojas Rojas
+                  - text: Calle Fortín Arce N° 670, Reducto
+                - cell "2025-02-14" [ref=f3e1535]
+                - cell "437.706 Gs." [ref=f3e1536]
+                - cell "9.000 Gs." [ref=f3e1537]
+                - cell "60.000 Gs." [ref=f3e1538]
+                - cell "516.840 Gs." [ref=f3e1539]
+                - cell [ref=f3e1540]:
+                  - button "Reconectar y Cobrar" [ref=f3e1541] [cursor=pointer]
+              - row [ref=f3e1546]:
+                - cell "#797" [ref=f3e1547]
+                - cell "Miguel Ángel Rojas Rojas Calle Fortín Arce N° 670 - Salón 2 / Terreno Trasero, Reducto" [ref=f3e1548]:
+                  - generic [ref=f3e1549]: Miguel Ángel Rojas Rojas
+                  - text: Calle Fortín Arce N° 670 - Salón 2 / Terreno Trasero, Reducto
+                - cell "2025-02-14" [ref=f3e1550]
+                - cell "475.000 Gs." [ref=f3e1551]
+                - cell "9.000 Gs." [ref=f3e1552]
+                - cell "60.000 Gs." [ref=f3e1553]
+                - cell "554.880 Gs." [ref=f3e1554]
+                - cell [ref=f3e1555]:
+                  - button "Reconectar y Cobrar" [ref=f3e1556] [cursor=pointer]
+              - row [ref=f3e1561]:
+                - cell "#894" [ref=f3e1562]
+                - cell "Rubén Darío González González Calle 10 de Agosto N° 740, Zona Centro San Lorenzo" [ref=f3e1563]:
+                  - generic [ref=f3e1564]: Rubén Darío González González
+                  - text: Calle 10 de Agosto N° 740, Zona Centro San Lorenzo
+                - cell "2025-02-14" [ref=f3e1565]
+                - cell "413.063 Gs." [ref=f3e1566]
+                - cell "9.000 Gs." [ref=f3e1567]
+                - cell "60.000 Gs." [ref=f3e1568]
+                - cell "491.704 Gs." [ref=f3e1569]
+                - cell [ref=f3e1570]:
+                  - button "Reconectar y Cobrar" [ref=f3e1571] [cursor=pointer]
+              - row [ref=f3e1576]:
+                - cell "#895" [ref=f3e1577]
+                - cell "Rubén Darío González González Calle 10 de Agosto N° 740 - Salón 2 / Terreno Trasero, Zona Centro San Lorenzo" [ref=f3e1578]:
+                  - generic [ref=f3e1579]: Rubén Darío González González
+                  - text: Calle 10 de Agosto N° 740 - Salón 2 / Terreno Trasero, Zona Centro San Lorenzo
+                - cell "2025-02-14" [ref=f3e1580]
+                - cell "474.837 Gs." [ref=f3e1581]
+                - cell "9.000 Gs." [ref=f3e1582]
+                - cell "60.000 Gs." [ref=f3e1583]
+                - cell "554.714 Gs." [ref=f3e1584]
+                - cell [ref=f3e1585]:
+                  - button "Reconectar y Cobrar" [ref=f3e1586] [cursor=pointer]
+              - row [ref=f3e1591]:
+                - cell "#896" [ref=f3e1592]
+                - cell "Rubén Darío González González Calle 10 de Agosto N° 740 - Salón 3 / Terreno Trasero, Zona Centro San Lorenzo" [ref=f3e1593]:
+                  - generic [ref=f3e1594]: Rubén Darío González González
+                  - text: Calle 10 de Agosto N° 740 - Salón 3 / Terreno Trasero, Zona Centro San Lorenzo
+                - cell "2025-02-14" [ref=f3e1595]
+                - cell "346.308 Gs." [ref=f3e1596]
+                - cell "9.000 Gs." [ref=f3e1597]
+                - cell "60.000 Gs." [ref=f3e1598]
+                - cell "423.614 Gs." [ref=f3e1599]
+                - cell [ref=f3e1600]:
+                  - button "Reconectar y Cobrar" [ref=f3e1601] [cursor=pointer]
+              - row [ref=f3e1606]:
+                - cell "#897" [ref=f3e1607]
+                - cell "Fátima Soledad Duarte Cardozo Av. San José N° 741, Barrio San José" [ref=f3e1608]:
+                  - generic [ref=f3e1609]: Fátima Soledad Duarte Cardozo
+                  - text: Av. San José N° 741, Barrio San José
+                - cell "2025-02-14" [ref=f3e1610]
+                - cell "366.953 Gs." [ref=f3e1611]
+                - cell "9.000 Gs." [ref=f3e1612]
+                - cell "60.000 Gs." [ref=f3e1613]
+                - cell "444.672 Gs." [ref=f3e1614]
+                - cell [ref=f3e1615]:
+                  - button "Reconectar y Cobrar" [ref=f3e1616] [cursor=pointer]
+    - contentinfo [ref=f3e259]: AguateríaPY — Sistema Operativo de Gestión de Agua Potable • Diseñado conforme a normativas de ERSSAN (Paraguay)

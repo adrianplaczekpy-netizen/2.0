@@ -1,0 +1,663 @@
+/**
+ * @license
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+import React, { useState } from 'react';
+import { useAuth } from '../context/AuthContext';
+import { db } from '../services/database';
+import { formatGs } from '../services/billingRules';
+import { Factura, MetodoPago, Medidor, Cliente } from '../types';
+import { generarBoletaPDF } from '../services/pdfService';
+import {
+  CreditCard,
+  Search,
+  CheckCircle2,
+  AlertTriangle,
+  Receipt,
+  FileDown,
+  Printer,
+  DollarSign,
+  User,
+  MapPin,
+  RefreshCw,
+  X,
+  Sparkles,
+} from 'lucide-react';
+import { ModalRegistrarReconexion } from './ModalRegistrarReconexion';
+
+export const CajaCobranzasView: React.FC = () => {
+  const { user } = useAuth();
+  const [searchTerm, setSearchTerm] = useState('');
+  const [selectedMedidorId, setSelectedMedidorId] = useState<string | null>(null);
+  const [metodoPago, setMetodoPago] = useState<MetodoPago>('efectivo');
+
+  // Modal para cobro total o parcial
+  const [modalCobroFactura, setModalCobroFactura] = useState<Factura | null>(null);
+  const [modalReconexionOpen, setModalReconexionOpen] = useState(false);
+  const [montoACobrarInput, setMontoACobrarInput] = useState<string>('');
+  const [errorCobro, setErrorCobro] = useState<string | null>(null);
+
+  const [comprobantePago, setComprobantePago] = useState<{
+    recibo: string;
+    monto: number;
+    metodo: string;
+    facturaId: string;
+    medidorNum: number;
+    clienteNombre: string;
+    saldoRestante: number;
+    medidorPasoAActivo: boolean;
+    salioDePendienteCorte?: boolean;
+    nuevoEstado?: string;
+  } | null>(null);
+
+  const [mensajeExito, setMensajeExito] = useState<string | null>(null);
+
+  // Buscar medidores / clientes
+  const medidoresRes = db.getMedidores({ search: searchTerm, limit: 15 });
+  const medidorActual = selectedMedidorId
+    ? db.getMedidorDetalle(selectedMedidorId)
+    : medidoresRes.medidores.length > 0
+    ? db.getMedidorDetalle(medidoresRes.medidores[0].id)
+    : null;
+
+  const abrirModalCobro = (factura: Factura) => {
+    const saldo = factura.saldo !== undefined ? factura.saldo : factura.total;
+    setModalCobroFactura(factura);
+    setMontoACobrarInput(String(saldo));
+    setErrorCobro(null);
+  };
+
+  const handleConfirmarCobro = () => {
+    if (!modalCobroFactura || !medidorActual?.medidor || !medidorActual?.cliente) return;
+
+    const montoNum = parseInt(montoACobrarInput.replace(/\D/g, ''), 10);
+    const saldo = modalCobroFactura.saldo !== undefined ? modalCobroFactura.saldo : modalCobroFactura.total;
+
+    if (isNaN(montoNum) || montoNum <= 0) {
+      setErrorCobro('El monto a cobrar debe ser mayor a 0 Gs.');
+      return;
+    }
+
+    if (montoNum > saldo) {
+      setErrorCobro(`El monto (${formatGs(montoNum)}) no puede superar el saldo pendiente (${formatGs(saldo)}).`);
+      return;
+    }
+
+    try {
+      const res = db.registrarCobro({
+        facturaId: modalCobroFactura.id,
+        monto: montoNum,
+        metodoPago,
+        cobradorId: user?.id || 'Cobrador de Caja',
+      });
+
+      setComprobantePago({
+        recibo: res.pago.numero_recibo || 'REC-001',
+        monto: res.pago.monto,
+        metodo: metodoPago,
+        facturaId: modalCobroFactura.id,
+        medidorNum: medidorActual.medidor.numero_medidor,
+        clienteNombre: medidorActual.cliente.nombre_completo,
+        saldoRestante: res.saldoRestante,
+        medidorPasoAActivo: res.medidorPasoAActivo,
+        salioDePendienteCorte: res.salioDePendienteCorte,
+        nuevoEstado: res.estadoMedidorActualizado,
+      });
+
+      const esPagoTotal = res.saldoRestante === 0;
+      let msg = `Cobro de ${formatGs(montoNum)} registrado con éxito (${esPagoTotal ? 'Pago Total' : `Pago Parcial - Saldo restante: ${formatGs(res.saldoRestante)}`}).`;
+      if (res.medidorPasoAActivo) {
+        msg += ` ¡Todas las facturas están saldadas! El Medidor N° ${medidorActual.medidor.numero_medidor} pasa a estado ACTIVO automáticamente.`;
+      } else if (res.salioDePendienteCorte) {
+        msg += ` Se abonó la 3ra boleta que originó el aviso de corte. El Medidor N° ${medidorActual.medidor.numero_medidor} deja de estar en pendiente de corte (estado actualizado a ${res.estadoMedidorActualizado.toUpperCase()}).`;
+      }
+
+      setMensajeExito(msg);
+      setModalCobroFactura(null);
+    } catch (e: any) {
+      setErrorCobro(e.message);
+    }
+  };
+
+  const handleDescargarBoleta = (factura: Factura) => {
+    if (!medidorActual || !medidorActual.cliente || !medidorActual.medidor) return;
+    const doc = generarBoletaPDF({
+      factura,
+      cliente: medidorActual.cliente,
+      medidor: medidorActual.medidor,
+      detalles: factura.detalles,
+    });
+    doc.save(`Boleta_${factura.periodo_facturado}_Med_${medidorActual.medidor.numero_medidor}.pdf`);
+  };
+
+  const handleCobrarReconexion = () => {
+    if (!medidorActual || !medidorActual.medidor || !medidorActual.cliente || !medidorActual.liquidacionReconexion) return;
+    try {
+      const { facturaRegularizacion } = db.confirmarReconexion(medidorActual.medidor.id, 'Caja Central');
+      setComprobantePago({
+        recibo: `REC-REG-${Date.now().toString().slice(-5)}`,
+        monto: facturaRegularizacion.total,
+        metodo: 'Efectivo / Caja',
+        facturaId: facturaRegularizacion.id,
+        medidorNum: medidorActual.medidor.numero_medidor,
+        clienteNombre: medidorActual.cliente.nombre_completo,
+        saldoRestante: 0,
+        medidorPasoAActivo: true,
+      });
+      setMensajeExito(
+        `Medidor N° ${medidorActual.medidor.numero_medidor} regularizado y reconectado exitosamente. Pasa a estado ACTIVO. Total cobrado: ${formatGs(facturaRegularizacion.total)}.`
+      );
+      setSelectedMedidorId(medidorActual.medidor.id);
+    } catch (e: any) {
+      alert(`Error en reconexión: ${e.message}`);
+    }
+  };
+
+  return (
+    <div className="space-y-6">
+      {/* Header */}
+      <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2 border-b border-stone-200 pb-4">
+        <div>
+          <h1 className="text-2xl font-bold tracking-tight text-stone-900">Módulo de Caja y Cobranzas</h1>
+          <p className="text-sm text-stone-600">
+            Cobro en ventanilla de pagos totales o parciales, emisión de recibos y activación automática de medidores saldados
+          </p>
+        </div>
+      </div>
+
+      {/* Buscador de cliente / medidor */}
+      <div className="bg-white p-4 rounded-xl border border-stone-200 shadow-xs">
+        <label className="text-xs font-bold text-stone-700 uppercase tracking-wider block mb-1.5">
+          Buscar por N° de Medidor, Documento (C.I.) o Nombre de Cliente
+        </label>
+        <div className="relative">
+          <input
+            type="text"
+            value={searchTerm}
+            onChange={(e) => setSearchTerm(e.target.value)}
+            placeholder="Ej: 15, 1420500, o González..."
+            className="w-full pl-10 pr-4 py-3 bg-stone-50 border border-stone-300 rounded-lg text-sm text-stone-900 focus:outline-hidden focus:border-blue-600 focus:bg-white"
+          />
+          <Search className="w-5 h-5 text-stone-400 absolute left-3 top-3" />
+        </div>
+
+        {/* Resultados rápidos de búsqueda */}
+        {medidoresRes.medidores.length > 0 && (
+          <div className="mt-3 flex flex-wrap gap-2 pt-2 border-t border-stone-100">
+            {medidoresRes.medidores.map((m) => (
+              <button
+                key={m.id}
+                type="button"
+                onClick={() => {
+                  setSelectedMedidorId(m.id);
+                  setMensajeExito(null);
+                  setComprobantePago(null);
+                }}
+                className={`text-xs px-3 py-1.5 rounded-lg border font-medium transition-all text-left flex items-center gap-1.5 cursor-pointer ${
+                  medidorActual?.medidor?.id === m.id
+                    ? 'bg-stone-900 text-white border-stone-900'
+                    : 'bg-white text-stone-800 border-stone-200 hover:bg-stone-50'
+                }`}
+              >
+                <span className="font-bold">Med. #{m.numero_medidor}</span>
+                <span className="opacity-80">({m.clienteNombre.split(' ')[0]})</span>
+                {m.deudaTotal > 0 && (
+                  <span className="ml-1 text-[10px] px-1.5 py-0.2 rounded-sm bg-red-100 text-red-800 font-bold">
+                    {formatGs(m.deudaTotal)}
+                  </span>
+                )}
+              </button>
+            ))}
+          </div>
+        )}
+      </div>
+
+      {mensajeExito && (
+        <div className="p-4 bg-emerald-50 border border-emerald-300 rounded-xl text-emerald-900 text-sm font-semibold flex items-center justify-between">
+          <div className="flex items-center gap-2">
+            <CheckCircle2 className="w-5 h-5 text-emerald-600 shrink-0" />
+            <span>{mensajeExito}</span>
+          </div>
+          <button
+            type="button"
+            onClick={() => setMensajeExito(null)}
+            className="text-xs text-emerald-800 hover:underline cursor-pointer ml-3 shrink-0"
+          >
+            Cerrar
+          </button>
+        </div>
+      )}
+
+      {/* Comprobante de Cobro Reciente */}
+      {comprobantePago && (
+        <div className="bg-white border-2 border-emerald-500 rounded-2xl p-5 shadow-xs space-y-3">
+          <div className="flex items-center justify-between border-b border-stone-100 pb-2">
+            <div className="flex items-center gap-2 text-emerald-800 font-bold">
+              <Receipt className="w-5 h-5 text-emerald-600" />
+              <span>RECIBO OFICIAL DE COBRANZA</span>
+            </div>
+            <span className="font-mono text-xs font-bold bg-emerald-100 text-emerald-800 px-2 py-0.5 rounded-sm">
+              N° {comprobantePago.recibo}
+            </span>
+          </div>
+
+          <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 text-xs">
+            <div>
+              <span className="text-stone-500 block">Cliente</span>
+              <span className="font-bold text-stone-900">{comprobantePago.clienteNombre}</span>
+            </div>
+            <div>
+              <span className="text-stone-500 block">Medidor Pagado</span>
+              <span className="font-bold text-stone-900">N° {comprobantePago.medidorNum}</span>
+            </div>
+            <div>
+              <span className="text-stone-500 block">Método de Cobro</span>
+              <span className="font-bold uppercase text-stone-900">{comprobantePago.metodo}</span>
+            </div>
+            <div>
+              <span className="text-stone-500 block">Monto Percibido</span>
+              <span className="font-black text-emerald-700 text-base">{formatGs(comprobantePago.monto)}</span>
+            </div>
+          </div>
+
+          {comprobantePago.saldoRestante > 0 ? (
+            <div className="p-2.5 bg-amber-50 border border-amber-200 rounded-lg text-amber-800 text-xs font-semibold flex items-center justify-between">
+              <span>Pago parcial registrado. Saldo pendiente en esta boleta:</span>
+              <span className="font-black">{formatGs(comprobantePago.saldoRestante)}</span>
+            </div>
+          ) : (
+            <div className="p-2.5 bg-emerald-50 border border-emerald-200 rounded-lg text-emerald-800 text-xs font-semibold flex items-center gap-1.5">
+              <CheckCircle2 className="w-4 h-4 text-emerald-600 shrink-0" />
+              <span>Factura completamente saldada (Saldo 0 Gs.).</span>
+            </div>
+          )}
+
+          {comprobantePago.medidorPasoAActivo && (
+            <div className="p-2.5 bg-blue-50 border border-blue-200 rounded-lg text-blue-900 text-xs font-bold flex items-center gap-2">
+              <Sparkles className="w-4 h-4 text-blue-600 shrink-0" />
+              <span>
+                Todas las boletas del Medidor N° {comprobantePago.medidorNum} han sido liquidadas. El medidor pasa a estado ACTIVO automáticamente.
+              </span>
+            </div>
+          )}
+
+          {comprobantePago.salioDePendienteCorte && !comprobantePago.medidorPasoAActivo && (
+            <div className="p-2.5 bg-amber-50 border border-amber-200 rounded-lg text-amber-900 text-xs font-bold flex items-center gap-2">
+              <CheckCircle2 className="w-4 h-4 text-amber-600 shrink-0" />
+              <span>
+                3ra boleta cancelada. El Medidor N° {comprobantePago.medidorNum} ya no está pendiente de corte (estado actualizado a {comprobantePago.nuevoEstado?.toUpperCase()}).
+              </span>
+            </div>
+          )}
+
+          <div className="pt-2 flex justify-end gap-2 border-t border-stone-100">
+            <button
+              type="button"
+              onClick={() => window.print()}
+              className="px-3 py-1.5 bg-stone-100 hover:bg-stone-200 text-stone-800 text-xs font-bold rounded-lg flex items-center gap-1.5 cursor-pointer"
+            >
+              <Printer className="w-4 h-4" />
+              <span>Imprimir Recibo</span>
+            </button>
+          </div>
+        </div>
+      )}
+
+      {/* Detalle del Medidor Seleccionado y sus Boletas Independientes */}
+      {medidorActual && medidorActual.medidor && medidorActual.cliente ? (
+        <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
+          {/* Tarjeta lateral: Datos del Cliente y Medidor */}
+          <div className="bg-white rounded-xl border border-stone-200 p-5 space-y-4 h-fit">
+            <div className="flex items-center justify-between border-b border-stone-100 pb-3">
+              <div>
+                <span className="text-xs font-bold uppercase text-stone-500">Unidad de Medición</span>
+                <h2 className="text-xl font-black text-stone-900">
+                  Medidor N° {medidorActual.medidor.numero_medidor}
+                </h2>
+              </div>
+              <span
+                className={`text-xs px-2.5 py-1 rounded-full font-bold uppercase ${
+                  medidorActual.medidor.estado === 'activo'
+                    ? 'bg-emerald-100 text-emerald-800'
+                    : medidorActual.medidor.estado === 'moroso'
+                    ? 'bg-amber-100 text-amber-800'
+                    : 'bg-red-100 text-red-800'
+                }`}
+              >
+                {medidorActual.medidor.estado.replace('_', ' ')}
+              </span>
+            </div>
+
+            <div className="space-y-2 text-xs">
+              <div>
+                <span className="text-stone-500 block">Titular del Contrato</span>
+                <span className="font-bold text-stone-900 text-sm">
+                  {medidorActual.cliente.nombre_completo}
+                </span>
+                <span className="text-stone-600 block">C.I. / RUC: {medidorActual.cliente.documento}</span>
+              </div>
+
+              <div>
+                <span className="text-stone-500 block">Dirección del Medidor</span>
+                <span className="text-stone-800">{medidorActual.medidor.direccion}</span>
+                <span className="text-stone-500 block">Zona: {medidorActual.medidor.zona}</span>
+              </div>
+
+              <div className="pt-2 border-t border-stone-100">
+                <span className="text-stone-500 block">Teléfono de Contacto</span>
+                <span className="text-stone-800">{medidorActual.cliente.telefono}</span>
+              </div>
+            </div>
+
+            {/* Resumen de Deuda */}
+            <div className="p-4 bg-stone-50 rounded-xl border border-stone-200 space-y-2">
+              <div className="flex justify-between text-xs text-stone-600">
+                <span>Boletas pendientes:</span>
+                <span className="font-bold text-stone-900">
+                  {medidorActual.facturas.filter((f) => f.estado !== 'pagada').length}
+                </span>
+              </div>
+
+              <div className="flex justify-between text-xs text-stone-600">
+                <span>Mora acumulada:</span>
+                <span className="font-bold text-stone-900">{formatGs(medidorActual.moraCalculada)}</span>
+              </div>
+
+              <div className="pt-2 border-t border-stone-200 flex justify-between items-baseline">
+                <span className="text-sm font-bold text-stone-900">Deuda Total:</span>
+                <span
+                  className={`text-lg font-black ${
+                    medidorActual.totalDeuda > 0 ? 'text-red-600' : 'text-emerald-600'
+                  }`}
+                >
+                  {formatGs(medidorActual.totalDeuda)}
+                </span>
+              </div>
+            </div>
+
+            {/* Botón de Reconexión si está cortado */}
+            {medidorActual.medidor.estado === 'cortado' && (
+              <div className="p-4 bg-red-50 border border-red-200 rounded-xl space-y-2">
+                <div className="text-xs font-bold text-red-800">MEDIDOR CORTADO</div>
+                <p className="text-xs text-red-700">
+                  Para restablecer el servicio debe cobrar el total de boletas + mora congelada + tasa de reconexión (60.000 Gs) + ERSSAN (2%).
+                </p>
+                <div className="text-sm font-bold text-stone-900">
+                  Total Liquidación: {formatGs(medidorActual.liquidacionReconexion.totalPagar)}
+                </div>
+                <button
+                  type="button"
+                  onClick={() => setModalReconexionOpen(true)}
+                  className="w-full py-2 bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-bold rounded-lg shadow-xs cursor-pointer transition-colors flex items-center justify-center gap-1.5"
+                >
+                  <CheckCircle2 className="w-3.5 h-3.5" />
+                  <span>Registrar reconexión</span>
+                </button>
+              </div>
+            )}
+          </div>
+
+          {/* Listado de Facturas del Medidor */}
+          <div className="lg:col-span-2 space-y-4">
+            <div className="bg-white rounded-xl border border-stone-200 p-5 space-y-4">
+              <div className="flex items-center justify-between border-b border-stone-100 pb-3">
+                <h3 className="font-bold text-stone-900 text-base">
+                  Boletas del Medidor N° {medidorActual.medidor.numero_medidor}
+                </h3>
+                {/* Selector de Método de Pago */}
+                <div className="flex items-center gap-1.5 text-xs">
+                  <span className="text-stone-500 font-medium">Método de cobro:</span>
+                  <select
+                    value={metodoPago}
+                    onChange={(e) => setMetodoPago(e.target.value as MetodoPago)}
+                    className="p-1.5 bg-stone-50 border border-stone-300 rounded-md font-semibold text-stone-800"
+                  >
+                    <option value="efectivo">Efectivo</option>
+                    <option value="transferencia">Transferencia Bancaria</option>
+                    <option value="cheque">Cheque</option>
+                  </select>
+                </div>
+              </div>
+
+              {medidorActual.facturas.length === 0 ? (
+                <div className="p-8 text-center text-sm text-stone-500">
+                  No hay facturas emitidas para este medidor.
+                </div>
+              ) : (
+                <div className="divide-y divide-stone-100">
+                  {medidorActual.facturas.map((f) => {
+                    const saldo = f.saldo !== undefined ? f.saldo : (f.estado === 'pagada' ? 0 : f.total);
+                    const montoPagado = f.monto_pagado || (f.estado === 'pagada' ? f.total : 0);
+                    const esParcial = saldo > 0 && montoPagado > 0;
+
+                    return (
+                      <div key={f.id} className="py-4 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+                        <div className="space-y-1">
+                          <div className="flex items-center gap-2">
+                            <span className="font-bold text-sm text-stone-900">
+                              Periodo {f.periodo_facturado}
+                            </span>
+                            <span
+                              className={`text-[10px] px-2 py-0.5 rounded-full font-bold uppercase ${
+                                f.estado === 'pagada'
+                                  ? 'bg-emerald-100 text-emerald-800'
+                                  : esParcial
+                                  ? 'bg-amber-100 text-amber-800'
+                                  : f.estado === 'vencida'
+                                  ? 'bg-red-100 text-red-800'
+                                  : 'bg-stone-100 text-stone-800'
+                              }`}
+                            >
+                              {f.estado === 'pagada' ? 'PAGADA' : esParcial ? 'PAGO PARCIAL' : f.estado}
+                            </span>
+                            {f.es_tercera_boleta && (
+                              <span className="text-[10px] px-2 py-0.5 rounded-sm bg-red-600 text-white font-bold">
+                                3ra Boleta (Corte día 11)
+                              </span>
+                            )}
+                            {f.alerta_consumo_elevado && (
+                              <span className="text-[10px] px-2 py-0.5 rounded-sm bg-red-100 text-red-700 font-bold border border-red-300">
+                                Consumo Elevado
+                              </span>
+                            )}
+                          </div>
+
+                          <div className="text-xs text-stone-500 flex flex-wrap gap-x-4">
+                            <span>Emisión: {f.fecha_emision}</span>
+                            <span className="font-semibold text-stone-700">Vencimiento: {f.fecha_vencimiento}</span>
+                            {f.consumo_m3 !== undefined && <span>Consumo: {f.consumo_m3} m³</span>}
+                          </div>
+                        </div>
+
+                        <div className="flex items-center gap-4">
+                          <div className="text-right text-xs">
+                            <div className="text-stone-500">
+                              Total: <span className="font-bold text-stone-800">{formatGs(f.total)}</span>
+                            </div>
+                            <div className="text-sm font-black text-stone-900">
+                              Saldo: <span className={saldo > 0 ? 'text-red-700' : 'text-emerald-700'}>{formatGs(saldo)}</span>
+                            </div>
+                            {f.estado === 'pagada' && f.fecha_pago && (
+                              <div className="text-[10px] text-emerald-600 font-medium">
+                                Cancelada el {f.fecha_pago}
+                              </div>
+                            )}
+                          </div>
+
+                          <div className="flex items-center gap-1.5">
+                            {/* Botón Descargar Boleta Oficial jsPDF */}
+                            <button
+                              type="button"
+                              onClick={() => handleDescargarBoleta(f)}
+                              title="Descargar boleta oficial PDF (B&N con avisos rojos)"
+                              className="p-2 text-stone-600 hover:text-stone-900 hover:bg-stone-100 rounded-lg border border-stone-200 cursor-pointer"
+                            >
+                              <FileDown className="w-4 h-4" />
+                            </button>
+
+                            {/* Botón Cobrar en Caja (Total o Parcial) */}
+                            {f.estado !== 'pagada' && (
+                              <button
+                                type="button"
+                                onClick={() => abrirModalCobro(f)}
+                                className="px-3.5 py-2 bg-emerald-600 hover:bg-emerald-700 active:bg-emerald-800 text-white font-bold text-xs rounded-lg shadow-xs flex items-center gap-1 cursor-pointer transition-colors"
+                              >
+                                <DollarSign className="w-4 h-4" />
+                                <span>Cobrar</span>
+                              </button>
+                            )}
+                          </div>
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
+            </div>
+          </div>
+        </div>
+      ) : (
+        <div className="p-12 text-center text-stone-500 bg-white rounded-xl border border-stone-200">
+          Seleccione o busque un medidor o cliente para gestionar cobranzas.
+        </div>
+      )}
+
+      {/* Modal de Registro de Cobro (Total o Parcial) */}
+      {modalCobroFactura && (
+        <div className="fixed inset-0 z-50 bg-stone-900/60 backdrop-blur-xs flex items-center justify-center p-4">
+          <div className="bg-white rounded-2xl max-w-md w-full border border-stone-200 shadow-xl overflow-hidden">
+            <div className="p-4 bg-stone-900 text-white flex items-center justify-between">
+              <div>
+                <h3 className="font-bold text-sm">Registrar Pago en Caja</h3>
+                <p className="text-xs text-stone-400">
+                  Boleta #{modalCobroFactura.id.slice(0, 18)} • Periodo {modalCobroFactura.periodo_facturado}
+                </p>
+              </div>
+              <button
+                type="button"
+                onClick={() => setModalCobroFactura(null)}
+                className="text-stone-400 hover:text-white p-1 rounded-lg cursor-pointer"
+              >
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+
+            <div className="p-6 space-y-4 text-xs text-stone-800">
+              {errorCobro && (
+                <div className="p-3 bg-red-50 border border-red-200 text-red-700 rounded-xl font-medium">
+                  {errorCobro}
+                </div>
+              )}
+
+              {/* Resumen de Importes */}
+              <div className="p-3 bg-stone-50 rounded-xl border border-stone-200 space-y-1.5">
+                <div className="flex justify-between">
+                  <span className="text-stone-500">Importe total boleta:</span>
+                  <span className="font-bold text-stone-900">{formatGs(modalCobroFactura.total)}</span>
+                </div>
+                <div className="flex justify-between">
+                  <span className="text-stone-500">Monto pagado previamente:</span>
+                  <span className="font-bold text-emerald-700">
+                    {formatGs(modalCobroFactura.monto_pagado || 0)}
+                  </span>
+                </div>
+                <div className="flex justify-between pt-1 border-t border-stone-200 text-sm font-black">
+                  <span>Saldo adeudado:</span>
+                  <span className="text-red-700">
+                    {formatGs(modalCobroFactura.saldo !== undefined ? modalCobroFactura.saldo : modalCobroFactura.total)}
+                  </span>
+                </div>
+              </div>
+
+              {/* Botones de acción rápida: Pago Total o Parcial */}
+              <div>
+                <label className="text-[11px] font-bold text-stone-600 block mb-1 uppercase tracking-wider">
+                  Monto a Pagar (Gs.):
+                </label>
+                <div className="flex gap-2 mb-2">
+                  <button
+                    type="button"
+                    onClick={() => {
+                      const saldo = modalCobroFactura.saldo !== undefined ? modalCobroFactura.saldo : modalCobroFactura.total;
+                      setMontoACobrarInput(String(saldo));
+                    }}
+                    className="flex-1 py-1.5 bg-emerald-100 hover:bg-emerald-200 text-emerald-900 text-xs font-bold rounded-lg border border-emerald-300 cursor-pointer"
+                  >
+                    Pago Total
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      const saldo = modalCobroFactura.saldo !== undefined ? modalCobroFactura.saldo : modalCobroFactura.total;
+                      setMontoACobrarInput(String(Math.round(saldo / 2)));
+                    }}
+                    className="flex-1 py-1.5 bg-stone-100 hover:bg-stone-200 text-stone-800 text-xs font-semibold rounded-lg border border-stone-300 cursor-pointer"
+                  >
+                    50% Parcial
+                  </button>
+                </div>
+                <input
+                  type="number"
+                  value={montoACobrarInput}
+                  onChange={(e) => setMontoACobrarInput(e.target.value)}
+                  className="w-full px-3 py-2.5 bg-stone-50 border border-stone-300 rounded-lg text-base font-bold text-stone-900 focus:bg-white focus:border-blue-600 focus:outline-hidden"
+                  placeholder="Ingrese monto a cobrar..."
+                />
+              </div>
+
+              {/* Selector de Método de Pago */}
+              <div>
+                <label className="text-[11px] font-bold text-stone-600 block mb-1 uppercase tracking-wider">
+                  Forma de Cobro:
+                </label>
+                <select
+                  value={metodoPago}
+                  onChange={(e) => setMetodoPago(e.target.value as MetodoPago)}
+                  className="w-full p-2.5 bg-stone-50 border border-stone-300 rounded-lg font-bold text-stone-900 focus:bg-white"
+                >
+                  <option value="efectivo">Efectivo en Ventanilla</option>
+                  <option value="transferencia">Transferencia Bancaria (SIPAP)</option>
+                  <option value="cheque">Cheque al Día</option>
+                </select>
+              </div>
+            </div>
+
+            <div className="p-4 bg-stone-50 border-t border-stone-200 flex justify-end gap-2">
+              <button
+                type="button"
+                onClick={() => setModalCobroFactura(null)}
+                className="px-4 py-2 bg-stone-200 hover:bg-stone-300 text-stone-800 text-xs font-bold rounded-lg cursor-pointer"
+              >
+                Cancelar
+              </button>
+              <button
+                type="button"
+                onClick={handleConfirmarCobro}
+                className="px-5 py-2 bg-emerald-600 hover:bg-emerald-700 active:bg-emerald-800 text-white text-xs font-bold rounded-lg shadow-xs flex items-center gap-1.5 cursor-pointer"
+              >
+                <DollarSign className="w-4 h-4" />
+                <span>Confirmar Cobro</span>
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+      {/* Modal de Reconexión Integral */}
+      {modalReconexionOpen && medidorActual?.medidor && (
+        <ModalRegistrarReconexion
+          medidorId={medidorActual.medidor.id}
+          isOpen={modalReconexionOpen}
+          onClose={() => setModalReconexionOpen(false)}
+          onSuccess={(res) => {
+            setMensajeExito(
+              `Medidor N° ${res.medidor.numero_medidor} regularizado y reconectado exitosamente. Pasa a estado ACTIVO.`
+            );
+            setModalReconexionOpen(false);
+            setSelectedMedidorId(res.medidor.id);
+          }}
+        />
+      )}
+    </div>
+  );
+};

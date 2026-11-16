@@ -1,0 +1,211 @@
+- generic [ref=f3e3]:
+  - complementary [ref=f3e4]:
+    - generic [ref=f3e10]:
+      - generic [ref=f3e11]: AguateríaPY
+      - generic [ref=f3e12]: Sistema Interno
+    - navigation [ref=f3e13]:
+      - button "Dashboard" [ref=f3e14]
+      - button "Clientes" [ref=f3e21]
+      - button "Medidores" [ref=f3e28]
+      - button "Lecturas" [ref=f3e33]
+      - button "Otros Trabajos" [ref=f3e38]
+      - button "Mapa" [ref=f3e42]
+      - button "Facturación" [ref=f3e47]
+      - button "Pagos" [ref=f3e52]
+      - button "Reportes" [ref=f3e56]
+    - generic [ref=f3e60]:
+      - generic [ref=f3e61]:
+        - generic [ref=f3e62]: "Escala:"
+        - generic [ref=f3e63]: 1.000 Medidores
+      - generic [ref=f3e64]:
+        - generic [ref=f3e65]: "Marco:"
+        - generic [ref=f3e66]: Normativa ERSSAN
+      - button "/admin/configuracion/tarifas" [ref=f3e68]
+  - generic [ref=f3e72]:
+    - banner [ref=f3e73]:
+      - generic [ref=f3e74]: Aguatería — Gestión Operativa
+      - generic [ref=f3e76]:
+        - generic [ref=f3e77]:
+          - generic [ref=f3e78]: "Rol:"
+          - button "admin" [ref=f3e79]
+          - button "cobrador" [ref=f3e80]
+          - button "lectura" [ref=f3e81]
+        - button "Restablecer datos demo" [ref=f3e82]
+        - generic [ref=f3e86]:
+          - generic [ref=f3e87]:
+            - generic [ref=f3e88]:
+              - generic [ref=f3e89]: Ing. Carlos Mendoza
+              - generic [ref=f3e90]: Admin
+            - generic [ref=f3e91]: admin@aguateria.py
+          - button "Salir" [ref=f3e92]
+    - main [ref=f3e97]:
+      - generic [ref=f3e1072]:
+        - generic [ref=f3e1074]:
+          - heading "Módulo de Caja y Cobranzas" [level=1] [ref=f3e1075]
+          - paragraph [ref=f3e1076]: Cobro en ventanilla de pagos totales o parciales, emisión de recibos y activación automática de medidores saldados
+        - generic [ref=f3e1077]:
+          - generic [ref=f3e1078]: Buscar por N° de Medidor, Documento (C.I.) o Nombre de Cliente
+          - 'textbox "Ej: 15, 1420500, o González..." [ref=f3e1080]': "90"
+          - generic [ref=f3e1084]:
+            - 'button "Med. #40 (Ramona)" [ref=f3e1203] [cursor=pointer]':
+              - generic [ref=f3e1204]: "Med. #40"
+              - generic [ref=f3e1205]: (Ramona)
+            - 'button "Med. #41 (Ramona)" [ref=f3e1206] [cursor=pointer]':
+              - generic [ref=f3e1207]: "Med. #41"
+              - generic [ref=f3e1208]: (Ramona)
+            - 'button "Med. #42 (Ramona)" [ref=f3e1209] [cursor=pointer]':
+              - generic [ref=f3e1210]: "Med. #42"
+              - generic [ref=f3e1211]: (Ramona)
+            - 'button "Med. #43 (Gustavo)" [ref=f3e1212] [cursor=pointer]':
+              - generic [ref=f3e1213]: "Med. #43"
+              - generic [ref=f3e1214]: (Gustavo)
+            - 'button "Med. #90 (Rubén) 409.797 Gs." [ref=f3e1215] [cursor=pointer]':
+              - generic [ref=f3e1216]: "Med. #90"
+              - generic [ref=f3e1217]: (Rubén)
+              - generic [ref=f3e1218]: 409.797 Gs.
+            - 'button "Med. #124 (Rubén)" [ref=f3e1219] [cursor=pointer]':
+              - generic [ref=f3e1220]: "Med. #124"
+              - generic [ref=f3e1221]: (Rubén)
+            - 'button "Med. #125 (Rubén)" [ref=f3e1222] [cursor=pointer]':
+              - generic [ref=f3e1223]: "Med. #125"
+              - generic [ref=f3e1224]: (Rubén)
+            - 'button "Med. #126 (Rubén)" [ref=f3e1225] [cursor=pointer]':
+              - generic [ref=f3e1226]: "Med. #126"
+              - generic [ref=f3e1227]: (Rubén)
+            - 'button "Med. #149 (Héctor)" [ref=f3e1228] [cursor=pointer]':
+              - generic [ref=f3e1229]: "Med. #149"
+              - generic [ref=f3e1230]: (Héctor)
+            - 'button "Med. #150 (Héctor)" [ref=f3e1231] [cursor=pointer]':
+              - generic [ref=f3e1232]: "Med. #150"
+              - generic [ref=f3e1233]: (Héctor)
+            - 'button "Med. #180 (Ramona) 163.241 Gs." [ref=f3e1234] [cursor=pointer]':
+              - generic [ref=f3e1235]: "Med. #180"
+              - generic [ref=f3e1236]: (Ramona)
+              - generic [ref=f3e1237]: 163.241 Gs.
+            - 'button "Med. #181 (Ramona) 183.722 Gs." [ref=f3e1238] [cursor=pointer]':
+              - generic [ref=f3e1239]: "Med. #181"
+              - generic [ref=f3e1240]: (Ramona)
+              - generic [ref=f3e1241]: 183.722 Gs.
+            - 'button "Med. #182 (Ramona) 122.114 Gs." [ref=f3e1242] [cursor=pointer]':
+              - generic [ref=f3e1243]: "Med. #182"
+              - generic [ref=f3e1244]: (Ramona)
+              - generic [ref=f3e1245]: 122.114 Gs.
+            - 'button "Med. #258 (Rosa)" [ref=f3e1246] [cursor=pointer]':
+              - generic [ref=f3e1247]: "Med. #258"
+              - generic [ref=f3e1248]: (Rosa)
+            - 'button "Med. #264 (Rubén)" [ref=f3e1249] [cursor=pointer]':
+              - generic [ref=f3e1250]: "Med. #264"
+              - generic [ref=f3e1251]: (Rubén)
+        - generic [ref=f3e1402]:
+          - generic [ref=f3e1403]: "Cobro de 115.078 Gs. registrado con éxito (Pago Parcial - Saldo restante: 115.077 Gs.)."
+          - button "Cerrar" [ref=f3e1408] [cursor=pointer]
+        - generic [ref=f3e1409]:
+          - generic [ref=f3e1410]:
+            - generic [ref=f3e1411]: RECIBO OFICIAL DE COBRANZA
+            - generic [ref=f3e1416]: N° REC-248807
+          - generic [ref=f3e1417]:
+            - generic [ref=f3e1418]:
+              - generic [ref=f3e1419]: Cliente
+              - text: Rubén Darío Valdez Valdez
+            - generic [ref=f3e1420]:
+              - generic [ref=f3e1421]: Medidor Pagado
+              - generic [ref=f3e1422]: N° 90
+            - generic [ref=f3e1423]:
+              - generic [ref=f3e1424]: Método de Cobro
+              - text: efectivo
+            - generic [ref=f3e1425]:
+              - generic [ref=f3e1426]: Monto Percibido
+              - text: 115.078 Gs.
+          - generic [ref=f3e1427]:
+            - generic [ref=f3e1428]: "Pago parcial registrado. Saldo pendiente en esta boleta:"
+            - generic [ref=f3e1429]: 115.077 Gs.
+          - button "Imprimir Recibo" [ref=f3e1431] [cursor=pointer]
+        - generic [ref=f3e1130]:
+          - generic [ref=f3e1131]:
+            - generic [ref=f3e1132]:
+              - generic [ref=f3e1133]:
+                - text: Unidad de Medición
+                - heading "Medidor N° 90" [level=2] [ref=f3e1294]
+              - generic [ref=f3e1135]: pendiente corte
+            - generic [ref=f3e1136]:
+              - generic [ref=f3e1137]:
+                - generic [ref=f3e1138]: Titular del Contrato
+                - text: Rubén Darío Valdez Valdez
+                - generic [ref=f3e1139]: "C.I. / RUC: 1421345"
+              - generic [ref=f3e1140]:
+                - generic [ref=f3e1141]: Dirección del Medidor
+                - text: Calle General Genes N° 165, Barrio San José
+                - generic [ref=f3e1142]: "Zona: Barrio San José"
+              - generic [ref=f3e1143]:
+                - generic [ref=f3e1144]: Teléfono de Contacto
+                - text: +595 986 165 295
+            - generic [ref=f3e1145]:
+              - generic [ref=f3e1146]:
+                - generic [ref=f3e1147]: "Boletas pendientes:"
+                - generic [ref=f3e1148]: "3"
+              - generic [ref=f3e1149]:
+                - generic [ref=f3e1150]: "Mora acumulada:"
+                - generic [ref=f3e1151]: 9.000 Gs.
+              - generic [ref=f3e1152]:
+                - generic [ref=f3e1153]: "Deuda Total:"
+                - generic [ref=f3e1154]: 409.797 Gs.
+          - generic [ref=f3e1156]:
+            - generic [ref=f3e1157]:
+              - heading "Boletas del Medidor N° 90" [level=3] [ref=f3e1295]
+              - generic [ref=f3e1159]:
+                - generic [ref=f3e1160]: "Método de cobro:"
+                - combobox [ref=f3e1161]:
+                  - option "Efectivo" [selected]
+                  - option "Transferencia Bancaria"
+                  - option "Cheque"
+            - generic [ref=f3e1162]:
+              - generic [ref=f3e1296]:
+                - generic [ref=f3e1297]:
+                  - generic [ref=f3e1298]:
+                    - generic [ref=f3e1299]: Periodo 2025-03
+                    - generic [ref=f3e1300]: PAGO PARCIAL
+                    - generic [ref=f3e1301]: 3ra Boleta (Corte día 11)
+                  - generic [ref=f3e1302]:
+                    - generic [ref=f3e1303]: "Emisión: 2025-03-05"
+                    - generic [ref=f3e1304]: "Vencimiento: 2025-03-11"
+                    - generic [ref=f3e1305]: "Consumo: 10 m³"
+                - generic [ref=f3e1306]:
+                  - generic [ref=f3e1307]:
+                    - generic [ref=f3e1308]: "Total: 230.155 Gs."
+                    - generic [ref=f3e1309]: "Saldo: 115.077 Gs."
+                  - generic [ref=f3e1310]:
+                    - button "Descargar boleta oficial PDF (B&N con avisos rojos)" [ref=f3e1311] [cursor=pointer]
+                    - button "Cobrar" [ref=f3e1316] [cursor=pointer]
+              - generic [ref=f3e1320]:
+                - generic [ref=f3e1321]:
+                  - generic [ref=f3e1322]:
+                    - generic [ref=f3e1323]: Periodo 2025-02
+                    - generic [ref=f3e1324]: vencida
+                  - generic [ref=f3e1325]:
+                    - generic [ref=f3e1326]: "Emisión: 2025-02-05"
+                    - generic [ref=f3e1327]: "Vencimiento: 2025-03-28"
+                    - generic [ref=f3e1328]: "Consumo: 15 m³"
+                - generic [ref=f3e1329]:
+                  - generic [ref=f3e1330]:
+                    - generic [ref=f3e1331]: "Total: 122.522 Gs."
+                    - generic [ref=f3e1332]: "Saldo: 122.522 Gs."
+                  - generic [ref=f3e1333]:
+                    - button "Descargar boleta oficial PDF (B&N con avisos rojos)" [ref=f3e1334] [cursor=pointer]
+                    - button "Cobrar" [ref=f3e1339] [cursor=pointer]
+              - generic [ref=f3e1343]:
+                - generic [ref=f3e1344]:
+                  - generic [ref=f3e1345]:
+                    - generic [ref=f3e1346]: Periodo 2025-01
+                    - generic [ref=f3e1347]: vencida
+                  - generic [ref=f3e1348]:
+                    - generic [ref=f3e1349]: "Emisión: 2025-01-05"
+                    - generic [ref=f3e1350]: "Vencimiento: 2025-02-28"
+                    - generic [ref=f3e1351]: "Consumo: 14 m³"
+                - generic [ref=f3e1352]:
+                  - generic [ref=f3e1353]:
+                    - generic [ref=f3e1354]: "Total: 57.120 Gs."
+                    - generic [ref=f3e1355]: "Saldo: 57.120 Gs."
+                  - generic [ref=f3e1356]:
+                    - button "Descargar boleta oficial PDF (B&N con avisos rojos)" [ref=f3e1357] [cursor=pointer]
+                    - button "Cobrar" [ref=f3e1362] [cursor=pointer]
+    - contentinfo [ref=f3e259]: AguateríaPY — Sistema Operativo de Gestión de Agua Potable • Diseñado conforme a normativas de ERSSAN (Paraguay)

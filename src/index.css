@@ -1,0 +1,41 @@
+@import "tailwindcss";
+
+/* Leaflet Cluster Styles & Custom Pin Positioning */
+.custom-meter-marker {
+  background: transparent;
+  border: none;
+}
+
+.marker-cluster-small {
+  background-color: rgba(16, 185, 129, 0.4) !important;
+}
+.marker-cluster-small div {
+  background-color: rgba(5, 150, 105, 0.85) !important;
+  color: white !important;
+  font-weight: bold !important;
+}
+
+.marker-cluster-medium {
+  background-color: rgba(245, 158, 11, 0.4) !important;
+}
+.marker-cluster-medium div {
+  background-color: rgba(217, 119, 6, 0.85) !important;
+  color: white !important;
+  font-weight: bold !important;
+}
+
+.marker-cluster-large {
+  background-color: rgba(220, 38, 38, 0.4) !important;
+}
+.marker-cluster-large div {
+  background-color: rgba(185, 28, 28, 0.85) !important;
+  color: white !important;
+  font-weight: bold !important;
+}
+
+/* Print Styles */
+@media print {
+  header, nav, footer, button {
+    display: none !important;
+  }
+}

@@ -1,0 +1,164 @@
+- generic [ref=f3e3]:
+  - complementary [ref=f3e4]:
+    - generic [ref=f3e10]:
+      - generic [ref=f3e11]: AguateríaPY
+      - generic [ref=f3e12]: Sistema Interno
+    - navigation [ref=f3e13]:
+      - button "Dashboard" [ref=f3e14]
+      - button "Clientes" [ref=f3e21]
+      - button "Medidores" [ref=f3e28]
+      - button "Lecturas" [ref=f3e33]
+      - button "Otros Trabajos" [ref=f3e38]
+      - button "Mapa" [ref=f3e42]
+      - button "Facturación" [ref=f3e47]
+      - button "Pagos" [active] [ref=f3e52]
+      - button "Reportes" [ref=f3e56]
+    - generic [ref=f3e60]:
+      - generic [ref=f3e61]:
+        - generic [ref=f3e62]: "Escala:"
+        - generic [ref=f3e63]: 1.000 Medidores
+      - generic [ref=f3e64]:
+        - generic [ref=f3e65]: "Marco:"
+        - generic [ref=f3e66]: Normativa ERSSAN
+      - button "/admin/configuracion/tarifas" [ref=f3e68]
+  - generic [ref=f3e72]:
+    - banner [ref=f3e73]:
+      - generic [ref=f3e74]: Aguatería — Gestión Operativa
+      - generic [ref=f3e76]:
+        - generic [ref=f3e77]:
+          - generic [ref=f3e78]: "Rol:"
+          - button "admin" [ref=f3e79]
+          - button "cobrador" [ref=f3e80]
+          - button "lectura" [ref=f3e81]
+        - button "Restablecer datos demo" [ref=f3e82]
+        - generic [ref=f3e86]:
+          - generic [ref=f3e87]:
+            - generic [ref=f3e88]:
+              - generic [ref=f3e89]: Ing. Carlos Mendoza
+              - generic [ref=f3e90]: Admin
+            - generic [ref=f3e91]: admin@aguateria.py
+          - button "Salir" [ref=f3e92]
+    - main [ref=f3e97]:
+      - generic [ref=f3e1072]:
+        - generic [ref=f3e1074]:
+          - heading "Módulo de Caja y Cobranzas" [level=1] [ref=f3e1075]
+          - paragraph [ref=f3e1076]: Cobro en ventanilla de pagos totales o parciales, emisión de recibos y activación automática de medidores saldados
+        - generic [ref=f3e1077]:
+          - generic [ref=f3e1078]: Buscar por N° de Medidor, Documento (C.I.) o Nombre de Cliente
+          - 'textbox "Ej: 15, 1420500, o González..." [ref=f3e1080]'
+          - generic [ref=f3e1084]:
+            - 'button "Med. #1 (Ana)" [ref=f3e1085] [cursor=pointer]':
+              - generic [ref=f3e1086]: "Med. #1"
+              - generic [ref=f3e1087]: (Ana)
+            - 'button "Med. #2 (Luis)" [ref=f3e1088] [cursor=pointer]':
+              - generic [ref=f3e1089]: "Med. #2"
+              - generic [ref=f3e1090]: (Luis)
+            - 'button "Med. #3 (Gladys)" [ref=f3e1091] [cursor=pointer]':
+              - generic [ref=f3e1092]: "Med. #3"
+              - generic [ref=f3e1093]: (Gladys)
+            - 'button "Med. #4 (Diego)" [ref=f3e1094] [cursor=pointer]':
+              - generic [ref=f3e1095]: "Med. #4"
+              - generic [ref=f3e1096]: (Diego)
+            - 'button "Med. #5 (Diego)" [ref=f3e1097] [cursor=pointer]':
+              - generic [ref=f3e1098]: "Med. #5"
+              - generic [ref=f3e1099]: (Diego)
+            - 'button "Med. #6 (Ramona)" [ref=f3e1100] [cursor=pointer]':
+              - generic [ref=f3e1101]: "Med. #6"
+              - generic [ref=f3e1102]: (Ramona)
+            - 'button "Med. #7 (Gustavo)" [ref=f3e1103] [cursor=pointer]':
+              - generic [ref=f3e1104]: "Med. #7"
+              - generic [ref=f3e1105]: (Gustavo)
+            - 'button "Med. #8 (Mirtha)" [ref=f3e1106] [cursor=pointer]':
+              - generic [ref=f3e1107]: "Med. #8"
+              - generic [ref=f3e1108]: (Mirtha)
+            - 'button "Med. #9 (Héctor)" [ref=f3e1109] [cursor=pointer]':
+              - generic [ref=f3e1110]: "Med. #9"
+              - generic [ref=f3e1111]: (Héctor)
+            - 'button "Med. #10 (Héctor)" [ref=f3e1112] [cursor=pointer]':
+              - generic [ref=f3e1113]: "Med. #10"
+              - generic [ref=f3e1114]: (Héctor)
+            - 'button "Med. #11 (José)" [ref=f3e1115] [cursor=pointer]':
+              - generic [ref=f3e1116]: "Med. #11"
+              - generic [ref=f3e1117]: (José)
+            - 'button "Med. #12 (Rosa)" [ref=f3e1118] [cursor=pointer]':
+              - generic [ref=f3e1119]: "Med. #12"
+              - generic [ref=f3e1120]: (Rosa)
+            - 'button "Med. #13 (Rosa)" [ref=f3e1121] [cursor=pointer]':
+              - generic [ref=f3e1122]: "Med. #13"
+              - generic [ref=f3e1123]: (Rosa)
+            - 'button "Med. #14 (Rosa)" [ref=f3e1124] [cursor=pointer]':
+              - generic [ref=f3e1125]: "Med. #14"
+              - generic [ref=f3e1126]: (Rosa)
+            - 'button "Med. #15 (Jorge)" [ref=f3e1127] [cursor=pointer]':
+              - generic [ref=f3e1128]: "Med. #15"
+              - generic [ref=f3e1129]: (Jorge)
+        - generic [ref=f3e1130]:
+          - generic [ref=f3e1131]:
+            - generic [ref=f3e1132]:
+              - generic [ref=f3e1133]:
+                - text: Unidad de Medición
+                - heading "Medidor N° 1" [level=2] [ref=f3e1134]
+              - generic [ref=f3e1135]: activo
+            - generic [ref=f3e1136]:
+              - generic [ref=f3e1137]:
+                - generic [ref=f3e1138]: Titular del Contrato
+                - text: Ana Gladys Duarte Cardozo
+                - generic [ref=f3e1139]: "C.I. / RUC: 1420513"
+              - generic [ref=f3e1140]:
+                - generic [ref=f3e1141]: Dirección del Medidor
+                - text: Calle Julia Miranda Cueto N° 101, Barrio San José
+                - generic [ref=f3e1142]: "Zona: Barrio San José"
+              - generic [ref=f3e1143]:
+                - generic [ref=f3e1144]: Teléfono de Contacto
+                - text: +595 982 101 103
+            - generic [ref=f3e1145]:
+              - generic [ref=f3e1146]:
+                - generic [ref=f3e1147]: "Boletas pendientes:"
+                - generic [ref=f3e1148]: "0"
+              - generic [ref=f3e1149]:
+                - generic [ref=f3e1150]: "Mora acumulada:"
+                - generic [ref=f3e1151]: 0 Gs.
+              - generic [ref=f3e1152]:
+                - generic [ref=f3e1153]: "Deuda Total:"
+                - generic [ref=f3e1154]: 0 Gs.
+          - generic [ref=f3e1156]:
+            - generic [ref=f3e1157]:
+              - heading "Boletas del Medidor N° 1" [level=3] [ref=f3e1158]
+              - generic [ref=f3e1159]:
+                - generic [ref=f3e1160]: "Método de cobro:"
+                - combobox [ref=f3e1161]:
+                  - option "Efectivo" [selected]
+                  - option "Transferencia Bancaria"
+                  - option "Cheque"
+            - generic [ref=f3e1162]:
+              - generic [ref=f3e1163]:
+                - generic [ref=f3e1164]:
+                  - generic [ref=f3e1165]:
+                    - generic [ref=f3e1166]: Periodo 2025-02
+                    - generic [ref=f3e1167]: PAGADA
+                  - generic [ref=f3e1168]:
+                    - generic [ref=f3e1169]: "Emisión: 2025-02-05"
+                    - generic [ref=f3e1170]: "Vencimiento: 2025-03-28"
+                    - generic [ref=f3e1171]: "Consumo: 12 m³"
+                - generic [ref=f3e1172]:
+                  - generic [ref=f3e1173]:
+                    - generic [ref=f3e1174]: "Total: 48.960 Gs."
+                    - generic [ref=f3e1175]: "Saldo: 0 Gs."
+                    - generic [ref=f3e1176]: Cancelada el 2025-02-28
+                  - button "Descargar boleta oficial PDF (B&N con avisos rojos)" [ref=f3e1178] [cursor=pointer]
+              - generic [ref=f3e1183]:
+                - generic [ref=f3e1184]:
+                  - generic [ref=f3e1185]:
+                    - generic [ref=f3e1186]: Periodo 2025-01
+                    - generic [ref=f3e1187]: PAGADA
+                  - generic [ref=f3e1188]:
+                    - generic [ref=f3e1189]: "Emisión: 2025-01-05"
+                    - generic [ref=f3e1190]: "Vencimiento: 2025-02-28"
+                    - generic [ref=f3e1191]: "Consumo: 9 m³"
+                - generic [ref=f3e1192]:
+                  - generic [ref=f3e1193]:
+                    - generic [ref=f3e1194]: "Total: 36.720 Gs."
+                    - generic [ref=f3e1195]: "Saldo: 0 Gs."
+                    - generic [ref=f3e1196]: Cancelada el 2025-01-29
+                  - button "Descargar boleta oficial PDF (B&N con avisos rojos)" [ref=f3e1198] [cursor=pointer]
+    - contentinfo [ref=f3e259]: AguateríaPY — Sistema Operativo de Gestión de Agua Potable • Diseñado conforme a normativas de ERSSAN (Paraguay)

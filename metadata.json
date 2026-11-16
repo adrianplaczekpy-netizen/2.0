@@ -1,0 +1,8 @@
+{
+  "name": "Remix AguateríaPY - Sistema Integral de Gestión de Agua Potable",
+  "description": "Sistema de gestión integral para aguaterías en Paraguay: administración de hasta 1.000 clientes y medidores independientes, facturación mensual automatizada, mora, lecturas móviles con fotos, mapa interactivo y boletas oficiales.",
+  "requestFramePermissions": [],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}

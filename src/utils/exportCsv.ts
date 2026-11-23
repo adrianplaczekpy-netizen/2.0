@@ -195,12 +195,12 @@ export function exportarFacturasCSV(
         ? `${f.numero_boleta_medidor}-${f.periodo_facturado}`
         : f.id.slice(0, 12);
     const saldo =
-      f.saldo_pendiente !== undefined
-        ? f.saldo_pendiente
-        : f.saldo !== undefined
-          ? f.saldo
-          : f.estado === 'pagada' || f.estado === 'anulada'
-            ? 0
+      f.estado === 'pagada' || f.estado === 'anulada' || f.estado === 'refinanciada'
+        ? 0
+        : f.saldo_pendiente !== undefined
+          ? f.saldo_pendiente
+          : f.saldo !== undefined
+            ? f.saldo
             : f.total;
 
     return [

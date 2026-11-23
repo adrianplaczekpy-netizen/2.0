@@ -6,56 +6,68 @@
 import React, { useState } from 'react';
 import { db } from '../services/database';
 import { formatGs } from '../services/billingRules';
+import { ModalRegistrarReconexion } from './ModalRegistrarReconexion';
 import {
   Scissors,
   CheckCircle2,
   AlertTriangle,
   RotateCcw,
   MapPin,
-  FileText,
-  DollarSign,
-  User,
   Wrench,
+  RefreshCw,
 } from 'lucide-react';
 
 export const CorteReconexionView: React.FC = () => {
   const [tab, setTab] = useState<'a_cortar' | 'cortados'>('a_cortar');
   const [mensaje, setMensaje] = useState<string | null>(null);
+  const [errorMsg, setErrorMsg] = useState<string | null>(null);
+  const [confirmandoCorteId, setConfirmandoCorteId] = useState<string | null>(null);
+  const [procesandoCorteId, setProcesandoCorteId] = useState<string | null>(null);
+  const [recalculando, setRecalculando] = useState(false);
+  const [medidorReconexionId, setMedidorReconexionId] = useState<string | null>(null);
 
   const medidoresACortar = db.getListadoParaCortar();
   const medidoresCortados = db.getListadoParaReconectar();
 
-  const handleConfirmarCorte = (medidorId: number, idStr: string) => {
-    if (
-      !confirm(
-        `¿Confirmar que la cuadrilla retiró físicamente el Medidor N° ${medidorId}? Su mora quedará congelada y no se emitirán más facturas de consumo.`
-      )
-    ) {
-      return;
-    }
-
+  const handleRecalcularEstados = async () => {
+    setErrorMsg(null);
+    setMensaje(null);
+    setRecalculando(true);
     try {
-      db.confirmarCorteFisico(idStr);
-      setMensaje(`Medidor N° ${medidorId} marcado como CORTADO. Mora congelada registrada.`);
+      const res = await db.recalcularEstadosMedidoresAsync();
+      if (res.actualizados === 0 && res.facturasVencidasMarcadas === 0) {
+        setMensaje(
+          `Estados verificados (${res.totalEvaluados} medidores evaluados). Todos los estados ya estaban actualizados.`
+        );
+      } else {
+        const detalleCambios = res.cambios
+          .slice(0, 5)
+          .map((c) => `Med. N° ${c.numeroMedidor}: ${c.anterior} → ${c.nuevo}`)
+          .join(', ');
+        setMensaje(
+          `Recálculo completado: ${res.actualizados} medidor(es) actualizado(s) y ${res.facturasVencidasMarcadas} factura(s) vencida(s) marcada(s).${
+            detalleCambios ? ` (${detalleCambios})` : ''
+          }`
+        );
+      }
     } catch (e: any) {
-      alert(`Error: ${e.message}`);
+      setErrorMsg(e?.message || 'Error al recalcular estados de medidores.');
+    } finally {
+      setRecalculando(false);
     }
   };
 
-  const handleReconectar = (medidorId: number, idStr: string, total: number) => {
-    if (
-      !confirm(
-        `¿Confirmar cobro de liquidación (${formatGs(total)}) y reinstalación del Medidor N° ${medidorId}?`
-      )
-    ) {
-      return;
-    }
-
+  const handleConfirmarCorte = async (numeroMedidor: number, idStr: string) => {
+    setErrorMsg(null);
+    setProcesandoCorteId(idStr);
     try {
-      const { facturaRegularizacion } = db.confirmarReconexion(idStr);
-      setMensaje(`Medidor N° ${medidorId} reconectado y restituido a ACTIVO con éxito. Factura de regularización ${facturaRegularizacion.id} emitida y pagada.`);
+      await db.confirmarCorteFisicoAsync(idStr);
+      setConfirmandoCorteId(null);
+      setMensaje(`Medidor N° ${numeroMedidor} marcado como CORTADO. Mora congelada registrada.`);
     } catch (e: any) {
-      alert(`Error: ${e.message}`);
+      setErrorMsg(e?.message || 'Error al registrar el retiro físico.');
+    } finally {
+      setProcesandoCorteId(null);
     }
   };
 
@@ -65,24 +77,49 @@ export const CorteReconexionView: React.FC = () => {
       <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3 border-b border-stone-200 pb-4">
         <div>
           <h1 className="text-2xl font-bold tracking-tight text-stone-900">
-            Control Operativo de Cortes y Reconexiones
+            Corte y Reconexión
           </h1>
           <p className="text-sm text-stone-600">
             Gestión en terreno de retiro físico de medidores por mora e inspección de reconexiones
           </p>
         </div>
+        <button
+          type="button"
+          onClick={handleRecalcularEstados}
+          disabled={recalculando}
+          className="px-4 py-2 bg-stone-900 hover:bg-stone-800 disabled:opacity-60 text-white font-bold text-xs rounded-lg shadow-xs flex items-center gap-1.5 self-start sm:self-auto cursor-pointer"
+        >
+          <RefreshCw className={`w-4 h-4 ${recalculando ? 'animate-spin' : ''}`} />
+          <span>{recalculando ? 'Recalculando...' : 'Recalcular estados'}</span>
+        </button>
       </div>
 
       {mensaje && (
-        <div className="p-4 bg-emerald-50 border border-emerald-300 rounded-xl text-emerald-900 text-sm font-semibold flex items-center justify-between">
+        <div className="p-4 bg-emerald-50 border border-emerald-300 rounded-xl text-emerald-900 text-sm font-semibold flex items-center justify-between gap-3">
           <div className="flex items-center gap-2">
-            <CheckCircle2 className="w-5 h-5 text-emerald-600" />
+            <CheckCircle2 className="w-5 h-5 text-emerald-600 shrink-0" />
             <span>{mensaje}</span>
           </div>
           <button
             type="button"
             onClick={() => setMensaje(null)}
-            className="text-xs text-emerald-800 hover:underline"
+            className="text-xs text-emerald-800 hover:underline shrink-0 cursor-pointer"
+          >
+            Cerrar
+          </button>
+        </div>
+      )}
+
+      {errorMsg && (
+        <div className="p-4 bg-red-50 border border-red-300 rounded-xl text-red-900 text-sm font-semibold flex items-center justify-between gap-3">
+          <div className="flex items-center gap-2">
+            <AlertTriangle className="w-5 h-5 text-red-600 shrink-0" />
+            <span>{errorMsg}</span>
+          </div>
+          <button
+            type="button"
+            onClick={() => setErrorMsg(null)}
+            className="text-xs text-red-800 hover:underline shrink-0 cursor-pointer"
           >
             Cerrar
           </button>
@@ -90,31 +127,31 @@ export const CorteReconexionView: React.FC = () => {
       )}
 
       {/* Tabs Operativos */}
-      <div className="flex border-b border-stone-200 space-x-4">
+      <div className="flex border-b border-stone-200 space-x-2 overflow-x-auto">
         <button
           type="button"
           onClick={() => setTab('a_cortar')}
-          className={`py-3 px-4 font-bold text-sm border-b-2 flex items-center gap-2 transition-colors ${
+          className={`py-3 px-4 font-bold text-sm border-b-2 flex items-center gap-2 transition-colors whitespace-nowrap cursor-pointer ${
             tab === 'a_cortar'
               ? 'border-red-600 text-red-600'
               : 'border-transparent text-stone-500 hover:text-stone-800'
           }`}
         >
           <Scissors className="w-4 h-4" />
-          <span>Medidores a Cortar ({medidoresACortar.length})</span>
+          <span>Medidores a cortar ({medidoresACortar.length})</span>
         </button>
 
         <button
           type="button"
           onClick={() => setTab('cortados')}
-          className={`py-3 px-4 font-bold text-sm border-b-2 flex items-center gap-2 transition-colors ${
+          className={`py-3 px-4 font-bold text-sm border-b-2 flex items-center gap-2 transition-colors whitespace-nowrap cursor-pointer ${
             tab === 'cortados'
               ? 'border-stone-900 text-stone-900'
               : 'border-transparent text-stone-500 hover:text-stone-800'
           }`}
         >
           <RotateCcw className="w-4 h-4" />
-          <span>Medidores Cortados y Reconexión ({medidoresCortados.length})</span>
+          <span>Medidores cortados ({medidoresCortados.length})</span>
         </button>
       </div>
 
@@ -128,8 +165,8 @@ export const CorteReconexionView: React.FC = () => {
                 Criterio de Inclusión en Orden de Corte:
               </span>
               <span>
-                Medidores que acumulan 3 o más boletas impagas y superaron el plazo de vencimiento impostergable (día 11).
-                Al retirar el medidor, confírmelo aquí para congelar la mora y suspender la facturación mensual.
+                Medidores en estado pendiente de corte (3 o más boletas vencidas o 3ra boleta impaga tras el día 11).
+                Al retirar el medidor, registre el retiro para congelar la mora y suspender la facturación mensual.
               </span>
             </div>
           </div>
@@ -137,52 +174,82 @@ export const CorteReconexionView: React.FC = () => {
           <div className="bg-white rounded-xl border border-stone-200 overflow-hidden shadow-xs">
             <div className="divide-y divide-stone-100">
               {medidoresACortar.length === 0 ? (
-                <div className="p-8 text-center text-sm text-stone-500">
-                  No hay medidores con orden de corte pendiente actualmente.
+                <div className="p-8 text-center text-sm text-stone-500 font-medium">
+                  No hay medidores en este estado
                 </div>
               ) : (
                 medidoresACortar.map((m) => (
-                  <div key={m.id} className="p-4 flex flex-col sm:flex-row sm:items-center justify-between gap-3 hover:bg-stone-50">
-                    <div className="space-y-1">
-                      <div className="flex items-center gap-2">
-                        <span className="font-mono font-bold text-base text-stone-900">
-                          Medidor N° {m.numero_medidor}
-                        </span>
-                        <span className="text-[10px] px-2 py-0.5 rounded-sm bg-red-100 text-red-800 font-bold border border-red-300">
-                          Orden de Corte
-                        </span>
-                        <span className="text-xs text-stone-500">Zona: {m.zona}</span>
+                  <div key={m.id} className="p-4 space-y-3 hover:bg-stone-50">
+                    <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+                      <div className="space-y-1">
+                        <div className="flex flex-wrap items-center gap-2">
+                          <span className="font-mono font-bold text-base text-stone-900">
+                            Medidor N° {m.numero_medidor}
+                          </span>
+                          <span className="text-[10px] px-2 py-0.5 rounded-sm bg-red-100 text-red-800 font-bold border border-red-300 uppercase">
+                            Pendiente de Corte
+                          </span>
+                          <span className="text-xs text-stone-500">Zona: {m.zona}</span>
+                        </div>
+
+                        <div className="text-xs text-stone-700">
+                          Titular: <span className="font-semibold text-stone-900">{m.clienteNombre}</span> (CI: {m.clienteDoc})
+                        </div>
+
+                        <div className="text-xs text-stone-500 flex items-center gap-1">
+                          <MapPin className="w-3.5 h-3.5 shrink-0" />
+                          <span>{m.direccion}</span>
+                        </div>
+
+                        <div className="text-[11px] text-stone-500 pt-1">
+                          {m.facturasVencidas.length} boletas impagas ({m.facturasVencidas.map((f) => f.periodo_facturado).join(', ')})
+                        </div>
                       </div>
 
-                      <div className="text-xs text-stone-700">
-                        Titular: <span className="font-semibold text-stone-900">{m.clienteNombre}</span> (CI: {m.clienteDoc})
-                      </div>
+                      <div className="flex items-center sm:flex-col sm:items-end justify-between gap-2">
+                        <div className="text-left sm:text-right">
+                          <div className="text-xs text-stone-500">Deuda Total Acumulada:</div>
+                          <div className="text-base font-black text-red-600">{formatGs(m.totalDeuda)}</div>
+                        </div>
 
-                      <div className="text-xs text-stone-500 flex items-center gap-1">
-                        <MapPin className="w-3.5 h-3.5 shrink-0" />
-                        <span>{m.direccion}</span>
-                      </div>
-
-                      <div className="text-[11px] text-stone-500 pt-1">
-                        {m.facturasVencidas.length} boletas vencidas impagas ({m.facturasVencidas.map(f => f.periodo_facturado).join(', ')})
+                        {confirmandoCorteId !== m.id && (
+                          <button
+                            type="button"
+                            onClick={() => setConfirmandoCorteId(m.id)}
+                            className="px-4 py-2 bg-red-600 hover:bg-red-700 active:bg-red-800 text-white font-bold text-xs rounded-lg shadow-xs flex items-center gap-1.5 cursor-pointer"
+                          >
+                            <Scissors className="w-4 h-4" />
+                            <span>Registrar retiro</span>
+                          </button>
+                        )}
                       </div>
                     </div>
 
-                    <div className="flex items-center sm:flex-col sm:items-end justify-between gap-2">
-                      <div className="text-left sm:text-right">
-                        <div className="text-xs text-stone-500">Deuda Total Acumulada:</div>
-                        <div className="text-base font-black text-red-600">{formatGs(m.totalDeuda)}</div>
+                    {confirmandoCorteId === m.id && (
+                      <div className="p-3 bg-red-50 border border-red-200 rounded-lg flex flex-col sm:flex-row sm:items-center justify-between gap-2 text-xs">
+                        <span className="text-red-900 font-semibold">
+                          ¿Confirmar retiro físico del Medidor N° {m.numero_medidor}? Su mora quedará congelada y no se emitirán nuevas facturas mensuales.
+                        </span>
+                        <div className="flex items-center gap-2 shrink-0">
+                          <button
+                            type="button"
+                            onClick={() => setConfirmandoCorteId(null)}
+                            disabled={procesandoCorteId === m.id}
+                            className="px-3 py-1.5 bg-white hover:bg-stone-100 text-stone-700 border border-stone-300 rounded-md font-semibold cursor-pointer"
+                          >
+                            Cancelar
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => handleConfirmarCorte(m.numero_medidor, m.id)}
+                            disabled={procesandoCorteId === m.id}
+                            className="px-3 py-1.5 bg-red-600 hover:bg-red-700 text-white rounded-md font-bold cursor-pointer disabled:opacity-60"
+                          >
+                            {procesandoCorteId === m.id ? 'Registrando...' : 'Confirmar retiro'}
+                          </button>
+                        </div>
                       </div>
-
-                      <button
-                        type="button"
-                        onClick={() => handleConfirmarCorte(m.numero_medidor, m.id)}
-                        className="px-4 py-2 bg-red-600 hover:bg-red-700 active:bg-red-800 text-white font-bold text-xs rounded-lg shadow-xs flex items-center gap-1.5"
-                      >
-                        <Scissors className="w-4 h-4" />
-                        <span>Confirmar Retiro Físico</span>
-                      </button>
-                    </div>
+                    )}
                   </div>
                 ))
               )}
@@ -191,7 +258,7 @@ export const CorteReconexionView: React.FC = () => {
         </div>
       )}
 
-      {/* Contenido: Tab Cortados y Reconexión */}
+      {/* Contenido: Tab Cortados */}
       {tab === 'cortados' && (
         <div className="space-y-4">
           <div className="p-4 bg-stone-100 border border-stone-200 rounded-xl text-xs text-stone-700 flex items-start gap-3">
@@ -210,19 +277,19 @@ export const CorteReconexionView: React.FC = () => {
           <div className="bg-white rounded-xl border border-stone-200 overflow-hidden shadow-xs">
             <div className="divide-y divide-stone-100">
               {medidoresCortados.length === 0 ? (
-                <div className="p-8 text-center text-sm text-stone-500">
-                  No hay medidores cortados en el sistema actualmente.
+                <div className="p-8 text-center text-sm text-stone-500 font-medium">
+                  No hay medidores en este estado
                 </div>
               ) : (
                 medidoresCortados.map((m) => (
                   <div key={m.id} className="p-4 flex flex-col sm:flex-row sm:items-center justify-between gap-3 hover:bg-stone-50">
                     <div className="space-y-1">
-                      <div className="flex items-center gap-2">
+                      <div className="flex flex-wrap items-center gap-2">
                         <span className="font-mono font-bold text-base text-stone-900">
                           Medidor N° {m.numero_medidor}
                         </span>
-                        <span className="text-[10px] px-2 py-0.5 rounded-sm bg-stone-200 text-stone-800 font-bold">
-                          CORTADO (Físicamente retirado)
+                        <span className="text-[10px] px-2 py-0.5 rounded-sm bg-red-100 text-red-800 border border-red-300 font-bold uppercase">
+                          CORTADO
                         </span>
                         {m.fecha_corte && (
                           <span className="text-xs text-stone-500">Cortado el {m.fecha_corte}</span>
@@ -243,6 +310,10 @@ export const CorteReconexionView: React.FC = () => {
                         <span>Facturas: {formatGs(m.liquidacion.subtotalFacturas)}</span>
                         <span>Mora congelada: {formatGs(m.liquidacion.mora)}</span>
                         <span>Reconexión: {formatGs(m.liquidacion.montoReconexion)}</span>
+                        {m.liquidacion.subtotalCargos > 0 && (
+                          <span>Otros cargos: {formatGs(m.liquidacion.subtotalCargos)}</span>
+                        )}
+                        <span>ERSSAN 2%: {formatGs(m.liquidacion.montoErssan)}</span>
                       </div>
                     </div>
 
@@ -256,11 +327,11 @@ export const CorteReconexionView: React.FC = () => {
 
                       <button
                         type="button"
-                        onClick={() => handleReconectar(m.numero_medidor, m.id, m.liquidacion.totalPagar)}
-                        className="px-4 py-2 bg-emerald-600 hover:bg-emerald-700 active:bg-emerald-800 text-white font-bold text-xs rounded-lg shadow-xs flex items-center gap-1.5"
+                        onClick={() => setMedidorReconexionId(m.id)}
+                        className="px-4 py-2 bg-emerald-600 hover:bg-emerald-700 active:bg-emerald-800 text-white font-bold text-xs rounded-lg shadow-xs flex items-center gap-1.5 cursor-pointer"
                       >
                         <RotateCcw className="w-4 h-4" />
-                        <span>Cobrar y Reconectar</span>
+                        <span>Registrar reconexión</span>
                       </button>
                     </div>
                   </div>
@@ -269,6 +340,19 @@ export const CorteReconexionView: React.FC = () => {
             </div>
           </div>
         </div>
+      )}
+
+      {medidorReconexionId && (
+        <ModalRegistrarReconexion
+          medidorId={medidorReconexionId}
+          isOpen={Boolean(medidorReconexionId)}
+          onClose={() => setMedidorReconexionId(null)}
+          onSuccess={(resultado) => {
+            setMensaje(
+              `Medidor N° ${resultado.medidor.numero_medidor} reconectado y restituido a ACTIVO con éxito. Factura de regularización ${resultado.facturaRegularizacion.id} emitida y pagada.`
+            );
+          }}
+        />
       )}
     </div>
   );

@@ -193,3 +193,54 @@ export function formatearMensajePagoExitoso(
     pagadaCompletamente: false,
   };
 }
+
+/**
+ * Dado un período de consumo YYYY-MM (ej: '2026-09'), devuelve el mes siguiente (ej: '2026-10')
+ * como período de facturación sugerido.
+ */
+export function calcularPeriodoFacturadoSugerido(periodoConsumo: string): string {
+  const match = /^(\d{4})-(0[1-9]|1[0-2])$/.exec((periodoConsumo || '').trim());
+  if (!match) return '';
+  const year = parseInt(match[1], 10);
+  const month = parseInt(match[2], 10);
+  if (month === 12) {
+    return `${year + 1}-01`;
+  }
+  return `${year}-${String(month + 1).padStart(2, '0')}`;
+}
+
+/**
+ * Valida parámetros de entrada para emitir una factura individual para un medidor y período de consumo.
+ */
+export function validarSolicitudFacturaIndividual(params: {
+  numeroMedidor: number | string;
+  periodoConsumo: string;
+  periodoFacturado?: string;
+}): { valido: boolean; numeroMedidor?: number; periodoConsumo?: string; periodoFacturado?: string; error?: string } {
+  const numStr = String(params.numeroMedidor ?? '').trim();
+  if (!/^\d+$/.test(numStr)) {
+    return { valido: false, error: 'Ingresá un número de medidor entero válido.' };
+  }
+  const numero = parseInt(numStr, 10);
+  if (numero < 1) {
+    return { valido: false, error: 'El número de medidor debe ser mayor o igual a 1.' };
+  }
+
+  const periodoConsumo = (params.periodoConsumo || '').trim();
+  if (!/^\d{4}-(0[1-9]|1[0-2])$/.test(periodoConsumo)) {
+    return { valido: false, error: 'El período de consumo debe tener formato YYYY-MM (ej: 2026-09).' };
+  }
+
+  const periodoFacturado = (params.periodoFacturado || calcularPeriodoFacturadoSugerido(periodoConsumo)).trim();
+  if (!/^\d{4}-(0[1-9]|1[0-2])$/.test(periodoFacturado)) {
+    return { valido: false, error: 'El período de facturación debe tener formato YYYY-MM.' };
+  }
+
+  return {
+    valido: true,
+    numeroMedidor: numero,
+    periodoConsumo,
+    periodoFacturado,
+  };
+}
+

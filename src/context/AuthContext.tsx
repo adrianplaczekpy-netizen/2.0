@@ -172,6 +172,13 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
         });
 
         if (error) {
+          const msgLower = error.message.toLowerCase();
+          if (msgLower.includes('banned') || msgLower.includes('disabled')) {
+            return {
+              success: false,
+              error: 'Tu cuenta está inactiva o deshabilitada. Contactá al administrador.',
+            };
+          }
           return { success: false, error: error.message };
         }
 

@@ -5,6 +5,8 @@
 
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import fs from 'node:fs';
+import path from 'node:path';
 import {
   ordenarYFiltrarDetalles,
   resolverPeriodoPorDefecto,
@@ -17,6 +19,8 @@ import {
   puedeAnularFactura,
   puedeRegistrarPago,
   formatearMensajePagoExitoso,
+  calcularPeriodoFacturadoSugerido,
+  validarSolicitudFacturaIndividual,
 } from './facturacionHelpers';
 import { DetalleFactura } from '../types';
 import { formatGs } from './billingRules';
@@ -402,5 +406,149 @@ test('9. Control estricto de monto_pagado, saldo_pendiente y estado en pago tota
   assert.equal(resParcial2.factura.saldo_pendiente, 0);
   assert.equal(resParcial2.factura.estado, 'pagada');
 });
+
+test('10. Helpers de facturación individual validan medidor, período de consumo y sugieren mes de boleta', () => {
+  assert.equal(calcularPeriodoFacturadoSugerido('2026-09'), '2026-10');
+  assert.equal(calcularPeriodoFacturadoSugerido('2026-12'), '2027-01');
+
+  assert.equal(validarSolicitudFacturaIndividual({ numeroMedidor: '0', periodoConsumo: '2026-09' }).valido, false);
+  assert.equal(validarSolicitudFacturaIndividual({ numeroMedidor: '10', periodoConsumo: '2026-13' }).valido, false);
+
+  const ok = validarSolicitudFacturaIndividual({ numeroMedidor: '10', periodoConsumo: '2026-09' });
+  assert.equal(ok.valido, true);
+  assert.equal(ok.numeroMedidor, 10);
+  assert.equal(ok.periodoConsumo, '2026-09');
+  assert.equal(ok.periodoFacturado, '2026-10');
+});
+
+test('11. generarFacturaIndividualAsync emite SOLO 1 factura para medidor 10 y período consumo 2026-09 sin mutar si falla Supabase', async () => {
+  db.clearData();
+
+  const cli = db.agregarCliente({
+    nombre_completo: 'Titular Medidor 10',
+    documento: '7778889',
+    direccion: 'SAN GABRIEL - Lote 10',
+    telefono: '0981111222',
+    email: 'm10@example.com',
+  });
+  const med10 = db.agregarMedidor({
+    cliente_id: cli.id,
+    numero_medidor: 10,
+    fecha_instalacion: '2026-01-01',
+    direccion: 'SAN GABRIEL - Lote 10',
+    zona: 'SAN GABRIEL',
+    latitud: -25.391,
+    longitud: -57.384,
+    estado: 'activo',
+  });
+  db.agregarMedidor({
+    cliente_id: cli.id,
+    numero_medidor: 20,
+    fecha_instalacion: '2026-01-01',
+    direccion: 'SAN JOSE - Lote 20',
+    zona: 'SAN JOSE',
+    latitud: -25.388,
+    longitud: -57.381,
+    estado: 'activo',
+  });
+
+  // Lectura septiembre 2026 (12 m³ -> 48.000 + 2% = 48.960) y octubre 2026 para medidor 10, más lectura para medidor 20
+  const lec10Sep = db.registrarLectura({
+    numeroMedidor: 10,
+    lecturaActual: 12,
+    fechaLectura: '2026-09-25',
+    fotoUrl: 'https://example.com/m10-sep.jpg',
+    estado: 'confirmada',
+  });
+  db.registrarLectura({
+    numeroMedidor: 10,
+    lecturaActual: 25,
+    fechaLectura: '2026-10-25',
+    fotoUrl: 'https://example.com/m10-oct.jpg',
+    estado: 'confirmada',
+  });
+  db.registrarLectura({
+    numeroMedidor: 20,
+    lecturaActual: 15,
+    fechaLectura: '2026-09-25',
+    fotoUrl: 'https://example.com/m20-sep.jpg',
+    estado: 'confirmada',
+  });
+
+  // Simular fallo en Supabase: NO debe crear factura en memoria
+  const mockFalla = {
+    from() {
+      return {
+        insert: async () => ({ error: { message: 'RLS denied test' } }),
+      };
+    },
+  };
+  await assert.rejects(
+    () =>
+      db.generarFacturaIndividualAsync({
+        numeroMedidor: 10,
+        periodoConsumo: '2026-09',
+        periodoFacturado: '2026-10',
+        clientOverride: mockFalla,
+      }),
+    /RLS denied test/
+  );
+  assert.equal(db.getFullData().facturas.length, 0);
+
+  // Éxito en Supabase: crea exactamente 1 factura para medidor 10 y lectura 2026-09
+  const inserts: Record<string, any[]> = { facturas: [], detalle_factura: [] };
+  const mockOk = {
+    from(table: string) {
+      return {
+        insert: async (payload: any) => {
+          if (table === 'facturas') inserts.facturas.push(payload);
+          if (table === 'detalle_factura') inserts.detalle_factura.push(...payload);
+          return { error: null };
+        },
+        update: () => ({
+          eq: async () => ({ error: null }),
+          in: async () => ({ error: null }),
+        }),
+      };
+    },
+  };
+
+  const res = await db.generarFacturaIndividualAsync({
+    numeroMedidor: 10,
+    periodoConsumo: '2026-09',
+    periodoFacturado: '2026-10',
+    clientOverride: mockOk,
+  });
+
+  assert.equal(res.numeroMedidor, 10);
+  assert.equal(res.factura.medidor_id, med10.id);
+  assert.equal(res.factura.periodo_consumo, '2026-09');
+  assert.equal(res.factura.periodo_facturado, '2026-10');
+  assert.equal(res.factura.lectura_id, lec10Sep.lectura.id);
+  assert.equal(res.factura.consumo_m3, 12);
+  assert.equal(res.factura.total, 48960);
+  assert.equal(db.getFullData().facturas.length, 1);
+  assert.equal(inserts.facturas.length, 1);
+  assert.equal(inserts.detalle_factura.length, 2); // consumo_agua + erssan
+
+  // No permite duplicar la misma lectura ni el mismo período de boleta mientras esté activa
+  await assert.rejects(
+    () =>
+      db.generarFacturaIndividualAsync({
+        numeroMedidor: 10,
+        periodoConsumo: '2026-09',
+        periodoFacturado: '2026-11',
+        clientOverride: mockOk,
+      }),
+    /ya tiene una factura activa/
+  );
+
+  // Verificar que FacturacionBatchPanel.tsx expone la UI de facturación individual
+  const panelSrc = fs.readFileSync(path.join(process.cwd(), 'src/components/FacturacionBatchPanel.tsx'), 'utf8');
+  assert.match(panelSrc, /Facturar un solo medidor/);
+  assert.match(panelSrc, /generarFacturaIndividualAsync/);
+  assert.match(panelSrc, /ind-periodo-consumo/);
+});
+
 
 

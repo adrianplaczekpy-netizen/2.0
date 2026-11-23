@@ -35,6 +35,7 @@ export const ReportesView: React.FC = () => {
   const [medidorAReconectarId, setMedidorAReconectarId] = useState<string | null>(null);
   const [refreshKey, setRefreshKey] = useState(0);
   const [mensajeOperacion, setMensajeOperacion] = useState<string | null>(null);
+  const [errorOperacion, setErrorOperacion] = useState<string | null>(null);
 
   const stats = db.getDashboardStats();
   const listadoCortar = db.getListadoParaCortar();
@@ -62,27 +63,29 @@ export const ReportesView: React.FC = () => {
   // Reporte detallado de recaudación
   const recaudacionDetalle = db.getReporteRecaudacionDetallado(periodoFiltro);
 
-  const handleConfirmarCorte = (medidorId: string, numeroMedidor: number) => {
+  const handleConfirmarCorte = async (medidorId: string, numeroMedidor: number) => {
+    setErrorOperacion(null);
     try {
-      const med = db.confirmarCorteFisico(medidorId);
+      const med = await db.confirmarCorteFisicoAsync(medidorId);
       setMensajeOperacion(
         `Corte físico confirmado para Medidor N° ${numeroMedidor}. El medidor pasa a estado CORTADO con mora congelada en ${formatGs(med.mora_congelada || 0)}. No recibirá facturas mensuales.`
       );
       setRefreshKey((k) => k + 1);
     } catch (e: any) {
-      alert(`Error al registrar corte: ${e.message}`);
+      setErrorOperacion(`Error al registrar corte: ${e?.message || 'Error inesperado'}`);
     }
   };
 
-  const handleCobrarReconexion = (medidorId: string, numeroMedidor: number, totalPagar: number) => {
+  const handleCobrarReconexion = async (medidorId: string, numeroMedidor: number, totalPagar: number) => {
+    setErrorOperacion(null);
     try {
-      db.confirmarReconexion(medidorId, 'Caja Operativa');
+      await db.confirmarReconexionAsync(medidorId, 'Caja Operativa');
       setMensajeOperacion(
         `Medidor N° ${numeroMedidor} regularizado y reconectado con éxito. Se emitió factura de regularización por ${formatGs(totalPagar)} y el medidor vuelve a estado ACTIVO (mora vuelve a 0 Gs.).`
       );
       setRefreshKey((k) => k + 1);
     } catch (e: any) {
-      alert(`Error en reconexión: ${e.message}`);
+      setErrorOperacion(`Error en reconexión: ${e?.message || 'Error inesperado'}`);
     }
   };
 
@@ -120,6 +123,22 @@ export const ReportesView: React.FC = () => {
             type="button"
             onClick={() => setMensajeOperacion(null)}
             className="text-xs text-emerald-800 hover:underline cursor-pointer ml-3 shrink-0 font-bold"
+          >
+            Cerrar
+          </button>
+        </div>
+      )}
+
+      {errorOperacion && (
+        <div className="p-4 bg-red-50 border border-red-300 rounded-xl text-red-900 text-sm font-semibold flex items-center justify-between">
+          <div className="flex items-center gap-2">
+            <AlertTriangle className="w-5 h-5 text-red-600 shrink-0" />
+            <span>{errorOperacion}</span>
+          </div>
+          <button
+            type="button"
+            onClick={() => setErrorOperacion(null)}
+            className="text-xs text-red-800 hover:underline cursor-pointer ml-3 shrink-0 font-bold"
           >
             Cerrar
           </button>

@@ -152,7 +152,7 @@ test('3. Mora de 1 boleta vencida → 3.000', () => {
   assert.equal(detalleMora?.descripcion, 'Recargo por mora (1 boleta × 3.000)');
 });
 
-test('4. Mora de 3 boletas vencidas → 9.000', () => {
+test('4. Mora acumulada de 3 boletas vencidas (N-1 con mora=6.000 + nueva 3.000) → 9.000', () => {
   const facVencida1: Factura = {
     id: 'fac-v-1',
     medidor_id: medidorBase.id,
@@ -160,9 +160,11 @@ test('4. Mora de 3 boletas vencidas → 9.000', () => {
     periodo_facturado: '2026-08',
     fecha_emision: '2026-08-01',
     fecha_vencimiento: '2026-08-31',
-    estado: 'vencida',
+    estado: 'refinanciada',
     total: 36720,
-    saldo: 36720,
+    saldo_pendiente: 0,
+    saldo: 0,
+    motivo: 'Consolidada en factura 2026-09',
     es_tercera_boleta: false,
     alerta_consumo_elevado: false,
     numero_boleta_medidor: 1,
@@ -173,19 +175,33 @@ test('4. Mora de 3 boletas vencidas → 9.000', () => {
     id: 'fac-v-2',
     periodo_facturado: '2026-09',
     fecha_vencimiento: '2026-09-30',
+    motivo: 'Consolidada en factura 2026-10',
   };
 
   const facVencida3: Factura = {
-    ...facVencida1,
     id: 'fac-v-3',
+    medidor_id: medidorBase.id,
+    cliente_id: 'cli-test-01',
     periodo_facturado: '2026-10',
+    fecha_emision: '2026-10-01',
     fecha_vencimiento: '2026-10-11',
+    estado: 'vencida',
+    total: 118000,
+    saldo_pendiente: 118000,
+    saldo: 118000,
     es_tercera_boleta: true,
+    alerta_consumo_elevado: false,
+    numero_boleta_medidor: 3,
+    detalles: [
+      {
+        id: 'd-v3-mora',
+        factura_id: 'fac-v-3',
+        concepto: 'mora',
+        descripcion: 'Recargo por mora (2 boletas × 3.000)',
+        monto: 6000,
+      },
+    ],
   };
-
-  const moraCalc = calcularMoraMedidor([facVencida1, facVencida2, facVencida3], 3000, new Date('2026-11-05'));
-  assert.equal(moraCalc.cantidadVencidas, 3);
-  assert.equal(moraCalc.moraTotal, 9000);
 
   const res = calcularFacturaIndividual({
     medidor: medidorBase,
@@ -212,9 +228,11 @@ test('4. Mora de 3 boletas vencidas → 9.000', () => {
   });
 
   const detalleMora = res.detalles.find((d) => d.concepto === 'mora');
+  const detalleDeuda = res.detalles.find((d) => d.concepto === 'deuda_anterior');
   assert.ok(detalleMora, 'Debe incluir concepto mora');
   assert.equal(detalleMora?.monto, 9000);
   assert.equal(detalleMora?.descripcion, 'Recargo por mora (3 boletas × 3.000)');
+  assert.equal(detalleDeuda?.monto, 112000, 'Debe restar la mora (6.000) de N-1 (118.000)');
 });
 
 test('5. 3ra boleta → fecha de vencimiento día 11', () => {
@@ -551,18 +569,18 @@ test('10. Medidor cortado no recibe factura mensual', () => {
   assert.equal(omitido?.motivo, 'cortado');
 });
 
-test('11. Integración completa 7 conceptos: Base=311.000, ERSSAN=6.220, Total=317.220, Suma detalles=317.220', () => {
-  // Escenario exacto completo:
+test('11. Integración completa 7 conceptos: Base=266.000 (deuda N-1 sin mora=40.000, mora=6.000), ERSSAN=5.320, Total=271.320', () => {
+  // Escenario exacto completo con consolidación y separación de mora en N-1:
   // 1) consumo 15 m³ (15 * 4.000 = 60.000)
-  // 2) deuda anterior (85.000) en 2 boletas vencidas (45.000 + 40.000)
-  // 3) mora (2 boletas vencidas * 3.000 = 6.000)
+  // 2) deuda anterior = saldo_pendiente_N-1 (43.000) - mora_N-1 (3.000) = 40.000
+  // 3) mora = mora_N-1 (3.000) + mora nueva N-1 vencida (3.000) = 6.000
   // 4) otros trabajos (35.000)
   // 5) cuota conexión (40.000)
   // 6) pérdida financiada (25.000)
   // 7) reconexión (60.000)
-  // Base = 60.000 + 85.000 + 6.000 + 35.000 + 40.000 + 25.000 + 60.000 = 311.000
-  // ERSSAN 2% = 6.220
-  // Total = 317.220
+  // Base = 60.000 + 40.000 + 6.000 + 35.000 + 40.000 + 25.000 + 60.000 = 266.000
+  // ERSSAN 2% = 5.320
+  // Total = 271.320
   const medidorEscenario: Medidor = {
     ...medidorBase,
     id: 'med-int-07',
@@ -577,10 +595,11 @@ test('11. Integración completa 7 conceptos: Base=311.000, ERSSAN=6.220, Total=3
     periodo_facturado: '2026-09',
     fecha_emision: '2026-09-01',
     fecha_vencimiento: '2026-09-30',
-    estado: 'vencida',
+    estado: 'refinanciada',
     total: 45000,
-    saldo_pendiente: 45000,
-    saldo: 45000,
+    saldo_pendiente: 0,
+    saldo: 0,
+    motivo: 'Consolidada en factura 2026-10',
     es_tercera_boleta: false,
     alerta_consumo_elevado: false,
     numero_boleta_medidor: 1,
@@ -594,12 +613,21 @@ test('11. Integración completa 7 conceptos: Base=311.000, ERSSAN=6.220, Total=3
     fecha_emision: '2026-10-01',
     fecha_vencimiento: '2026-10-31',
     estado: 'vencida',
-    total: 40000,
-    saldo_pendiente: 40000,
-    saldo: 40000,
+    total: 43000,
+    saldo_pendiente: 43000,
+    saldo: 43000,
     es_tercera_boleta: false,
     alerta_consumo_elevado: false,
     numero_boleta_medidor: 2,
+    detalles: [
+      {
+        id: 'd-int-2-mora',
+        factura_id: 'fac-int-2',
+        concepto: 'mora',
+        descripcion: 'Recargo por mora (1 boleta × 3.000)',
+        monto: 3000,
+      },
+    ],
   };
 
   const cargoOtros: CargoPendiente = {
@@ -672,16 +700,20 @@ test('11. Integración completa 7 conceptos: Base=311.000, ERSSAN=6.220, Total=3
     fechaEmision: '2026-11-01',
   });
 
+  const detDeuda = res.detalles.find((d) => d.concepto === 'deuda_anterior');
+  const detMora = res.detalles.find((d) => d.concepto === 'mora');
   const baseSinErssan = res.detalles
     .filter((d) => d.concepto !== 'erssan')
     .reduce((acc, d) => acc + d.monto, 0);
   const erssan = res.detalles.find((d) => d.concepto === 'erssan')?.monto ?? 0;
   const sumaDetalles = res.detalles.reduce((acc, d) => acc + d.monto, 0);
 
-  assert.equal(baseSinErssan, 311000, 'La base imponible (conceptos 1-7) debe ser exactamente 311.000');
-  assert.equal(erssan, 6220, 'ERSSAN 2% sobre 311.000 debe ser exactamente 6.220');
-  assert.equal(res.factura.total, 317220, 'El total de la factura debe ser exactamente 317.220');
-  assert.equal(sumaDetalles, 317220, 'La suma de los 8 detalles debe cuadrar exactamente en 317.220');
+  assert.equal(detDeuda?.monto, 40000, 'La deuda anterior debe ser exclusivamente la de N-1 (2026-10 = 40.000)');
+  assert.equal(detMora?.monto, 6000, 'La mora debe mantenerse en 3.000 x 2 boletas vencidas = 6.000');
+  assert.equal(baseSinErssan, 266000, 'La base imponible (conceptos 1-7) debe ser exactamente 266.000');
+  assert.equal(erssan, 5320, 'ERSSAN 2% sobre 266.000 debe ser exactamente 5.320');
+  assert.equal(res.factura.total, 271320, 'El total de la factura debe ser exactamente 271.320');
+  assert.equal(sumaDetalles, 271320, 'La suma de los 8 detalles debe cuadrar exactamente en 271.320');
   assert.equal(res.detalles.length, 8, 'Deben existir exactamente 8 conceptos en detalle_factura');
   assert.equal(res.factura.numero_boleta_medidor, 3);
   assert.equal(res.factura.es_tercera_boleta, true);
@@ -748,13 +780,13 @@ test('12. Anular factura revierte cargo_pendiente asociado a estado "pendiente" 
   );
 });
 
-test('13. Transición de estado de medidor: 2 vencidas → 3ra boleta pasa a pendiente_corte → al pagar vuelve a activo o moroso', () => {
+test('13. Transición de estado de medidor: 2 vencidas → 3ra boleta consolida N-1 y pasa a pendiente_corte → al pagar vuelve a moroso o activo', () => {
   db.loadTestData();
 
   const medidor = db.getMedidores().medidores.find((m) => m.estado === 'activo')!;
   assert.ok(medidor);
 
-  // Dejar un escenario limpio para este medidor con exactamente 2 boletas vencidas impagas
+  // Dejar un escenario limpio para este medidor con 2 boletas vencidas impagas (con mora en N-1)
   const data = db.getFullData();
   data.facturas = data.facturas.filter((f) => f.medidor_id !== medidor.id);
   data.lecturas = data.lecturas.filter((l) => l.medidor_id !== medidor.id);
@@ -783,19 +815,28 @@ test('13. Transición de estado de medidor: 2 vencidas → 3ra boleta pasa a pen
     fecha_emision: '2027-06-01',
     fecha_vencimiento: '2027-06-30',
     estado: 'vencida',
-    total: 36720,
-    saldo_pendiente: 36720,
-    saldo: 36720,
+    total: 77234,
+    saldo_pendiente: 77234,
+    saldo: 77234,
     monto_pagado: 0,
     es_tercera_boleta: false,
     alerta_consumo_elevado: false,
     numero_boleta_medidor: 11,
+    detalles: [
+      {
+        id: 'd-tr-2-mora',
+        factura_id: 'fac-tr-2',
+        concepto: 'mora',
+        descripcion: 'Recargo por mora (1 boleta × 3.000)',
+        monto: 3000,
+      },
+    ],
   };
 
   data.facturas.push(facV1, facV2);
   db.actualizarMedidor(medidor.id, { estado: 'moroso' });
 
-  // Registrar lectura confirmada para 2027-07 (se facturará la 3ra boleta)
+  // Registrar lectura confirmada para 2027-07 (se facturará la 3ra boleta consolidada)
   db.registrarLectura({
     numeroMedidor: medidor.numero_medidor,
     lecturaActual: 150,
@@ -812,15 +853,41 @@ test('13. Transición de estado de medidor: 2 vencidas → 3ra boleta pasa a pen
   assert.equal(fac3.fecha_vencimiento, '2027-07-11');
   assert.equal(fac3.numero_boleta_medidor, 12, 'Debe respetar correlativo MAX(11) + 1 = 12');
 
+  // N-1 (facV2) pasó a 'refinanciada' con saldo 0 al consolidarse en fac3
+  assert.equal(facV2.estado, 'refinanciada');
+  assert.equal(facV2.saldo_pendiente, 0);
+  assert.equal(facV2.motivo, 'Consolidada en factura 2027-07');
+
+  // No debe permitirse cobrar directamente una factura refinanciada
+  assert.throws(
+    () =>
+      db.registrarCobro({
+        facturaId: facV2.id,
+        monto: 1000,
+        metodoPago: 'efectivo',
+      }),
+    /refinanciada/i
+  );
+
   // El medidor debe haber pasado automáticamente a 'pendiente_corte'
   const medLuegoFacturar = db.getMedidores().medidores.find((m) => m.id === medidor.id)!;
   assert.equal(
     medLuegoFacturar.estado,
     'pendiente_corte',
-    'Medidor con 2 vencidas debe pasar a pendiente_corte al facturar la 3ra boleta'
+    'Medidor con 2 boletas acumuladas debe pasar a pendiente_corte al facturar la 3ra boleta'
   );
 
-  // Caso A: Si paga una de las vencidas (queda 1 vencida + la 3ra pendiente en fecha), pasa a 'moroso'
+  // Caso A: Si paga la boleta consolidada (fac3), queda solamente facV1 vencida → baja a 'moroso'
+  const cobro3 = db.registrarCobro({
+    facturaId: fac3.id,
+    monto: fac3.total,
+    metodoPago: 'efectivo',
+  });
+  assert.equal(fac3.estado, 'pagada');
+  assert.equal(facV2.estado, 'refinanciada', 'facV2 debe seguir refinanciada con saldo 0');
+  assert.equal(cobro3.estadoMedidorActualizado, 'moroso');
+
+  // Caso B: Al pagar también facV1, ya no quedan facturas impagas → pasa a 'activo'
   const cobro1 = db.registrarCobro({
     facturaId: facV1.id,
     monto: facV1.total,
@@ -828,30 +895,10 @@ test('13. Transición de estado de medidor: 2 vencidas → 3ra boleta pasa a pen
   });
   assert.equal(
     cobro1.estadoMedidorActualizado,
-    'moroso',
-    'Al pagar una boleta vencida y quedar solo 1 vencida impaga, debe bajar de pendiente_corte a moroso'
-  );
-
-  // Caso B: Si paga la restante vencida (facV2), ya no quedan boletas vencidas impagas → pasa a 'activo'
-  const cobro2 = db.registrarCobro({
-    facturaId: facV2.id,
-    monto: facV2.total,
-    metodoPago: 'efectivo',
-  });
-  assert.equal(
-    cobro2.estadoMedidorActualizado,
     'activo',
-    'Al pagar todas las facturas vencidas, el medidor debe volver automáticamente a activo'
+    'Al pagar todas las facturas activas impagas, el medidor debe volver automáticamente a activo'
   );
-  assert.equal(cobro2.medidorPasoAActivo, true);
-
-  // Y al pagar también la 3ra boleta pendiente en fecha, continúa en 'activo'
-  const cobro3 = db.registrarCobro({
-    facturaId: fac3.id,
-    monto: fac3.total,
-    metodoPago: 'efectivo',
-  });
-  assert.equal(cobro3.estadoMedidorActualizado, 'activo');
+  assert.equal(cobro1.medidorPasoAActivo, true);
 });
 
 test('14. Tarifas: getTarifasVigentes respeta vigencia y orden independiente de DESC/ASC, y facturación usa tarifa de fechaEmision', () => {
@@ -1238,4 +1285,1089 @@ test('19. Persistencia Supabase: buildFacturaInsertPayload incluye periodo_consu
   assert.equal('monto_pagado' in insertedPayloads[2], false);
   assert.equal(updatedMedidorEstado, 'activo');
 });
+
+test('20. Regresión Medidor 103 con separación de mora: 2026-09 refinanciada y 2026-10 impaga (77.234 con mora 3.000) -> 2026-11 deuda=74.234, mora=6.000, ERSSAN=2.325, Total=118.559', async () => {
+  // 1) Verificación unitaria pura con calcularFacturaIndividual
+  const medidor103: Medidor = {
+    ...medidorBase,
+    id: 'med-103-unit',
+    numero_medidor: 103,
+    estado: 'moroso',
+  };
+
+  const fac202609: Factura = {
+    id: 'fac-103-202609',
+    medidor_id: medidor103.id,
+    cliente_id: 'cli-test-01',
+    periodo_consumo: '2026-08',
+    periodo_facturado: '2026-09',
+    fecha_emision: '2026-09-01',
+    fecha_vencimiento: '2026-09-30',
+    estado: 'refinanciada',
+    total: 36720,
+    saldo_pendiente: 0,
+    saldo: 0,
+    monto_pagado: 0,
+    motivo: 'Consolidada en factura 2026-10',
+    es_tercera_boleta: false,
+    alerta_consumo_elevado: false,
+    numero_boleta_medidor: 1,
+  };
+
+  const fac202610: Factura = {
+    id: 'fac-103-202610',
+    medidor_id: medidor103.id,
+    cliente_id: 'cli-test-01',
+    periodo_consumo: '2026-09',
+    periodo_facturado: '2026-10',
+    fecha_emision: '2026-10-01',
+    fecha_vencimiento: '2026-10-31',
+    estado: 'vencida',
+    total: 77234,
+    saldo_pendiente: 77234,
+    saldo: 77234,
+    monto_pagado: 0,
+    es_tercera_boleta: false,
+    alerta_consumo_elevado: false,
+    numero_boleta_medidor: 2,
+    detalles: [
+      { id: 'd-103-1', factura_id: 'fac-103-202610', concepto: 'consumo_agua', descripcion: 'Consumo mínimo', monto: 36000 },
+      { id: 'd-103-2', factura_id: 'fac-103-202610', concepto: 'deuda_anterior', descripcion: 'Deuda anterior', monto: 36720 },
+      { id: 'd-103-3', factura_id: 'fac-103-202610', concepto: 'mora', descripcion: 'Recargo por mora (1 boleta × 3.000)', monto: 3000 },
+      { id: 'd-103-4', factura_id: 'fac-103-202610', concepto: 'erssan', descripcion: 'ERSSAN 2%', monto: 1514 },
+    ],
+  };
+
+  const resUnit = calcularFacturaIndividual({
+    medidor: medidor103,
+    clienteId: 'cli-test-01',
+    periodo: '2026-11',
+    lecturaMes: {
+      id: 'lec-103-202610',
+      medidor_id: medidor103.id,
+      periodo: '2026-10',
+      fecha_lectura: '2026-10-28',
+      lectura_anterior: 500,
+      lectura_actual: 505, // 5 m³ -> consumo mínimo 36.000
+      consumo_m3: 5,
+      foto_medidor_url: 'https://example.com/med103.jpg',
+      estado: 'confirmada',
+      registrado_por: 'lector-1',
+      fecha_registro: '2026-10-28',
+    },
+    lecturasAnteriores: [],
+    facturasImpagasAnteriores: [fac202609, fac202610],
+    cargosPendientes: [],
+    planesFinanciamiento: [],
+    correlativoPorMedidor: 3,
+    fechaReferencia: new Date('2026-11-01T12:00:00Z'),
+    fechaEmision: '2026-11-01',
+  });
+
+  const detAgua = resUnit.detalles.find((d) => d.concepto === 'consumo_agua');
+  const detDeuda = resUnit.detalles.find((d) => d.concepto === 'deuda_anterior');
+  const detMora = resUnit.detalles.find((d) => d.concepto === 'mora');
+  const detErssan = resUnit.detalles.find((d) => d.concepto === 'erssan');
+
+  assert.equal(detAgua?.monto, 36000);
+  assert.equal(detDeuda?.monto, 74234, 'Debe restar la mora (3.000) de N-1 (77.234) -> 74.234');
+  assert.equal(detMora?.monto, 6000, 'Mora acumulada = 3.000 (de 2026-09) + 3.000 (de 2026-10) = 6.000');
+  assert.equal(detErssan?.monto, 2325, 'ERSSAN 2% de (74.234 + 6.000 + 36.000 = 116.234) = 2.325');
+  assert.equal(resUnit.factura.total, 118559);
+  assert.equal(resUnit.facturaAnteriorARefinanciar?.id, fac202610.id);
+
+  // 2) Verificación integral con db.generarFacturaIndividualAsync
+  db.clearData();
+  const cli = db.agregarCliente({
+    nombre_completo: 'Cliente Medidor 103',
+    documento: '1030103',
+    direccion: 'San Gabriel',
+    telefono: '0981103103',
+    email: 'med103@example.com',
+  });
+  const med103Db = db.agregarMedidor({
+    cliente_id: cli.id,
+    numero_medidor: 103,
+    fecha_instalacion: '2026-01-01',
+    direccion: 'Lote 103',
+    zona: 'SAN GABRIEL',
+    latitud: -25.39,
+    longitud: -57.38,
+    estado: 'moroso',
+  });
+
+  const data = db.getFullData();
+  data.facturas.push(
+    {
+      ...fac202609,
+      medidor_id: med103Db.id,
+      cliente_id: cli.id,
+    },
+    {
+      ...fac202610,
+      medidor_id: med103Db.id,
+      cliente_id: cli.id,
+    }
+  );
+  data.lecturas.push({
+    id: 'lec-103-db-oct',
+    medidor_id: med103Db.id,
+    periodo: '2026-10',
+    fecha_lectura: '2026-10-28',
+    lectura_anterior: 500,
+    lectura_actual: 506,
+    consumo_m3: 6,
+    foto_medidor_url: 'https://example.com/103-oct.jpg',
+    estado: 'confirmada',
+    registrado_por: 'lector-1',
+    fecha_registro: '2026-10-28',
+  });
+
+  const regen = await db.generarFacturaIndividualAsync({
+    numeroMedidor: 103,
+    periodoConsumo: '2026-10',
+    periodoFacturado: '2026-11',
+    fechaEmision: '2026-11-01',
+  });
+
+  assert.equal(regen.detalles.find((d) => d.concepto === 'deuda_anterior')?.monto, 74234);
+  assert.equal(regen.detalles.find((d) => d.concepto === 'mora')?.monto, 6000);
+  assert.equal(regen.detalles.find((d) => d.concepto === 'consumo_agua')?.monto, 36000);
+  assert.equal(regen.detalles.find((d) => d.concepto === 'erssan')?.monto, 2325);
+  assert.equal(regen.factura.total, 118559);
+  const fac10EnDb = db.getFullData().facturas.find((f) => f.id === fac202610.id);
+  assert.equal(fac10EnDb?.estado, 'refinanciada');
+  assert.equal(fac10EnDb?.saldo_pendiente, 0);
+});
+
+test('21. Deuda anterior con 2026-10 PAGADA -> facturar 2026-11 da deuda_anterior = 0 (incluso con 2026-09 vencida)', () => {
+  const medidor: Medidor = {
+    ...medidorBase,
+    id: 'med-n1-pagada',
+    numero_medidor: 104,
+    estado: 'moroso',
+  };
+
+  const fac202609Impaga: Factura = {
+    id: 'fac-104-09',
+    medidor_id: medidor.id,
+    cliente_id: 'cli-test-01',
+    periodo_facturado: '2026-09',
+    fecha_emision: '2026-09-01',
+    fecha_vencimiento: '2026-09-30',
+    estado: 'vencida',
+    total: 36720,
+    saldo_pendiente: 36720,
+    saldo: 36720,
+    es_tercera_boleta: false,
+    alerta_consumo_elevado: false,
+    numero_boleta_medidor: 1,
+  };
+
+  const fac202610Pagada: Factura = {
+    id: 'fac-104-10',
+    medidor_id: medidor.id,
+    cliente_id: 'cli-test-01',
+    periodo_facturado: '2026-10',
+    fecha_emision: '2026-10-01',
+    fecha_vencimiento: '2026-10-31',
+    estado: 'pagada',
+    total: 77234,
+    saldo_pendiente: 0,
+    saldo: 0,
+    monto_pagado: 77234,
+    es_tercera_boleta: false,
+    alerta_consumo_elevado: false,
+    numero_boleta_medidor: 2,
+  };
+
+  const res = calcularFacturaIndividual({
+    medidor,
+    clienteId: 'cli-test-01',
+    periodo: '2026-11',
+    lecturaMes: {
+      id: 'lec-104-11',
+      medidor_id: medidor.id,
+      periodo: '2026-10',
+      fecha_lectura: '2026-10-28',
+      lectura_anterior: 100,
+      lectura_actual: 105,
+      consumo_m3: 5,
+      foto_medidor_url: 'https://example.com/104.jpg',
+      estado: 'confirmada',
+      registrado_por: 'lector-1',
+      fecha_registro: '2026-10-28',
+    },
+    lecturasAnteriores: [],
+    facturasImpagasAnteriores: [fac202609Impaga, fac202610Pagada],
+    cargosPendientes: [],
+    planesFinanciamiento: [],
+    correlativoPorMedidor: 3,
+    fechaReferencia: new Date('2026-11-01T12:00:00Z'),
+    fechaEmision: '2026-11-01',
+  });
+
+  const detDeuda = res.detalles.find((d) => d.concepto === 'deuda_anterior');
+  assert.equal(detDeuda, undefined, 'Si 2026-10 está pagada, deuda_anterior debe ser 0 y no incluirse en detalles');
+});
+
+test('22. Medidor sin facturas anteriores -> deuda_anterior = 0 (no aparece en detalles)', () => {
+  const medidor: Medidor = {
+    ...medidorBase,
+    id: 'med-sin-facturas',
+    numero_medidor: 105,
+    estado: 'activo',
+  };
+
+  const res = calcularFacturaIndividual({
+    medidor,
+    clienteId: 'cli-test-01',
+    periodo: '2026-11',
+    lecturaMes: {
+      id: 'lec-105-11',
+      medidor_id: medidor.id,
+      periodo: '2026-10',
+      fecha_lectura: '2026-10-28',
+      lectura_anterior: 0,
+      lectura_actual: 8,
+      consumo_m3: 8,
+      foto_medidor_url: 'https://example.com/105.jpg',
+      estado: 'confirmada',
+      registrado_por: 'lector-1',
+      fecha_registro: '2026-10-28',
+    },
+    lecturasAnteriores: [],
+    facturasImpagasAnteriores: [],
+    cargosPendientes: [],
+    planesFinanciamiento: [],
+    correlativoPorMedidor: 1,
+    fechaReferencia: new Date('2026-11-01T12:00:00Z'),
+    fechaEmision: '2026-11-01',
+  });
+
+  assert.equal(res.detalles.some((d) => d.concepto === 'deuda_anterior'), false);
+  assert.equal(res.detalles.find((d) => d.concepto === 'consumo_agua')?.monto, 36000);
+  assert.equal(res.detalles.find((d) => d.concepto === 'erssan')?.monto, 720);
+  assert.equal(res.factura.total, 36720);
+});
+
+test('23. Medidor con 2026-10 ANULADA -> deuda_anterior = 0; cambio de año 2025-12 -> 2026-01 resuelve N-1 correctamente', async () => {
+  const medidor: Medidor = {
+    ...medidorBase,
+    id: 'med-n1-anulada',
+    numero_medidor: 106,
+    estado: 'activo',
+  };
+
+  const fac202610Anulada: Factura = {
+    id: 'fac-106-10-anu',
+    medidor_id: medidor.id,
+    cliente_id: 'cli-test-01',
+    periodo_facturado: '2026-10',
+    fecha_emision: '2026-10-01',
+    fecha_vencimiento: '2026-10-31',
+    estado: 'anulada',
+    total: 77234,
+    saldo_pendiente: 77234,
+    saldo: 77234,
+    es_tercera_boleta: false,
+    alerta_consumo_elevado: false,
+    numero_boleta_medidor: 1,
+  };
+
+  const resAnulada = calcularFacturaIndividual({
+    medidor,
+    clienteId: 'cli-test-01',
+    periodo: '2026-11',
+    lecturaMes: {
+      id: 'lec-106-11',
+      medidor_id: medidor.id,
+      periodo: '2026-10',
+      fecha_lectura: '2026-10-28',
+      lectura_anterior: 10,
+      lectura_actual: 15,
+      consumo_m3: 5,
+      foto_medidor_url: 'https://example.com/106.jpg',
+      estado: 'confirmada',
+      registrado_por: 'lector-1',
+      fecha_registro: '2026-10-28',
+    },
+    lecturasAnteriores: [],
+    facturasImpagasAnteriores: [fac202610Anulada],
+    cargosPendientes: [],
+    planesFinanciamiento: [],
+    correlativoPorMedidor: 2,
+    fechaReferencia: new Date('2026-11-01T12:00:00Z'),
+    fechaEmision: '2026-11-01',
+  });
+
+  assert.equal(
+    resAnulada.detalles.some((d) => d.concepto === 'deuda_anterior'),
+    false,
+    'Si 2026-10 está anulada, deuda_anterior debe ser 0'
+  );
+
+  // Cambio de año: facturar 2026-01 debe buscar 2025-12 como N-1
+  const fac202512: Factura = {
+    id: 'fac-106-202512',
+    medidor_id: medidor.id,
+    cliente_id: 'cli-test-01',
+    periodo_facturado: '2025-12',
+    fecha_emision: '2025-12-01',
+    fecha_vencimiento: '2025-12-31',
+    estado: 'vencida',
+    total: 50000,
+    saldo_pendiente: 50000,
+    saldo: 50000,
+    es_tercera_boleta: false,
+    alerta_consumo_elevado: false,
+    numero_boleta_medidor: 3,
+  };
+
+  const resEnero = calcularFacturaIndividual({
+    medidor,
+    clienteId: 'cli-test-01',
+    periodo: '2026-01',
+    lecturaMes: {
+      id: 'lec-106-202601',
+      medidor_id: medidor.id,
+      periodo: '2025-12',
+      fecha_lectura: '2025-12-28',
+      lectura_anterior: 15,
+      lectura_actual: 20,
+      consumo_m3: 5,
+      foto_medidor_url: 'https://example.com/106-ene.jpg',
+      estado: 'confirmada',
+      registrado_por: 'lector-1',
+      fecha_registro: '2025-12-28',
+    },
+    lecturasAnteriores: [],
+    facturasImpagasAnteriores: [fac202512],
+    cargosPendientes: [],
+    planesFinanciamiento: [],
+    correlativoPorMedidor: 4,
+    fechaReferencia: new Date('2026-01-01T12:00:00Z'),
+    fechaEmision: '2026-01-01',
+  });
+
+  assert.equal(resEnero.detalles.find((d) => d.concepto === 'deuda_anterior')?.monto, 50000);
+});
+
+test('24. Regresión Medidor 132: deuda_anterior = 82.394 (85.394 - 3.000), mora = 6.000, consumo = 36.000, ERSSAN = 2.488, Total = 126.882 y 2026-10 refinanciada con saldo 0', async () => {
+  const medidor132: Medidor = {
+    ...medidorBase,
+    id: 'med-132-test',
+    numero_medidor: 132,
+    estado: 'moroso',
+  };
+
+  const fac202609Ref: Factura = {
+    id: 'fac-132-202609',
+    medidor_id: medidor132.id,
+    cliente_id: 'cli-test-01',
+    periodo_consumo: '2026-08',
+    periodo_facturado: '2026-09',
+    fecha_emision: '2026-09-01',
+    fecha_vencimiento: '2026-09-30',
+    estado: 'refinanciada',
+    total: 36720,
+    saldo_pendiente: 0,
+    saldo: 0,
+    monto_pagado: 0,
+    motivo: 'Consolidada en factura 2026-10',
+    es_tercera_boleta: false,
+    alerta_consumo_elevado: false,
+    numero_boleta_medidor: 1,
+  };
+
+  // Factura 2026-10: consumo 44.000 + deuda 36.720 + mora 3.000 + ERSSAN 1.674 = 85.394
+  const fac202610Vencida: Factura = {
+    id: 'fac-132-202610',
+    medidor_id: medidor132.id,
+    cliente_id: 'cli-test-01',
+    periodo_consumo: '2026-09',
+    periodo_facturado: '2026-10',
+    fecha_emision: '2026-10-01',
+    fecha_vencimiento: '2026-10-31',
+    estado: 'vencida',
+    total: 85394,
+    saldo_pendiente: 85394,
+    saldo: 85394,
+    monto_pagado: 0,
+    es_tercera_boleta: false,
+    alerta_consumo_elevado: false,
+    numero_boleta_medidor: 2,
+    detalles: [
+      { id: 'd-132-10-agua', factura_id: 'fac-132-202610', concepto: 'consumo_agua', descripcion: 'Consumo de agua (11 m³ × 4.000)', monto: 44000 },
+      { id: 'd-132-10-deuda', factura_id: 'fac-132-202610', concepto: 'deuda_anterior', descripcion: 'Deuda anterior (período 2026-09)', monto: 36720 },
+      { id: 'd-132-10-mora', factura_id: 'fac-132-202610', concepto: 'mora', descripcion: 'Recargo por mora (1 boleta × 3.000)', monto: 3000 },
+      { id: 'd-132-10-erssan', factura_id: 'fac-132-202610', concepto: 'erssan', descripcion: 'ERSSAN (2%)', monto: 1674 },
+    ],
+  };
+
+  // 1) Verificación unitaria pura con calcularFacturaIndividual
+  const resUnit = calcularFacturaIndividual({
+    medidor: medidor132,
+    clienteId: 'cli-test-01',
+    periodo: '2026-11',
+    lecturaMes: {
+      id: 'lec-132-202610',
+      medidor_id: medidor132.id,
+      periodo: '2026-10',
+      fecha_lectura: '2026-10-28',
+      lectura_anterior: 200,
+      lectura_actual: 206, // 6 m³ -> mínimo 36.000
+      consumo_m3: 6,
+      foto_medidor_url: 'https://example.com/132.jpg',
+      estado: 'confirmada',
+      registrado_por: 'lector-1',
+      fecha_registro: '2026-10-28',
+    },
+    lecturasAnteriores: [],
+    facturasImpagasAnteriores: [fac202609Ref, fac202610Vencida],
+    cargosPendientes: [],
+    planesFinanciamiento: [],
+    correlativoPorMedidor: 3,
+    fechaReferencia: new Date('2026-11-01T12:00:00Z'),
+    fechaEmision: '2026-11-01',
+  });
+
+  assert.equal(resUnit.detalles.find((d) => d.concepto === 'deuda_anterior')?.monto, 82394);
+  assert.equal(resUnit.detalles.find((d) => d.concepto === 'consumo_agua')?.monto, 36000);
+  assert.equal(resUnit.detalles.find((d) => d.concepto === 'mora')?.monto, 6000);
+  assert.equal(resUnit.detalles.find((d) => d.concepto === 'erssan')?.monto, 2488);
+  assert.equal(resUnit.factura.total, 126882);
+  assert.equal(resUnit.factura.es_tercera_boleta, true);
+  assert.equal(resUnit.facturaAnteriorARefinanciar?.id, fac202610Vencida.id);
+  assert.equal(resUnit.facturaAnteriorARefinanciar?.motivo, 'Consolidada en factura 2026-11');
+
+  // 2) Verificación integral completa en DatabaseEngine + persistencia simulada Supabase + cobro de 2026-11
+  db.clearData();
+  const cli = db.agregarCliente({
+    nombre_completo: 'Cliente Medidor 132',
+    documento: '1320132',
+    direccion: 'San Gabriel',
+    telefono: '0981132132',
+    email: 'med132@example.com',
+  });
+  const medDb = db.agregarMedidor({
+    cliente_id: cli.id,
+    numero_medidor: 132,
+    fecha_instalacion: '2026-01-01',
+    direccion: 'Lote 132',
+    zona: 'SAN GABRIEL',
+    latitud: -25.39,
+    longitud: -57.38,
+    estado: 'moroso',
+  });
+
+  const data = db.getFullData();
+  data.facturas.push(
+    { ...fac202609Ref, medidor_id: medDb.id, cliente_id: cli.id },
+    { ...fac202610Vencida, medidor_id: medDb.id, cliente_id: cli.id }
+  );
+  data.lecturas.push({
+    id: 'lec-132-db-oct',
+    medidor_id: medDb.id,
+    periodo: '2026-10',
+    fecha_lectura: '2026-10-28',
+    lectura_anterior: 200,
+    lectura_actual: 206,
+    consumo_m3: 6,
+    foto_medidor_url: 'https://example.com/132-oct.jpg',
+    estado: 'confirmada',
+    registrado_por: 'lector-1',
+    fecha_registro: '2026-10-28',
+  });
+
+  // Mock Supabase que registra actualización a refinanciada en N-1
+  const supabaseUpdates: Array<{ table: string; payload: any; id: string }> = [];
+  const fakeClient: any = {
+    from: (table: string) => ({
+      insert: async () => ({ error: null }),
+      update: (payload: any) => ({
+        eq: async (_col: string, id: string) => {
+          supabaseUpdates.push({ table, payload, id });
+          return { error: null };
+        },
+        in: async () => ({ error: null }),
+      }),
+    }),
+  };
+
+  const gen = await db.generarFacturaIndividualAsync({
+    numeroMedidor: 132,
+    periodoConsumo: '2026-10',
+    periodoFacturado: '2026-11',
+    fechaEmision: '2026-11-01',
+    clientOverride: fakeClient,
+  });
+
+  assert.equal(gen.detalles.find((d) => d.concepto === 'deuda_anterior')?.monto, 82394);
+  assert.equal(gen.detalles.find((d) => d.concepto === 'mora')?.monto, 6000);
+  assert.equal(gen.detalles.find((d) => d.concepto === 'consumo_agua')?.monto, 36000);
+  assert.equal(gen.detalles.find((d) => d.concepto === 'erssan')?.monto, 2488);
+  assert.equal(gen.factura.total, 126882);
+
+  // Verificar que 2026-10 pasó a refinanciada con saldo 0 en memoria y en Supabase
+  const fac10Despues = db.getFullData().facturas.find((f) => f.id === fac202610Vencida.id)!;
+  assert.equal(fac10Despues.estado, 'refinanciada');
+  assert.equal(fac10Despues.saldo_pendiente, 0);
+  assert.equal(fac10Despues.saldo, 0);
+  assert.equal(fac10Despues.motivo, 'Consolidada en factura 2026-11');
+
+  const refUpdateSb = supabaseUpdates.find((u) => u.table === 'facturas' && u.id === fac202610Vencida.id);
+  assert.ok(refUpdateSb, 'Debe persistir el estado refinanciada en Supabase para la factura N-1');
+  assert.deepEqual(refUpdateSb?.payload, {
+    estado: 'refinanciada',
+    saldo_pendiente: 0,
+    motivo: 'Consolidada en factura 2026-11',
+  });
+
+  // Deuda total del cliente debe ser exclusivamente 126.882 (no suma 2026-09 ni 2026-10)
+  const medDetalle = db.getMedidorDetalle(medDb.id);
+  assert.equal(medDetalle?.totalDeuda, 126882);
+  assert.equal(medDetalle?.moraCalculada, 6000);
+
+  // Regla 4: al pagar 2026-11, solo 2026-11 pasa a 'pagada'; las refinanciadas quedan en 'refinanciada' con saldo 0
+  const cobro = db.registrarCobro({
+    facturaId: gen.factura.id,
+    monto: 126882,
+    metodoPago: 'efectivo',
+  });
+  assert.equal(cobro.factura.estado, 'pagada');
+  assert.equal(cobro.estadoMedidorActualizado, 'activo');
+  assert.equal(db.getFullData().facturas.find((f) => f.id === fac202609Ref.id)?.estado, 'refinanciada');
+  assert.equal(db.getFullData().facturas.find((f) => f.id === fac202609Ref.id)?.saldo_pendiente, 0);
+  assert.equal(db.getFullData().facturas.find((f) => f.id === fac202610Vencida.id)?.estado, 'refinanciada');
+  assert.equal(db.getFullData().facturas.find((f) => f.id === fac202610Vencida.id)?.saldo_pendiente, 0);
+  assert.equal(db.getMedidorDetalle(medDb.id)?.totalDeuda, 0);
+});
+
+test('25. Con 2026-10 PAGADA y sin facturas anteriores -> deuda = 0 y mora = 0', () => {
+  const medidor: Medidor = {
+    ...medidorBase,
+    id: 'med-pagada-mora-0',
+    numero_medidor: 133,
+    estado: 'activo',
+  };
+
+  const fac202610Pagada: Factura = {
+    id: 'fac-133-10',
+    medidor_id: medidor.id,
+    cliente_id: 'cli-test-01',
+    periodo_facturado: '2026-10',
+    fecha_emision: '2026-10-01',
+    fecha_vencimiento: '2026-10-31',
+    estado: 'pagada',
+    total: 85394,
+    saldo_pendiente: 0,
+    saldo: 0,
+    monto_pagado: 85394,
+    es_tercera_boleta: false,
+    alerta_consumo_elevado: false,
+    numero_boleta_medidor: 2,
+    detalles: [
+      { id: 'd-133-m', factura_id: 'fac-133-10', concepto: 'mora', descripcion: 'Mora', monto: 3000 },
+    ],
+  };
+
+  const resPagada = calcularFacturaIndividual({
+    medidor,
+    clienteId: 'cli-test-01',
+    periodo: '2026-11',
+    lecturaMes: {
+      id: 'lec-133-1',
+      medidor_id: medidor.id,
+      periodo: '2026-10',
+      fecha_lectura: '2026-10-28',
+      lectura_anterior: 10,
+      lectura_actual: 15,
+      consumo_m3: 5,
+      foto_medidor_url: 'https://example.com/133.jpg',
+      estado: 'confirmada',
+      registrado_por: 'lector-1',
+      fecha_registro: '2026-10-28',
+    },
+    lecturasAnteriores: [],
+    facturasImpagasAnteriores: [fac202610Pagada],
+    cargosPendientes: [],
+    planesFinanciamiento: [],
+    correlativoPorMedidor: 3,
+    fechaReferencia: new Date('2026-11-01T12:00:00Z'),
+    fechaEmision: '2026-11-01',
+  });
+
+  assert.equal(resPagada.detalles.some((d) => d.concepto === 'deuda_anterior'), false);
+  assert.equal(resPagada.detalles.some((d) => d.concepto === 'mora'), false);
+  assert.equal(resPagada.facturaAnteriorARefinanciar, null);
+  assert.equal(resPagada.factura.total, 36720);
+
+  const resSinFacturas = calcularFacturaIndividual({
+    medidor,
+    clienteId: 'cli-test-01',
+    periodo: '2026-11',
+    lecturaMes: {
+      id: 'lec-133-2',
+      medidor_id: medidor.id,
+      periodo: '2026-10',
+      fecha_lectura: '2026-10-28',
+      lectura_anterior: 0,
+      lectura_actual: 5,
+      consumo_m3: 5,
+      foto_medidor_url: 'https://example.com/133b.jpg',
+      estado: 'confirmada',
+      registrado_por: 'lector-1',
+      fecha_registro: '2026-10-28',
+    },
+    lecturasAnteriores: [],
+    facturasImpagasAnteriores: [],
+    cargosPendientes: [],
+    planesFinanciamiento: [],
+    correlativoPorMedidor: 1,
+    fechaReferencia: new Date('2026-11-01T12:00:00Z'),
+    fechaEmision: '2026-11-01',
+  });
+
+  assert.equal(resSinFacturas.detalles.some((d) => d.concepto === 'deuda_anterior'), false);
+  assert.equal(resSinFacturas.detalles.some((d) => d.concepto === 'mora'), false);
+  assert.equal(resSinFacturas.factura.total, 36720);
+});
+
+test('26. Anular factura consolidada N restaura N-1 desde refinanciada a su estado/saldo original; no permite anular ni cobrar directamente una refinanciada', async () => {
+  db.clearData();
+  const cli = db.agregarCliente({
+    nombre_completo: 'Cliente Restauracion',
+    documento: '1340134',
+    direccion: 'San Jose',
+    telefono: '0981134134',
+    email: 'rest134@example.com',
+  });
+  const med = db.agregarMedidor({
+    cliente_id: cli.id,
+    numero_medidor: 134,
+    fecha_instalacion: '2026-01-01',
+    direccion: 'Lote 134',
+    zona: 'SAN JOSE',
+    latitud: -25.39,
+    longitud: -57.38,
+    estado: 'moroso',
+  });
+
+  const data = db.getFullData();
+  const fac10: Factura = {
+    id: 'fac-134-202610',
+    medidor_id: med.id,
+    cliente_id: cli.id,
+    periodo_consumo: '2026-09',
+    periodo_facturado: '2026-10',
+    fecha_emision: '2026-10-01',
+    fecha_vencimiento: '2026-10-31',
+    estado: 'vencida',
+    total: 85394,
+    saldo_pendiente: 85394,
+    saldo: 85394,
+    monto_pagado: 0,
+    es_tercera_boleta: false,
+    alerta_consumo_elevado: false,
+    numero_boleta_medidor: 1,
+    detalles: [
+      { id: 'd-134-1', factura_id: 'fac-134-202610', concepto: 'consumo_agua', descripcion: 'Consumo', monto: 44000 },
+      { id: 'd-134-2', factura_id: 'fac-134-202610', concepto: 'deuda_anterior', descripcion: 'Deuda', monto: 36720 },
+      { id: 'd-134-3', factura_id: 'fac-134-202610', concepto: 'mora', descripcion: 'Mora', monto: 3000 },
+      { id: 'd-134-4', factura_id: 'fac-134-202610', concepto: 'erssan', descripcion: 'ERSSAN', monto: 1674 },
+    ],
+  };
+  data.facturas.push(fac10);
+  data.lecturas.push({
+    id: 'lec-134-oct',
+    medidor_id: med.id,
+    periodo: '2026-10',
+    fecha_lectura: '2026-10-28',
+    lectura_anterior: 100,
+    lectura_actual: 105,
+    consumo_m3: 5,
+    foto_medidor_url: 'https://example.com/134.jpg',
+    estado: 'confirmada',
+    registrado_por: 'lector-1',
+    fecha_registro: '2026-10-28',
+  });
+
+  const gen11 = await db.generarFacturaIndividualAsync({
+    numeroMedidor: 134,
+    periodoConsumo: '2026-10',
+    periodoFacturado: '2026-11',
+    fechaEmision: '2026-11-01',
+  });
+
+  assert.equal(fac10.estado, 'refinanciada');
+  assert.equal(fac10.saldo_pendiente, 0);
+
+  // Intentar cobrar o anular directamente fac10 refinanciada debe arrojar error
+  await assert.rejects(
+    db.registrarCobroAsync({ facturaId: fac10.id, monto: 1000, metodoPago: 'efectivo' }),
+    /refinanciada/i
+  );
+  await assert.rejects(
+    db.anularFacturaAsync(fac10.id, 'Intento inválido sobre refinanciada'),
+    /refinanciada/i
+  );
+
+  // Anular gen11 debe restaurar fac10 a 'vencida' con saldo 85.394
+  await db.anularFacturaAsync(gen11.factura.id, 'Regenerar tras corrección');
+  assert.equal(gen11.factura.estado, 'anulada');
+  assert.equal(fac10.estado, 'vencida');
+  assert.equal(fac10.saldo_pendiente, 85394);
+  assert.equal(fac10.motivo, null);
+  assert.equal(db.getMedidorDetalle(med.id)?.totalDeuda, 85394);
+});
+
+test('27. loadFromSupabase pagina detalle_factura más allá de 1000 filas usando .range() para no perder detalles de mora', async () => {
+  db.clearData();
+
+  const totalDetalles = 1250;
+  const targetFacId = 'fac-132-202610-pag';
+  const allDetalles = Array.from({ length: totalDetalles }, (_, idx) => {
+    if (idx === 1199) {
+      return {
+        id: `det-mora-pag-${idx}`,
+        factura_id: targetFacId,
+        concepto: 'mora',
+        descripcion: 'Recargo por mora (1 boleta × 3.000)',
+        monto: 3000,
+      };
+    }
+    return {
+      id: `det-${String(idx).padStart(4, '0')}`,
+      factura_id: idx === 1198 ? targetFacId : `fac-otro-${idx % 400}`,
+      concepto: 'consumo_agua',
+      descripcion: 'Consumo',
+      monto: 36000,
+    };
+  });
+
+  const rangesSolicitados: Array<[number, number]> = [];
+  const tables: Record<string, any[]> = {
+    tarifas: [
+      {
+        id: 'tar-1',
+        precio_m3: 4000,
+        consumo_minimo_m3: 9,
+        monto_minimo_consumo: 36000,
+        monto_mora_fijo: 3000,
+        monto_reconexion: 60000,
+        erssan_porcentaje: 2,
+        dia_vencimiento_boletas_normales: 'ultimo_dia_mes',
+        dia_vencimiento_tercera_boleta: 11,
+        umbral_alerta_consumo: 3,
+        texto_alerta_consumo: 'CONSUMO ELEVADO',
+        max_numero_medidor: 1000,
+        vigente_desde: '2026-01-01',
+      },
+    ],
+    clientes: [
+      {
+        id: 'cli-132',
+        nombre_completo: 'Titular 132',
+        documento: '1320000',
+        direccion: 'San Gabriel',
+        telefono: '0981132132',
+        email: 'tit132@example.com',
+        fecha_alta: '2026-01-01',
+      },
+    ],
+    medidores: [
+      {
+        id: 'med-132',
+        cliente_id: 'cli-132',
+        numero_medidor: 132,
+        direccion: 'Lote 132',
+        zona: 'SAN GABRIEL',
+        latitud: -25.39,
+        longitud: -57.38,
+        fecha_instalacion: '2026-01-01',
+        estado: 'moroso',
+        mora_congelada: 0,
+      },
+    ],
+    facturas: [
+      {
+        id: targetFacId,
+        medidor_id: 'med-132',
+        cliente_id: 'cli-132',
+        periodo_facturado: '2026-10',
+        periodo_consumo: '2026-09',
+        fecha_emision: '2026-10-01',
+        fecha_vencimiento: '2026-10-31',
+        estado: 'vencida',
+        total: 85394,
+        saldo_pendiente: 85394,
+        monto_pagado: 0,
+        es_tercera_boleta: false,
+        alerta_consumo_elevado: false,
+        numero_boleta_medidor: 2,
+      },
+    ],
+    detalle_factura: allDetalles,
+  };
+
+  const makePaginatedClient = {
+    auth: {
+      async getSession() {
+        return { data: { session: { user: { id: 'usr-admin', email: 'admin@example.com' } } }, error: null };
+      },
+    },
+    from(table: string) {
+      const rows = tables[table] || [];
+      let sliceRange: [number, number] | null = null;
+      const builder: any = {
+        select() {
+          return builder;
+        },
+        order() {
+          return builder;
+        },
+        limit(n: number) {
+          sliceRange = [0, Math.min(n - 1, 999)];
+          return builder;
+        },
+        range(from: number, to: number) {
+          if (table === 'detalle_factura') rangesSolicitados.push([from, to]);
+          sliceRange = [from, to];
+          return builder;
+        },
+        then(resolve: (val: any) => void, reject?: (err: any) => void) {
+          const data = sliceRange
+            ? rows.slice(sliceRange[0], sliceRange[1] + 1)
+            : rows.slice(0, 1000);
+          return Promise.resolve({ data, error: null }).then(resolve, reject);
+        },
+      };
+      return builder;
+    },
+  };
+
+  const loadRes = await db.loadFromSupabase({ clientOverride: makePaginatedClient, force: true });
+  assert.equal(loadRes.ok, true);
+  assert.deepEqual(rangesSolicitados, [
+    [0, 999],
+    [1000, 1999],
+  ]);
+
+  const facCargada = db.getFullData().facturas.find((f) => f.id === targetFacId)!;
+  assert.ok(facCargada.detalles && facCargada.detalles.length === 2, 'Debe adjuntar detalles más allá de la fila 1000');
+  assert.equal(
+    facCargada.detalles!.find((d) => d.concepto === 'mora')?.monto,
+    3000,
+    'La mora cargada más allá de la fila 1000 debe conservarse en Factura.detalles'
+  );
+});
+
+test('28. generarFacturaIndividualAsync consulta detalle_factura on-demand si N-1 llegó sin detalles en memoria y separa 82.394 + 6.000', async () => {
+  db.clearData();
+  const cli = db.agregarCliente({
+    nombre_completo: 'Medidor 132 OnDemand',
+    documento: '1329999',
+    direccion: 'San Gabriel',
+    telefono: '0981132999',
+    email: 'm132od@example.com',
+  });
+  const med = db.agregarMedidor({
+    cliente_id: cli.id,
+    numero_medidor: 132,
+    fecha_instalacion: '2026-01-01',
+    direccion: 'Lote 132',
+    zona: 'SAN GABRIEL',
+    latitud: -25.39,
+    longitud: -57.38,
+    estado: 'moroso',
+  });
+
+  const data = db.getFullData();
+  // Simulamos factura 2026-10 en memoria CON detalles vacíos (ej. cargada sin detalles)
+  data.facturas.push({
+    id: 'fac-132-202610-nodet',
+    medidor_id: med.id,
+    cliente_id: cli.id,
+    periodo_consumo: '2026-09',
+    periodo_facturado: '2026-10',
+    fecha_emision: '2026-10-01',
+    fecha_vencimiento: '2026-10-31',
+    estado: 'vencida',
+    total: 85394,
+    saldo_pendiente: 85394,
+    saldo: 85394,
+    monto_pagado: 0,
+    es_tercera_boleta: false,
+    alerta_consumo_elevado: false,
+    numero_boleta_medidor: 2,
+    detalles: [],
+  });
+  data.lecturas.push({
+    id: 'lec-132-od-oct',
+    medidor_id: med.id,
+    periodo: '2026-10',
+    fecha_lectura: '2026-10-28',
+    lectura_anterior: 200,
+    lectura_actual: 205,
+    consumo_m3: 5,
+    foto_medidor_url: 'https://example.com/132-od.jpg',
+    estado: 'confirmada',
+    registrado_por: 'lector-1',
+    fecha_registro: '2026-10-28',
+  });
+
+  let queriedOnDemand = false;
+  const updates: any[] = [];
+  const sbClient: any = {
+    from(table: string) {
+      return {
+        select() {
+          return {
+            in: async (_col: string, ids: string[]) => {
+              if (table === 'detalle_factura' && ids.includes('fac-132-202610-nodet')) {
+                queriedOnDemand = true;
+                return {
+                  data: [
+                    { id: 'd1', factura_id: 'fac-132-202610-nodet', concepto: 'consumo_agua', descripcion: 'Consumo', monto: 44000 },
+                    { id: 'd2', factura_id: 'fac-132-202610-nodet', concepto: 'deuda_anterior', descripcion: 'Deuda', monto: 36720 },
+                    { id: 'd3', factura_id: 'fac-132-202610-nodet', concepto: 'mora', descripcion: 'Mora', monto: 3000 },
+                    { id: 'd4', factura_id: 'fac-132-202610-nodet', concepto: 'erssan', descripcion: 'ERSSAN', monto: 1674 },
+                  ],
+                  error: null,
+                };
+              }
+              return { data: [], error: null };
+            },
+          };
+        },
+        insert: async () => ({ error: null }),
+        update: (payload: any) => ({
+          eq: async (_col: string, id: string) => {
+            updates.push({ table, payload, id });
+            return { error: null };
+          },
+          in: async () => ({ error: null }),
+        }),
+        delete: () => ({ eq: async () => ({ error: null }) }),
+      };
+    },
+  };
+
+  const gen = await db.generarFacturaIndividualAsync({
+    numeroMedidor: 132,
+    periodoConsumo: '2026-10',
+    periodoFacturado: '2026-11',
+    fechaEmision: '2026-11-01',
+    clientOverride: sbClient,
+  });
+
+  assert.equal(queriedOnDemand, true, 'Debe consultar detalle_factura on-demand si N-1 tenía detalles vacíos');
+  assert.equal(gen.detalles.find((d) => d.concepto === 'deuda_anterior')?.monto, 82394);
+  assert.equal(gen.detalles.find((d) => d.concepto === 'mora')?.monto, 6000);
+  assert.equal(gen.detalles.find((d) => d.concepto === 'erssan')?.monto, 2488);
+  assert.equal(gen.factura.total, 126882);
+  assert.equal(
+    updates.some((u) => u.id === 'fac-132-202610-nodet' && u.payload.estado === 'refinanciada'),
+    true
+  );
+});
+
+test('29. Si Supabase rechaza estado refinanciada (falta migración facturas_estado_check), revierte la factura nueva huérfana y arroja error claro', async () => {
+  db.clearData();
+  const cli = db.agregarCliente({
+    nombre_completo: 'Test Rollback',
+    documento: '9998887',
+    direccion: 'San José',
+    telefono: '0981999888',
+    email: 'rb@example.com',
+  });
+  const med = db.agregarMedidor({
+    cliente_id: cli.id,
+    numero_medidor: 135,
+    fecha_instalacion: '2026-01-01',
+    direccion: 'Lote 135',
+    zona: 'SAN JOSE',
+    latitud: -25.39,
+    longitud: -57.38,
+    estado: 'moroso',
+  });
+
+  const data = db.getFullData();
+  data.facturas.push({
+    id: 'fac-135-10',
+    medidor_id: med.id,
+    cliente_id: cli.id,
+    periodo_consumo: '2026-09',
+    periodo_facturado: '2026-10',
+    fecha_emision: '2026-10-01',
+    fecha_vencimiento: '2026-10-31',
+    estado: 'vencida',
+    total: 85394,
+    saldo_pendiente: 85394,
+    saldo: 85394,
+    monto_pagado: 0,
+    es_tercera_boleta: false,
+    alerta_consumo_elevado: false,
+    numero_boleta_medidor: 1,
+    detalles: [{ id: 'd-135-m', factura_id: 'fac-135-10', concepto: 'mora', descripcion: 'Mora', monto: 3000 }],
+  });
+  data.lecturas.push({
+    id: 'lec-135-oct',
+    medidor_id: med.id,
+    periodo: '2026-10',
+    fecha_lectura: '2026-10-28',
+    lectura_anterior: 100,
+    lectura_actual: 105,
+    consumo_m3: 5,
+    foto_medidor_url: 'https://example.com/135.jpg',
+    estado: 'confirmada',
+    registrado_por: 'lector-1',
+    fecha_registro: '2026-10-28',
+  });
+
+  const deletedIds: string[] = [];
+  const sbConstraintError: any = {
+    from(table: string) {
+      return {
+        insert: async () => ({ error: null }),
+        update: (payload: any) => ({
+          eq: async () => {
+            if (table === 'facturas' && payload.estado === 'refinanciada') {
+              return { error: { message: 'new row for relation "facturas" violates check constraint "facturas_estado_check"' } };
+            }
+            return { error: null };
+          },
+          in: async () => ({ error: null }),
+        }),
+        delete: () => ({
+          eq: async (_col: string, id: string) => {
+            if (table === 'facturas') deletedIds.push(id);
+            return { error: null };
+          },
+        }),
+      };
+    },
+  };
+
+  await assert.rejects(
+    db.generarFacturaIndividualAsync({
+      numeroMedidor: 135,
+      periodoConsumo: '2026-10',
+      periodoFacturado: '2026-11',
+      fechaEmision: '2026-11-01',
+      clientOverride: sbConstraintError,
+    }),
+    /facturas_estado_check/
+  );
+
+  assert.equal(deletedIds.length, 1, 'Debe hacer rollback eliminando la factura 2026-11 recién insertada');
+  assert.equal(
+    db.getFullData().facturas.some((f) => f.periodo_facturado === '2026-11'),
+    false,
+    'No debe quedar la factura 2026-11 en memoria tras el error'
+  );
+});
+
+
 

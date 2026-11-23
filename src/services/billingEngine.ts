@@ -13,7 +13,11 @@ import {
   TarifaConfig,
   EstadoMedidor,
 } from '../types';
-import { TARIFAS_DEFAULT } from './billingRules';
+import {
+  TARIFAS_DEFAULT,
+  esFacturaVencida,
+  calcularDeudaYMoraConsolidadaPeriodoN,
+} from './billingRules';
 
 export interface MedidorOmitidoFacturacion {
   medidor_id: string;
@@ -66,6 +70,11 @@ export interface CalculoFacturaResultado {
   detalles: DetalleFactura[];
   cargosFacturadosIds: string[];
   nuevoEstadoMedidor: EstadoMedidor;
+  facturaAnteriorARefinanciar?: {
+    id: string;
+    periodo_facturado: string;
+    motivo: string;
+  } | null;
 }
 
 /**
@@ -226,18 +235,35 @@ export function calcularFacturaIndividual(params: CalculoFacturaParams): Calculo
   const fechaEmision = params.fechaEmision || `${year}-${String(month).padStart(2, '0')}-01`;
 
   // -------------------------------------------------------------------------
-  // 5. Detección de 3ra boleta (antes de generar, contar facturas vencidas impagas)
+  // b y c previas: Consolidación de deuda anterior y mora del período N-1
+  // 1) deuda_anterior = saldo_pendiente_N-1 - mora_de_N-1
+  // 2) mora_N = mora_de_N-1 + (monto_mora_fijo si N-1 está vencida)
+  // 3) factura N-1 pasa a estado = 'refinanciada', saldo_pendiente = 0
   // -------------------------------------------------------------------------
-  const facturasVencidasImpagas = params.facturasImpagasAnteriores.filter((f) => {
-    if (f.estado === 'pagada' || f.estado === 'anulada') return false;
-    if (f.estado === 'vencida') return true;
-    const fVenc = new Date(f.fecha_vencimiento);
-    return fechaRef > fVenc;
+  const {
+    deudaAnteriorMonto,
+    montoMora,
+    cantMorasAcumuladas,
+    facturaAnterior,
+    facturaAnteriorARefinanciar,
+  } = calcularDeudaYMoraConsolidadaPeriodoN({
+    facturas: params.facturasImpagasAnteriores,
+    periodoActual: params.periodo,
+    tarifa,
+    fechaReferencia: fechaRef,
+    moraCongelada: params.medidor.mora_congelada,
   });
 
+  // -------------------------------------------------------------------------
+  // 5. Detección de 3ra boleta (por cantidad de vencidas o moras acumuladas)
+  // -------------------------------------------------------------------------
+  const facturasVencidasImpagas = params.facturasImpagasAnteriores.filter((f) =>
+    esFacturaVencida(f, fechaRef)
+  );
+
   const cantVencidasImpagas = facturasVencidasImpagas.length;
-  // Si tiene 2 o más facturas vencidas impagas, la nueva factura es la 3ra (o superior)
-  const esTerceraBoleta = cantVencidasImpagas >= 2;
+  // Si tiene 2 o más vencidas/moras acumuladas anteriores, la nueva factura es la 3ra (o superior)
+  const esTerceraBoleta = Math.max(cantVencidasImpagas, cantMorasAcumuladas) >= 2;
 
   // Fecha de vencimiento
   const fechaVencimiento = calcularFechaVencimiento(params.periodo, esTerceraBoleta, tarifa);
@@ -282,25 +308,11 @@ export function calcularFacturaIndividual(params: CalculoFacturaParams): Calculo
 
   // -------------------------------------------------------------------------
   // b) Deuda anterior
-  // Sumar saldos pendientes de facturas anteriores con estado "pendiente" o "vencida"
+  // Debe ser EXCLUSIVAMENTE el saldo_pendiente de la factura del período N-1
+  // MENOS la mora incluida en esa factura (nunca duplicar mora ni sumar todas).
   // -------------------------------------------------------------------------
-  const facturasImpagasMedidor = params.facturasImpagasAnteriores.filter(
-    (f) => f.estado === 'pendiente' || f.estado === 'vencida'
-  );
-
-  const deudaAnteriorMonto = facturasImpagasMedidor.reduce((acc, f) => {
-    const saldo =
-      typeof f.saldo === 'number'
-        ? f.saldo
-        : typeof f.saldo_pendiente === 'number'
-          ? f.saldo_pendiente
-          : f.total || 0;
-    return acc + Math.max(0, saldo);
-  }, 0);
-
-  if (deudaAnteriorMonto > 0) {
-    const cantBoletas = facturasImpagasMedidor.length;
-    const descripcionDeuda = `Deuda anterior (${cantBoletas} boleta${cantBoletas > 1 ? 's' : ''})`;
+  if (deudaAnteriorMonto > 0 && facturaAnterior) {
+    const descripcionDeuda = `Deuda anterior (período ${facturaAnterior.periodo_facturado})`;
 
     detalles.push({
       id: generarUUID(),
@@ -313,19 +325,16 @@ export function calcularFacturaIndividual(params: CalculoFacturaParams): Calculo
 
   // -------------------------------------------------------------------------
   // c) Recargo por mora
-  // mora_total = monto_mora_fijo × cantidad_facturas_vencidas_impagas
+  // mora_N = mora_de_N-1 + (monto_mora_fijo si N-1 está vencida), salvo mora_congelada
   // -------------------------------------------------------------------------
-  let montoMora = 0;
-  if (params.medidor.mora_congelada !== null && params.medidor.mora_congelada !== undefined) {
-    montoMora = params.medidor.mora_congelada;
-  } else {
-    montoMora = cantVencidasImpagas * tarifa.monto_mora_fijo;
-  }
-
   if (montoMora > 0) {
-    const descripcionMora = `Recargo por mora (${cantVencidasImpagas} boleta${
-      cantVencidasImpagas > 1 ? 's' : ''
-    } × ${tarifa.monto_mora_fijo.toLocaleString('es-PY')})`;
+    const boletasMora = Math.max(1, cantMorasAcumuladas);
+    const descripcionMora =
+      tarifa.monto_mora_fijo > 0 && montoMora % tarifa.monto_mora_fijo === 0
+        ? `Recargo por mora (${boletasMora} boleta${
+            boletasMora > 1 ? 's' : ''
+          } × ${tarifa.monto_mora_fijo.toLocaleString('es-PY')})`
+        : 'Recargo por mora acumulada';
 
     detalles.push({
       id: generarUUID(),
@@ -529,15 +538,15 @@ export function calcularFacturaIndividual(params: CalculoFacturaParams): Calculo
 
   // -------------------------------------------------------------------------
   // 7. Actualización de estado del medidor
-  // - Si tenía 2 o más vencidas impagas y se factura la 3ra (esTerceraBoleta = true): 'pendiente_corte'
-  // - Si tenía 1 vencida impaga: 'moroso'
-  // - Si 0 vencidas impagas: 'activo'
+  // - Si tenía 2 o más vencidas/moras acumuladas y se factura la 3ra (esTerceraBoleta = true): 'pendiente_corte'
+  // - Si tenía 1 vencida/mora acumulada: 'moroso'
+  // - Si 0 vencidas/moras: 'activo'
   // -------------------------------------------------------------------------
   let nuevoEstadoMedidor: EstadoMedidor = params.medidor.estado;
   if (params.medidor.estado !== 'cortado' && params.medidor.estado !== 'retirado') {
-    if (esTerceraBoleta || cantVencidasImpagas >= 3) {
+    if (esTerceraBoleta || cantVencidasImpagas >= 3 || cantMorasAcumuladas >= 3) {
       nuevoEstadoMedidor = 'pendiente_corte';
-    } else if (cantVencidasImpagas >= 1) {
+    } else if (cantVencidasImpagas >= 1 || cantMorasAcumuladas >= 1) {
       nuevoEstadoMedidor = 'moroso';
     } else {
       nuevoEstadoMedidor = 'activo';
@@ -549,5 +558,6 @@ export function calcularFacturaIndividual(params: CalculoFacturaParams): Calculo
     detalles,
     cargosFacturadosIds,
     nuevoEstadoMedidor,
+    facturaAnteriorARefinanciar,
   };
 }

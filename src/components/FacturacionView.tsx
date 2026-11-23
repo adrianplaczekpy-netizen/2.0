@@ -38,6 +38,7 @@ const ESTADO_BADGE_MAP: Record<string, string> = {
   pagada: 'bg-emerald-50 text-emerald-800 border-emerald-300',
   vencida: 'bg-red-50 text-red-800 border-red-300',
   anulada: 'bg-stone-100 text-stone-600 border-stone-300',
+  refinanciada: 'bg-indigo-50 text-indigo-800 border-indigo-300',
 };
 
 const ESTADO_TEXT_MAP: Record<string, string> = {
@@ -45,6 +46,7 @@ const ESTADO_TEXT_MAP: Record<string, string> = {
   pagada: 'Pagada',
   vencida: 'Vencida',
   anulada: 'Anulada',
+  refinanciada: 'Refinanciada',
 };
 
 export const FacturacionView: React.FC = () => {
@@ -281,6 +283,7 @@ export const FacturacionView: React.FC = () => {
                   <option value="pendiente">Pendiente</option>
                   <option value="pagada">Pagada</option>
                   <option value="vencida">Vencida</option>
+                  <option value="refinanciada">Refinanciada</option>
                   <option value="anulada">Anulada</option>
                 </select>
               </div>
@@ -514,10 +517,10 @@ export const FacturacionView: React.FC = () => {
                             </td>
                             <td
                               className={`px-3 py-3 text-right font-bold whitespace-nowrap tabular-nums ${
-                                saldo === 0
-                                  ? 'text-emerald-700'
-                                  : f.estado === 'anulada'
-                                    ? 'text-stone-400'
+                                f.estado === 'anulada' || f.estado === 'refinanciada'
+                                  ? 'text-stone-400'
+                                  : saldo === 0
+                                    ? 'text-emerald-700'
                                     : 'text-red-700'
                               }`}
                             >
@@ -626,7 +629,11 @@ export const FacturacionView: React.FC = () => {
                           </span>
                           <span
                             className={`text-[11px] font-bold tabular-nums ${
-                              saldo === 0 ? 'text-emerald-700' : 'text-red-700'
+                              f.estado === 'anulada' || f.estado === 'refinanciada'
+                                ? 'text-stone-400'
+                                : saldo === 0
+                                  ? 'text-emerald-700'
+                                  : 'text-red-700'
                             }`}
                           >
                             Saldo: {formatGs(saldo)}

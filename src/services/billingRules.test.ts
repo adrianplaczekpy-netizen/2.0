@@ -15,6 +15,7 @@ import {
   calcularFacturaMedidor,
   generarFacturaRegularizacion,
   liquidarReconexion,
+  resolverPeriodoRegularizacion,
   validarLecturaIngreso,
   validarEdicionLectura,
   validarRegistroCargo,
@@ -1010,6 +1011,240 @@ test('26. Planes de Financiamiento: Cuota de conexión y Pérdida financiada se 
 
   assert.equal(planPerdida.cuotas_pagadas, 1);
   assert.equal(planPerdida.estado, 'activo');
+});
+
+test('27. Factura de regularización: usa saldo_pendiente de última boleta impaga (206.550) + mora 9.000 + reconexión 60.000 + ERSSAN 2% = 281.061 (excluye anuladas y usa YYYY-MM)', () => {
+  const medidorCortado: Medidor = {
+    id: 'med-reg-3',
+    cliente_id: 'cli-03',
+    numero_medidor: 3,
+    direccion: 'Barrio Centro',
+    zona: 'Centro',
+    latitud: -25.3,
+    longitud: -57.5,
+    fecha_instalacion: '2026-01-01',
+    estado: 'cortado',
+    fecha_corte: '2026-11-01',
+    mora_congelada: 9000,
+  };
+
+  const facturas: Factura[] = [
+    {
+      id: 'f-v1',
+      medidor_id: 'med-reg-3',
+      cliente_id: 'cli-03',
+      periodo_facturado: '2026-08',
+      fecha_emision: '2026-08-01',
+      fecha_vencimiento: '2026-08-31',
+      estado: 'vencida',
+      total: 36720,
+      saldo_pendiente: 36720,
+      es_tercera_boleta: false,
+      alerta_consumo_elevado: false,
+      numero_boleta_medidor: 1,
+    },
+    {
+      id: 'f-v2',
+      medidor_id: 'med-reg-3',
+      cliente_id: 'cli-03',
+      periodo_facturado: '2026-09',
+      fecha_emision: '2026-09-01',
+      fecha_vencimiento: '2026-09-30',
+      estado: 'vencida',
+      total: 120000,
+      saldo_pendiente: 120000,
+      es_tercera_boleta: false,
+      alerta_consumo_elevado: false,
+      numero_boleta_medidor: 2,
+    },
+    {
+      id: 'f-v3',
+      medidor_id: 'med-reg-3',
+      cliente_id: 'cli-03',
+      periodo_facturado: '2026-10',
+      fecha_emision: '2026-10-01',
+      fecha_vencimiento: '2026-10-11',
+      estado: 'vencida',
+      total: 206550,
+      saldo_pendiente: 206550,
+      es_tercera_boleta: true,
+      alerta_consumo_elevado: false,
+      numero_boleta_medidor: 3,
+    },
+    // Facturas anuladas NO deben tomarse ni siquiera si tienen período posterior
+    {
+      id: 'f-anu-1',
+      medidor_id: 'med-reg-3',
+      cliente_id: 'cli-03',
+      periodo_facturado: '2026-11',
+      fecha_emision: '2026-11-01',
+      fecha_vencimiento: '2026-11-11',
+      estado: 'anulada',
+      total: 300000,
+      saldo_pendiente: 300000,
+      es_tercera_boleta: false,
+      alerta_consumo_elevado: false,
+      numero_boleta_medidor: 4,
+    },
+  ];
+
+  // Liquidación previa (para modal): deuda = 206.550 (última no anulada 2026-10) + mora 9.000 + reconexión 60.000 = 275.550
+  // ERSSAN 2% = 5.511 -> Total = 281.061
+  const liq = liquidarReconexion(medidorCortado, facturas);
+  assert.equal(liq.subtotalFacturas, 206550);
+  assert.equal(liq.mora, 9000);
+  assert.equal(liq.montoReconexion, 60000);
+  assert.equal(liq.montoErssan, 5511);
+  assert.equal(liq.totalPagar, 281061);
+
+  // Generación de factura de regularización
+  const reg = generarFacturaRegularizacion({
+    medidor: medidorCortado,
+    clienteId: 'cli-03',
+    facturasImpagas: facturas,
+    fechaEmision: '2026-11-17',
+    correlativoPorMedidor: 5,
+  });
+
+  // Período YYYY-MM (7 caracteres max, sin 'REGULARIZACION')
+  assert.match(reg.factura.periodo_facturado, /^\d{4}-\d{2}$/);
+  assert.equal(reg.factura.periodo_facturado, '2026-11');
+  assert.equal(reg.factura.periodo_facturado.length, 7);
+
+  const detDeuda = reg.detalles.find((d) => d.concepto === 'deuda_anterior');
+  const detMora = reg.detalles.find((d) => d.concepto === 'mora');
+  const detReconexion = reg.detalles.find((d) => d.concepto === 'reconexion');
+  const detErssan = reg.detalles.find((d) => d.concepto === 'erssan');
+
+  assert.ok(detDeuda, 'Debe incluir deuda_anterior');
+  assert.equal(detDeuda?.monto, 206550);
+  assert.match(detDeuda?.descripcion || '', /2026-10/);
+
+  assert.ok(detMora, 'Debe incluir mora');
+  assert.equal(detMora?.monto, 9000);
+
+  assert.ok(detReconexion, 'Debe incluir reconexion');
+  assert.equal(detReconexion?.monto, 60000);
+
+  assert.ok(detErssan, 'Debe incluir erssan');
+  assert.equal(detErssan?.monto, 5511);
+
+  assert.equal(reg.factura.total, 281061);
+});
+
+test('28. Regularización usa saldo_pendiente en pagos parciales, evita colisiones YYYY-MM y propaga errores en confirmarReconexionAsync', async () => {
+  const medidor: Medidor = {
+    id: 'med-reg-parcial',
+    cliente_id: 'cli-04',
+    numero_medidor: 44,
+    direccion: 'Lote 44',
+    zona: 'Norte',
+    latitud: -25.3,
+    longitud: -57.5,
+    fecha_instalacion: '2026-01-01',
+    estado: 'cortado',
+    fecha_corte: '2026-11-01',
+    mora_congelada: 3000,
+  };
+
+  const facParcial: Factura = {
+    id: 'f-parc-1',
+    medidor_id: 'med-reg-parcial',
+    cliente_id: 'cli-04',
+    periodo_facturado: '2026-10',
+    fecha_emision: '2026-10-01',
+    fecha_vencimiento: '2026-10-31',
+    estado: 'vencida',
+    total: 100000,
+    monto_pagado: 60000,
+    saldo_pendiente: 40000,
+    saldo: 40000,
+    es_tercera_boleta: false,
+    alerta_consumo_elevado: false,
+    numero_boleta_medidor: 1,
+  };
+
+  const liq = liquidarReconexion(medidor, [facParcial], undefined, [
+    { monto: 10000 },
+  ]);
+  assert.equal(liq.subtotalFacturas, 40000);
+  assert.equal(liq.subtotalCargos, 10000);
+  // Base = 40.000 + 3.000 + 10.000 + 60.000 = 113.000 -> ERSSAN 2% = 2.260 -> Total = 115.260
+  assert.equal(liq.montoErssan, 2260);
+  assert.equal(liq.totalPagar, 115260);
+
+  const reg = generarFacturaRegularizacion({
+    medidor,
+    clienteId: 'cli-04',
+    facturasImpagas: [facParcial],
+    cargosPendientes: [{ id: 'c1', descripcion: 'Cambio de llave', monto: 10000 }],
+    fechaEmision: '2026-11-17',
+    correlativoPorMedidor: 2,
+  });
+  assert.equal(reg.factura.total, 115260);
+  assert.equal(
+    reg.detalles.find((d) => d.concepto === 'deuda_anterior')?.monto,
+    40000
+  );
+
+  // Resolución de período YYYY-MM sin colisionar con facturas no anuladas
+  assert.equal(
+    resolverPeriodoRegularizacion('2026-11-17', ['2026-09', '2026-10']),
+    '2026-11'
+  );
+  assert.equal(
+    resolverPeriodoRegularizacion('2026-11-17', ['2026-11', '2026-10']),
+    '2026-09'
+  );
+
+  // confirmarReconexionAsync propaga errores de Supabase sin mutar estado en memoria
+  db.clearData();
+  const cli = db.agregarCliente({
+    nombre_completo: 'María López',
+    documento: '9876543',
+    direccion: 'Centro',
+    telefono: '0981999888',
+    email: 'maria@example.com',
+  });
+  const med = db.agregarMedidor({
+    cliente_id: cli.id,
+    numero_medidor: 99,
+    fecha_instalacion: '2026-01-01',
+    direccion: 'Lote 99',
+    zona: 'Centro',
+    latitud: -25.3,
+    longitud: -57.5,
+    estado: 'cortado',
+  });
+  med.mora_congelada = 9000;
+  med.fecha_corte = '2026-11-01';
+
+  const failingSupabaseMock = {
+    auth: {
+      getSession: async () => ({ data: { session: { user: { id: '00000000-0000-4000-8000-000000000001' } } } }),
+    },
+    from: (table: string) => ({
+      update: () => ({
+        eq: async () => ({ error: null }),
+        in: async () => ({ error: null }),
+      }),
+      insert: async () =>
+        table === 'facturas'
+          ? { error: { message: 'simulated db constraint failure' } }
+          : { error: null },
+    }),
+  };
+
+  await assert.rejects(
+    async () => {
+      await db.confirmarReconexionAsync(med.id, { cobradorId: 'admin' }, { clientOverride: failingSupabaseMock });
+    },
+    /simulated db constraint failure/
+  );
+
+  // El medidor NO debe haber cambiado a 'activo' si falló Supabase
+  const medTrasError = db.getMedidores().medidores.find((m) => m.id === med.id);
+  assert.equal(medTrasError?.estado, 'cortado');
 });
 
 

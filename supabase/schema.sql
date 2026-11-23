@@ -37,6 +37,7 @@ CREATE TABLE IF NOT EXISTS public.user_roles (
 CREATE INDEX IF NOT EXISTS idx_user_roles_user_id ON public.user_roles(user_id);
 
 -- Función SECURITY DEFINER para obtener el rol del usuario autenticado sin recursión
+-- Si el usuario fue desactivado (activo = FALSE), retorna 'inactivo' y pierde acceso a todas las políticas RLS.
 CREATE OR REPLACE FUNCTION public.get_user_rol(user_uuid UUID DEFAULT auth.uid())
 RETURNS VARCHAR(20)
 LANGUAGE plpgsql
@@ -45,7 +46,16 @@ SET search_path = public
 AS $$
 DECLARE
     v_rol VARCHAR(20);
+    v_activo BOOLEAN;
 BEGIN
+    SELECT activo INTO v_activo
+    FROM public.usuarios
+    WHERE id = user_uuid;
+
+    IF v_activo IS FALSE THEN
+        RETURN 'inactivo';
+    END IF;
+
     SELECT rol INTO v_rol
     FROM public.user_roles
     WHERE user_id = user_uuid;
@@ -77,7 +87,7 @@ SECURITY DEFINER
 SET search_path = public
 AS $$
 BEGIN
-    IF NOT public.is_admin() THEN
+    IF NEW.id = auth.uid() AND NOT public.is_admin() THEN
         IF NEW.activo IS DISTINCT FROM OLD.activo THEN
             RAISE EXCEPTION 'Operación denegada: No podés cambiar tu estado activo';
         END IF;
@@ -303,12 +313,12 @@ CREATE TABLE IF NOT EXISTS public.facturas (
     id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
     medidor_id UUID NOT NULL REFERENCES public.medidores(id) ON DELETE RESTRICT,
     cliente_id UUID NOT NULL REFERENCES public.clientes(id) ON DELETE RESTRICT,
-    periodo_facturado VARCHAR(7) NOT NULL, -- YYYY-MM o REGULARIZACION
+    periodo_facturado VARCHAR(7) NOT NULL, -- Formato: YYYY-MM
     periodo_consumo VARCHAR(7), -- YYYY-MM del período de lectura consumido (ej: 2026-10)
     lectura_id UUID REFERENCES public.lecturas(id) ON DELETE SET NULL,
     fecha_emision DATE NOT NULL DEFAULT CURRENT_DATE,
     fecha_vencimiento DATE NOT NULL,
-    estado VARCHAR(20) NOT NULL DEFAULT 'pendiente' CHECK (estado IN ('pendiente', 'pagada', 'vencida', 'anulada')),
+    estado VARCHAR(20) NOT NULL DEFAULT 'pendiente' CHECK (estado IN ('pendiente', 'pagada', 'vencida', 'anulada', 'refinanciada')),
     total INTEGER NOT NULL,
     saldo_pendiente INTEGER NOT NULL,
     monto_pagado INTEGER NOT NULL DEFAULT 0,
@@ -321,11 +331,13 @@ CREATE TABLE IF NOT EXISTS public.facturas (
     consumo_m3 INTEGER,
     fecha_pago DATE,
     motivo_anulacion TEXT,
+    motivo TEXT,
     created_at TIMESTAMPTZ DEFAULT TIMEZONE('utc', NOW())
 );
 
 -- Migración idempotente para bases existentes y unicidad por medidor+período (excluyendo anuladas)
 ALTER TABLE public.facturas ADD COLUMN IF NOT EXISTS motivo_anulacion TEXT;
+ALTER TABLE public.facturas ADD COLUMN IF NOT EXISTS motivo TEXT;
 ALTER TABLE public.facturas ADD COLUMN IF NOT EXISTS periodo_consumo VARCHAR(7);
 ALTER TABLE public.facturas ADD COLUMN IF NOT EXISTS lectura_id UUID REFERENCES public.lecturas(id) ON DELETE SET NULL;
 ALTER TABLE public.facturas ADD COLUMN IF NOT EXISTS monto_pagado INTEGER NOT NULL DEFAULT 0;
@@ -337,7 +349,7 @@ SET monto_pagado = COALESCE(
 WHERE COALESCE(f.monto_pagado, 0) = 0
   AND EXISTS (SELECT 1 FROM public.pagos p WHERE p.factura_id = f.id);
 ALTER TABLE public.facturas DROP CONSTRAINT IF EXISTS facturas_estado_check;
-ALTER TABLE public.facturas ADD CONSTRAINT facturas_estado_check CHECK (estado IN ('pendiente', 'pagada', 'vencida', 'anulada'));
+ALTER TABLE public.facturas ADD CONSTRAINT facturas_estado_check CHECK (estado IN ('pendiente', 'pagada', 'vencida', 'anulada', 'refinanciada'));
 ALTER TABLE public.facturas DROP CONSTRAINT IF EXISTS uq_medidor_periodo_facturado;
 CREATE UNIQUE INDEX IF NOT EXISTS uq_medidor_periodo_facturado
     ON public.facturas (medidor_id, periodo_facturado)
@@ -422,6 +434,180 @@ END $$;
 ALTER TABLE public.pagos ALTER COLUMN cobrador_id SET DEFAULT auth.uid();
 ALTER TABLE public.pagos ALTER COLUMN cobrador_id SET NOT NULL;
 
+-- Función centralizada de recálculo de estado de medidor según boletas vencidas impagas:
+-- 0 vencidas -> activo | 1-2 vencidas -> moroso | 3+ vencidas -> pendiente_corte | cortado/retirado -> sin cambios
+CREATE OR REPLACE FUNCTION public.recalcular_estado_medidor(p_medidor_id UUID)
+RETURNS VARCHAR(20)
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = public
+AS $$
+DECLARE
+    v_medidor_estado VARCHAR(20);
+    v_vencidas_impagas INTEGER;
+    v_tiene_tercera BOOLEAN := FALSE;
+    v_tiene_mora_consolidada BOOLEAN := FALSE;
+    v_nuevo_estado VARCHAR(20);
+BEGIN
+    IF p_medidor_id IS NULL THEN
+        RETURN NULL;
+    END IF;
+
+    SELECT estado
+    INTO v_medidor_estado
+    FROM public.medidores
+    WHERE id = p_medidor_id
+    FOR UPDATE;
+
+    IF NOT FOUND THEN
+        RETURN NULL;
+    END IF;
+
+    -- Si el medidor está cortado o retirado, no tocar
+    IF v_medidor_estado IN ('cortado', 'retirado') THEN
+        RETURN v_medidor_estado;
+    END IF;
+
+    SELECT
+        COUNT(*) FILTER (WHERE f.estado = 'vencida' OR f.fecha_vencimiento < CURRENT_DATE),
+        COALESCE(BOOL_OR(f.es_tercera_boleta), FALSE),
+        COALESCE(BOOL_OR(EXISTS (
+            SELECT 1 FROM public.detalle_factura df
+            WHERE df.factura_id = f.id AND df.concepto = 'mora' AND df.monto > 0
+        )), FALSE)
+    INTO v_vencidas_impagas, v_tiene_tercera, v_tiene_mora_consolidada
+    FROM public.facturas f
+    WHERE f.medidor_id = p_medidor_id
+      AND f.estado NOT IN ('pagada', 'anulada', 'refinanciada');
+
+    v_nuevo_estado := CASE
+        WHEN v_vencidas_impagas >= 3 OR v_tiene_tercera THEN 'pendiente_corte'
+        WHEN v_vencidas_impagas >= 1 OR v_tiene_mora_consolidada THEN 'moroso'
+        ELSE 'activo'
+    END;
+
+    IF v_nuevo_estado IS DISTINCT FROM v_medidor_estado THEN
+        UPDATE public.medidores
+        SET estado = v_nuevo_estado
+        WHERE id = p_medidor_id;
+    END IF;
+
+    RETURN v_nuevo_estado;
+END;
+$$;
+
+-- Función RPC / batch para recalcular todos los medidores existentes y marcar facturas vencidas por paso del tiempo
+CREATE OR REPLACE FUNCTION public.recalcular_todos_los_estados_medidores()
+RETURNS JSONB
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = public
+AS $$
+DECLARE
+    v_facturas_marcadas INTEGER := 0;
+    v_medidores_actualizados INTEGER := 0;
+BEGIN
+    -- 1. Marcar como 'vencida' toda factura pendiente cuya fecha de vencimiento ya pasó
+    UPDATE public.facturas
+    SET estado = 'vencida'
+    WHERE estado = 'pendiente'
+      AND fecha_vencimiento < CURRENT_DATE;
+    GET DIAGNOSTICS v_facturas_marcadas = ROW_COUNT;
+
+    -- 2. Recalcular estado de todos los medidores excepto 'cortado' y 'retirado' (ignorando facturas refinanciadas)
+    WITH conteo AS (
+        SELECT
+            m.id AS medidor_id,
+            m.estado AS estado_actual,
+            COUNT(f.id) FILTER (
+                WHERE f.estado NOT IN ('pagada', 'anulada', 'refinanciada')
+                  AND (f.estado = 'vencida' OR f.fecha_vencimiento < CURRENT_DATE)
+            ) AS vencidas_impagas,
+            COALESCE(BOOL_OR(f.es_tercera_boleta) FILTER (
+                WHERE f.estado NOT IN ('pagada', 'anulada', 'refinanciada')
+            ), FALSE) AS tiene_tercera,
+            COALESCE(BOOL_OR(EXISTS (
+                SELECT 1 FROM public.detalle_factura df
+                WHERE df.factura_id = f.id AND df.concepto = 'mora' AND df.monto > 0
+            )) FILTER (
+                WHERE f.estado NOT IN ('pagada', 'anulada', 'refinanciada')
+            ), FALSE) AS tiene_mora_consolidada
+        FROM public.medidores m
+        LEFT JOIN public.facturas f ON f.medidor_id = m.id
+        WHERE m.estado NOT IN ('cortado', 'retirado')
+        GROUP BY m.id, m.estado
+    ),
+    calculado AS (
+        SELECT
+            medidor_id,
+            estado_actual,
+            CASE
+                WHEN vencidas_impagas >= 3 OR tiene_tercera THEN 'pendiente_corte'
+                WHEN vencidas_impagas >= 1 OR tiene_mora_consolidada THEN 'moroso'
+                ELSE 'activo'
+            END AS nuevo_estado
+        FROM conteo
+    )
+    UPDATE public.medidores m
+    SET estado = c.nuevo_estado
+    FROM calculado c
+    WHERE m.id = c.medidor_id
+      AND m.estado IS DISTINCT FROM c.nuevo_estado;
+
+    GET DIAGNOSTICS v_medidores_actualizados = ROW_COUNT;
+
+    RETURN jsonb_build_object(
+        'facturas_vencidas_marcadas', v_facturas_marcadas,
+        'medidores_actualizados', v_medidores_actualizados
+    );
+END;
+$$;
+
+REVOKE ALL ON FUNCTION public.recalcular_estado_medidor(UUID) FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION public.recalcular_estado_medidor(UUID) TO authenticated, service_role;
+REVOKE ALL ON FUNCTION public.recalcular_todos_los_estados_medidores() FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION public.recalcular_todos_los_estados_medidores() TO authenticated, service_role;
+
+-- Trigger en facturas: recalcula automáticamente el estado del medidor cuando una factura
+-- cambia a vencida, se paga, se anula, se refinancia, se elimina o se inserta ya vencida.
+CREATE OR REPLACE FUNCTION public.trg_fn_recalcular_estado_medidor_por_factura()
+RETURNS TRIGGER
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = public
+AS $$
+BEGIN
+    IF TG_OP = 'DELETE' THEN
+        PERFORM public.recalcular_estado_medidor(OLD.medidor_id);
+        RETURN OLD;
+    ELSIF TG_OP = 'INSERT' THEN
+        IF NEW.estado = 'vencida'
+           OR (NEW.estado NOT IN ('pagada', 'anulada', 'refinanciada') AND NEW.fecha_vencimiento < CURRENT_DATE) THEN
+            PERFORM public.recalcular_estado_medidor(NEW.medidor_id);
+        END IF;
+        RETURN NEW;
+    ELSIF TG_OP = 'UPDATE' THEN
+        IF OLD.medidor_id IS DISTINCT FROM NEW.medidor_id THEN
+            PERFORM public.recalcular_estado_medidor(OLD.medidor_id);
+            PERFORM public.recalcular_estado_medidor(NEW.medidor_id);
+        ELSIF OLD.estado IS DISTINCT FROM NEW.estado
+           OR OLD.fecha_vencimiento IS DISTINCT FROM NEW.fecha_vencimiento
+           OR OLD.saldo_pendiente IS DISTINCT FROM NEW.saldo_pendiente THEN
+            PERFORM public.recalcular_estado_medidor(NEW.medidor_id);
+        END IF;
+        RETURN NEW;
+    END IF;
+
+    RETURN NULL;
+END;
+$$;
+
+DROP TRIGGER IF EXISTS trg_facturas_recalcular_estado_medidor ON public.facturas;
+CREATE TRIGGER trg_facturas_recalcular_estado_medidor
+AFTER INSERT OR UPDATE OR DELETE ON public.facturas
+FOR EACH ROW
+EXECUTE FUNCTION public.trg_fn_recalcular_estado_medidor_por_factura();
+
 -- Trigger de integridad de pagos (permite al cobrador registrar pagos sin abrir UPDATE directo sobre facturas/medidores)
 CREATE OR REPLACE FUNCTION public.procesar_pago_factura()
 RETURNS TRIGGER
@@ -433,9 +619,6 @@ DECLARE
     v_factura RECORD;
     v_total_pagado INTEGER;
     v_nuevo_saldo INTEGER;
-    v_vencidas_impagas INTEGER;
-    v_tiene_tercera BOOLEAN;
-    v_medidor_estado VARCHAR(20);
 BEGIN
     IF TG_WHEN = 'BEFORE' THEN
         SELECT id, estado, total, saldo_pendiente
@@ -450,6 +633,10 @@ BEGIN
 
         IF v_factura.estado = 'anulada' THEN
             RAISE EXCEPTION 'No se puede registrar un pago sobre una factura anulada';
+        END IF;
+
+        IF v_factura.estado = 'refinanciada' THEN
+            RAISE EXCEPTION 'No se puede cobrar una factura refinanciada/consolidada en una factura posterior';
         END IF;
 
         IF v_factura.estado = 'pagada' OR v_factura.saldo_pendiente <= 0 THEN
@@ -489,29 +676,9 @@ BEGIN
             fecha_pago = CASE WHEN v_nuevo_saldo = 0 THEN NEW.fecha_pago ELSE fecha_pago END
         WHERE id = NEW.factura_id;
 
-        -- Re-evaluar estado del medidor si la factura quedó pagada
+        -- Re-evaluar estado del medidor si la factura quedó pagada (0 vencidas->activo, 1-2->moroso, 3+->pendiente_corte; nunca tocar cortado/retirado)
         IF v_nuevo_saldo = 0 THEN
-            SELECT estado INTO v_medidor_estado
-            FROM public.medidores
-            WHERE id = v_factura.medidor_id;
-
-            IF v_medidor_estado NOT IN ('cortado', 'retirado') THEN
-                SELECT
-                    COUNT(*) FILTER (WHERE estado = 'vencida' OR fecha_vencimiento < CURRENT_DATE),
-                    COALESCE(BOOL_OR(es_tercera_boleta), FALSE)
-                INTO v_vencidas_impagas, v_tiene_tercera
-                FROM public.facturas
-                WHERE medidor_id = v_factura.medidor_id
-                  AND estado NOT IN ('pagada', 'anulada');
-
-                UPDATE public.medidores
-                SET estado = CASE
-                    WHEN v_vencidas_impagas = 0 THEN 'activo'
-                    WHEN v_vencidas_impagas >= 3 OR (v_tiene_tercera AND v_medidor_estado = 'pendiente_corte') THEN 'pendiente_corte'
-                    ELSE 'moroso'
-                END
-                WHERE id = v_factura.medidor_id;
-            END IF;
+            PERFORM public.recalcular_estado_medidor(v_factura.medidor_id);
         END IF;
 
         RETURN NEW;
@@ -532,6 +699,9 @@ CREATE TRIGGER trg_aplicar_pago_despues_insert
 AFTER INSERT ON public.pagos
 FOR EACH ROW
 EXECUTE FUNCTION public.procesar_pago_factura();
+
+-- Backfill inmediato al ejecutar el schema para alinear medidores existentes con facturas vencidas
+SELECT public.recalcular_todos_los_estados_medidores();
 
 -- ---------------------------------------------------------------------
 -- 10. TABLA DE OTROS TRABAJOS (Cargos pendientes por medidor)

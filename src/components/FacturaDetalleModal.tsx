@@ -43,6 +43,7 @@ const ESTADO_LABELS: Record<string, { label: string; className: string }> = {
   pagada: { label: 'Pagada', className: 'bg-emerald-50 text-emerald-800 border-emerald-300' },
   vencida: { label: 'Vencida', className: 'bg-red-50 text-red-800 border-red-300' },
   anulada: { label: 'Anulada', className: 'bg-stone-100 text-stone-600 border-stone-300' },
+  refinanciada: { label: 'Refinanciada', className: 'bg-indigo-50 text-indigo-800 border-indigo-300' },
 };
 
 const METODO_LABELS: Record<MetodoPago, string> = {
@@ -81,19 +82,21 @@ export const FacturaDetalleModal: React.FC<FacturaDetalleModalProps> = ({
   const medidor = data?.medidor;
 
   const saldoPendiente = factura
-    ? factura.saldo_pendiente !== undefined && factura.saldo_pendiente !== null
-      ? factura.saldo_pendiente
-      : factura.saldo !== undefined && factura.saldo !== null
-        ? factura.saldo
-        : factura.estado === 'pagada' || factura.estado === 'anulada'
-          ? 0
+    ? factura.estado === 'pagada' || factura.estado === 'anulada' || factura.estado === 'refinanciada'
+      ? 0
+      : factura.saldo_pendiente !== undefined && factura.saldo_pendiente !== null
+        ? factura.saldo_pendiente
+        : factura.saldo !== undefined && factura.saldo !== null
+          ? factura.saldo
           : factura.total
     : 0;
 
   const montoPagado = factura
-    ? factura.monto_pagado !== undefined && factura.monto_pagado !== null
-      ? factura.monto_pagado
-      : Math.max(0, factura.total - saldoPendiente)
+    ? factura.estado === 'anulada' || factura.estado === 'refinanciada'
+      ? 0
+      : factura.monto_pagado !== undefined && factura.monto_pagado !== null
+        ? factura.monto_pagado
+        : Math.max(0, factura.total - saldoPendiente)
     : 0;
 
   useEffect(() => {
@@ -135,12 +138,14 @@ export const FacturaDetalleModal: React.FC<FacturaDetalleModalProps> = ({
     puedeRegistrarPago(user?.rol) &&
     saldoPendiente > 0 &&
     factura.estado !== 'pagada' &&
-    factura.estado !== 'anulada';
+    factura.estado !== 'anulada' &&
+    factura.estado !== 'refinanciada';
 
   const puedeAnular =
     puedeAnularFactura(user?.rol) &&
     factura.estado !== 'anulada' &&
     factura.estado !== 'pagada' &&
+    factura.estado !== 'refinanciada' &&
     montoPagado === 0 &&
     pagos.length === 0;
 
@@ -343,6 +348,13 @@ export const FacturaDetalleModal: React.FC<FacturaDetalleModalProps> = ({
           {factura.estado === 'anulada' && factura.motivo_anulacion && (
             <div className="p-3 bg-stone-100 border border-stone-300 rounded-lg text-stone-700">
               <span className="font-bold text-stone-900">Motivo de anulación:</span> {factura.motivo_anulacion}
+            </div>
+          )}
+
+          {factura.estado === 'refinanciada' && (
+            <div className="p-3 bg-indigo-50 border border-indigo-300 rounded-lg text-indigo-900">
+              <span className="font-bold">Factura refinanciada / consolidada:</span>{' '}
+              {factura.motivo || 'Consolidada en una factura posterior.'} El saldo pendiente de esta boleta es 0 Gs. y su deuda se cobra dentro de la factura consolidada.
             </div>
           )}
 

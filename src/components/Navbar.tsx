@@ -18,6 +18,7 @@ import {
   Wrench,
   ShieldAlert,
   RotateCcw,
+  UserCog,
 } from 'lucide-react';
 
 interface NavbarProps {
@@ -115,8 +116,8 @@ export const Navbar: React.FC<NavbarProps> = ({
           </div>
         </div>
 
-        {/* Navigation Tabs */}
-        <nav className="flex space-x-1 overflow-x-auto pb-2 scrollbar-none text-sm font-medium border-t border-stone-100 pt-1">
+        {/* Navigation Tabs (solo desktop >= 768px; en móvil la navegación es únicamente la barra inferior + Más) */}
+        <nav className="hidden md:flex space-x-1 overflow-x-auto pb-2 scrollbar-none text-sm font-medium border-t border-stone-100 pt-1">
           {/* Dashboard */}
           <button
             type="button"
@@ -205,19 +206,21 @@ export const Navbar: React.FC<NavbarProps> = ({
             <span>Facturación</span>
           </button>
 
-          {/* Cortes y Reconexiones */}
-          <button
-            type="button"
-            onClick={() => setCurrentTab('cortes')}
-            className={`flex items-center gap-1.5 px-3 py-1.5 rounded-md whitespace-nowrap transition-colors ${
-              currentTab === 'cortes'
-                ? 'bg-stone-900 text-white font-medium'
-                : 'text-stone-600 hover:bg-stone-100 hover:text-stone-900'
-            }`}
-          >
-            <Scissors className="w-4 h-4 text-red-600" />
-            <span>Cortes / Reconexión</span>
-          </button>
+          {/* Corte y Reconexión (Solo Admin) */}
+          {role === 'admin' && (
+            <button
+              type="button"
+              onClick={() => setCurrentTab('cortes')}
+              className={`flex items-center gap-1.5 px-3 py-1.5 rounded-md whitespace-nowrap transition-colors ${
+                currentTab === 'cortes'
+                  ? 'bg-stone-900 text-white font-medium'
+                  : 'text-stone-600 hover:bg-stone-100 hover:text-stone-900'
+              }`}
+            >
+              <Scissors className="w-4 h-4 text-red-600" />
+              <span>Corte y Reconexión</span>
+            </button>
+          )}
 
           {/* Mapa de Medidores */}
           <button
@@ -246,6 +249,22 @@ export const Navbar: React.FC<NavbarProps> = ({
             <Wrench className="w-4 h-4" />
             <span>Otros Trabajos</span>
           </button>
+
+          {/* Usuarios (Solo Admin) */}
+          {role === 'admin' && (
+            <button
+              type="button"
+              onClick={() => setCurrentTab('usuarios')}
+              className={`flex items-center gap-1.5 px-3 py-1.5 rounded-md whitespace-nowrap transition-colors ${
+                currentTab === 'usuarios'
+                  ? 'bg-stone-900 text-white font-medium'
+                  : 'text-stone-600 hover:bg-stone-100 hover:text-stone-900'
+              }`}
+            >
+              <UserCog className="w-4 h-4" />
+              <span>Usuarios</span>
+            </button>
+          )}
 
           {/* Tarifas */}
           {role === 'admin' && (

@@ -26,6 +26,7 @@ import { CajaCobranzasView } from './components/CajaCobranzasView';
 import { ReportesView } from './components/ReportesView';
 import { TarifasView } from './components/TarifasView';
 import { CorteReconexionView } from './components/CorteReconexionView';
+import { UsuariosView } from './components/UsuariosView';
 import { SupabaseSetupAssistant } from './components/SupabaseSetupAssistant';
 import { ShieldAlert, AlertTriangle, CheckCircle2, RefreshCw, X } from 'lucide-react';
 
@@ -48,7 +49,6 @@ function MainApp() {
     }
     return 'dashboard';
   });
-  const [mobileMenuOpen, setMobileMenuOpen] = useState<boolean>(false);
   const [, setDbVersion] = useState<number>(0);
   const [isSyncing, setIsSyncing] = useState<boolean>(false);
   const [syncToast, setSyncToast] = useState<{ type: 'success' | 'error'; message: string } | null>(null);
@@ -173,22 +173,17 @@ function MainApp() {
 
   return (
     <div className="min-h-screen bg-stone-100 flex text-stone-900 font-sans">
-      {/* Sidebar Minimalista */}
-      <Sidebar
-        currentTab={currentTab}
-        setCurrentTab={setCurrentTab}
-        isOpenMobile={mobileMenuOpen}
-        setIsOpenMobile={setMobileMenuOpen}
-      />
+      {/* Sidebar en desktop (>=768px) / Barra inferior + Más en móvil (<768px) */}
+      <Sidebar currentTab={currentTab} setCurrentTab={setCurrentTab} />
 
       <div className="flex-1 flex flex-col min-w-0">
-        {/* Header con botón Sincronizar datos, usuario y logout */}
+        {/* Header con sincronización, nombre+rol, cambiar contraseña y cerrar sesión */}
         <Header
-          onToggleMobileMenu={() => setMobileMenuOpen(!mobileMenuOpen)}
           onResetDemo={handleResetDemo}
           onNavigate={setCurrentTab}
           onSyncData={handleSyncData}
           isSyncing={isSyncing}
+          onNotify={setSyncToast}
         />
 
         {/* Toast de Sincronización */}
@@ -196,7 +191,7 @@ function MainApp() {
           <div
             role={syncToast.type === 'error' ? 'alert' : 'status'}
             aria-live="polite"
-            className={`fixed bottom-4 right-4 z-50 max-w-sm w-[calc(100%-2rem)] sm:w-auto px-4 py-3 rounded-xl shadow-lg border flex items-start gap-2.5 text-xs font-semibold ${
+            className={`fixed bottom-20 md:bottom-4 right-4 z-50 max-w-sm w-[calc(100%-2rem)] sm:w-auto px-4 py-3 rounded-xl shadow-lg border flex items-start gap-2.5 text-xs font-semibold ${
               syncToast.type === 'success'
                 ? 'bg-emerald-900 text-white border-emerald-700'
                 : 'bg-red-900 text-white border-red-700'
@@ -297,6 +292,48 @@ function MainApp() {
 
           {currentTab === 'reportes' && <ReportesView />}
 
+          {currentTab === 'cortes' && (
+            user?.rol === 'admin' ? (
+              <CorteReconexionView />
+            ) : (
+              <div className="p-8 bg-red-50 border border-red-300 rounded-xl text-red-900 max-w-lg mx-auto text-center space-y-3">
+                <ShieldAlert className="w-10 h-10 text-red-600 mx-auto" />
+                <h2 className="text-base font-black">Acceso denegado</h2>
+                <p className="text-xs">
+                  El módulo de Corte y Reconexión es de acceso exclusivo para usuarios con rol de Administrador.
+                </p>
+                <button
+                  type="button"
+                  onClick={() => setCurrentTab('dashboard')}
+                  className="px-4 py-2 bg-stone-900 text-white font-bold text-xs rounded-lg cursor-pointer"
+                >
+                  Volver al Panel
+                </button>
+              </div>
+            )
+          )}
+
+          {currentTab === 'usuarios' && (
+            user?.rol === 'admin' ? (
+              <UsuariosView />
+            ) : (
+              <div className="p-8 bg-red-50 border border-red-300 rounded-xl text-red-900 max-w-lg mx-auto text-center space-y-3">
+                <ShieldAlert className="w-10 h-10 text-red-600 mx-auto" />
+                <h2 className="text-base font-black">Acceso denegado</h2>
+                <p className="text-xs">
+                  La gestión de Usuarios y Roles es de acceso exclusivo para usuarios con rol de Administrador.
+                </p>
+                <button
+                  type="button"
+                  onClick={() => setCurrentTab('dashboard')}
+                  className="px-4 py-2 bg-stone-900 text-white font-bold text-xs rounded-lg cursor-pointer"
+                >
+                  Volver al Panel
+                </button>
+              </div>
+            )
+          )}
+
           {/* Ruta oculta /admin/configuracion/tarifas — Solo accesible para admin */}
           {currentTab === '/admin/configuracion/tarifas' && (
             user?.rol === 'admin' ? (
@@ -320,7 +357,7 @@ function MainApp() {
           )}
         </main>
 
-        <footer className="bg-white border-t border-stone-200 py-3 text-center text-[11px] text-stone-500">
+        <footer className="bg-white border-t border-stone-200 py-3 pb-20 md:pb-3 text-center text-[11px] text-stone-500">
           AguateríaPY — Sistema Operativo de Gestión de Agua Potable • Diseñado conforme a normativas de ERSSAN (Paraguay)
         </footer>
       </div>

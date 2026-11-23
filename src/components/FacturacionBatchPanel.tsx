@@ -3,11 +3,18 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import React, { useState } from 'react';
+import React, { useMemo, useState } from 'react';
 import { db, type ResumenFacturacionMensual } from '../services/database';
 import { formatGs } from '../services/billingRules';
-import { agruparOmitidosPorMotivo, puedeGenerarFacturacionMensual } from '../services/facturacionHelpers';
+import {
+  agruparOmitidosPorMotivo,
+  calcularPeriodoFacturadoSugerido,
+  formatearNumeroFactura,
+  puedeGenerarFacturacionMensual,
+  validarSolicitudFacturaIndividual,
+} from '../services/facturacionHelpers';
 import { useAuth } from '../context/AuthContext';
+import { DetalleFactura, Factura } from '../types';
 import {
   Calendar,
   Play,
@@ -19,6 +26,7 @@ import {
   ChevronDown,
   ChevronUp,
   Info,
+  FilePlus2,
 } from 'lucide-react';
 
 interface FacturacionBatchPanelProps {
@@ -37,6 +45,22 @@ export const FacturacionBatchPanel: React.FC<FacturacionBatchPanelProps> = ({
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
   const [resumen, setResumen] = useState<ResumenFacturacionMensual | null>(null);
   const [expandOmitidos, setExpandOmitidos] = useState(true);
+
+  // Estado para facturación individual (1 solo medidor y período de consumo específico)
+  const [indNumeroMedidor, setIndNumeroMedidor] = useState<string>('');
+  const [indPeriodoConsumo, setIndPeriodoConsumo] = useState<string>(defaultPeriodo);
+  const [indPeriodoFacturado, setIndPeriodoFacturado] = useState<string>(
+    calcularPeriodoFacturadoSugerido(defaultPeriodo) || defaultPeriodo
+  );
+  const [indFacturadoManual, setIndFacturadoManual] = useState<boolean>(false);
+  const [isProcessingInd, setIsProcessingInd] = useState<boolean>(false);
+  const [indErrorMsg, setIndErrorMsg] = useState<string | null>(null);
+  const [indResultado, setIndResultado] = useState<{
+    factura: Factura;
+    detalles: DetalleFactura[];
+    numeroMedidor: number;
+    clienteNombre: string;
+  } | null>(null);
 
   if (!puedeGenerarFacturacionMensual(user?.rol)) {
     return (
@@ -78,6 +102,64 @@ export const FacturacionBatchPanel: React.FC<FacturacionBatchPanelProps> = ({
   };
 
   const gruposOmitidos = resumen ? agruparOmitidosPorMotivo(resumen.medidoresOmitidos) : [];
+
+  const previewIndividual = useMemo(() => {
+    const num = parseInt((indNumeroMedidor || '').trim(), 10);
+    if (!Number.isInteger(num) || num < 1) return null;
+    const full = db.getFullData();
+    const medidor = full.medidores.find((m) => m.numero_medidor === num);
+    if (!medidor) {
+      return { encontrado: false as const, numeroMedidor: num };
+    }
+    const cliente = full.clientes.find((c) => c.id === medidor.cliente_id);
+    const lectura = full.lecturas.find(
+      (l) => l.medidor_id === medidor.id && l.periodo === (indPeriodoConsumo || '').trim()
+    );
+    const facturaActivaPeriodo = full.facturas.find(
+      (f) =>
+        f.medidor_id === medidor.id &&
+        f.periodo_facturado === (indPeriodoFacturado || '').trim() &&
+        f.estado !== 'anulada'
+    );
+    return {
+      encontrado: true as const,
+      medidor,
+      clienteNombre: cliente?.nombre_completo || 'Sin titular',
+      lectura: lectura || null,
+      facturaActivaPeriodo: facturaActivaPeriodo || null,
+    };
+  }, [indNumeroMedidor, indPeriodoConsumo, indPeriodoFacturado, indResultado, resumen]);
+
+  const handleGenerarIndividual = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (isProcessingInd || isProcessing) return;
+    setIndErrorMsg(null);
+    setIndResultado(null);
+
+    const check = validarSolicitudFacturaIndividual({
+      numeroMedidor: indNumeroMedidor,
+      periodoConsumo: indPeriodoConsumo,
+      periodoFacturado: indPeriodoFacturado,
+    });
+    if (!check.valido) {
+      setIndErrorMsg(check.error || 'Verificá los datos ingresados.');
+      return;
+    }
+
+    setIsProcessingInd(true);
+    try {
+      const res = await db.generarFacturaIndividualAsync({
+        numeroMedidor: check.numeroMedidor!,
+        periodoConsumo: check.periodoConsumo!,
+        periodoFacturado: check.periodoFacturado!,
+      });
+      setIndResultado(res);
+    } catch (err: any) {
+      setIndErrorMsg(err?.message || 'No se pudo generar la factura individual.');
+    } finally {
+      setIsProcessingInd(false);
+    }
+  };
 
   return (
     <div className="space-y-5">
@@ -147,6 +229,177 @@ export const FacturacionBatchPanel: React.FC<FacturacionBatchPanelProps> = ({
           </div>
         )}
       </div>
+
+      {/* Tarjeta de Facturación Individual (1 solo medidor y período de consumo específico) */}
+      <form
+        noValidate
+        onSubmit={handleGenerarIndividual}
+        className="bg-white rounded-xl border border-stone-200 p-5 sm:p-6 space-y-4"
+      >
+        <div className="space-y-1">
+          <div className="flex items-center gap-2 text-stone-900">
+            <FilePlus2 className="w-5 h-5 text-emerald-700 shrink-0" />
+            <h2 className="text-lg font-bold tracking-tight">Facturar un solo medidor (Individual)</h2>
+          </div>
+          <p className="text-xs text-stone-600 max-w-2xl leading-relaxed">
+            Emite una única factura para un medidor puntual utilizando la lectura confirmada del período de consumo
+            que indiques, sin afectar al resto del padrón.
+          </p>
+        </div>
+
+        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3 items-end">
+          <div>
+            <label htmlFor="ind-numero-medidor" className="text-xs font-semibold text-stone-700 block mb-1">
+              N° de medidor *
+            </label>
+            <input
+              id="ind-numero-medidor"
+              type="number"
+              min={1}
+              step={1}
+              value={indNumeroMedidor}
+              onChange={(e) => setIndNumeroMedidor(e.target.value)}
+              placeholder="Ej: 10"
+              disabled={isProcessingInd || isProcessing}
+              className="w-full min-h-[44px] px-3 py-2 bg-stone-50 border border-stone-300 rounded-lg text-sm font-bold text-stone-900 tabular-nums focus:outline-hidden focus:border-emerald-700 focus:bg-white"
+            />
+          </div>
+
+          <div>
+            <label htmlFor="ind-periodo-consumo" className="text-xs font-semibold text-stone-700 block mb-1">
+              Período de consumo *
+            </label>
+            <input
+              id="ind-periodo-consumo"
+              type="month"
+              value={indPeriodoConsumo}
+              onChange={(e) => {
+                const val = e.target.value;
+                setIndPeriodoConsumo(val);
+                if (!indFacturadoManual) {
+                  const sugerido = calcularPeriodoFacturadoSugerido(val);
+                  if (sugerido) setIndPeriodoFacturado(sugerido);
+                }
+              }}
+              disabled={isProcessingInd || isProcessing}
+              className="w-full min-h-[44px] px-3 py-2 bg-stone-50 border border-stone-300 rounded-lg text-sm font-bold text-stone-900 tabular-nums focus:outline-hidden focus:border-emerald-700 focus:bg-white"
+            />
+          </div>
+
+          <div>
+            <label htmlFor="ind-periodo-facturado" className="text-xs font-semibold text-stone-700 block mb-1">
+              Período de boleta / facturación *
+            </label>
+            <input
+              id="ind-periodo-facturado"
+              type="month"
+              value={indPeriodoFacturado}
+              onChange={(e) => {
+                setIndFacturadoManual(true);
+                setIndPeriodoFacturado(e.target.value);
+              }}
+              disabled={isProcessingInd || isProcessing}
+              className="w-full min-h-[44px] px-3 py-2 bg-stone-50 border border-stone-300 rounded-lg text-sm font-bold text-stone-900 tabular-nums focus:outline-hidden focus:border-emerald-700 focus:bg-white"
+            />
+          </div>
+
+          <button
+            type="submit"
+            disabled={isProcessingInd || isProcessing}
+            className="min-h-[44px] px-5 py-2.5 bg-emerald-700 hover:bg-emerald-800 disabled:opacity-60 text-white font-bold text-sm rounded-lg flex items-center justify-center gap-2 cursor-pointer transition-colors whitespace-nowrap"
+          >
+            {isProcessingInd ? (
+              <>
+                <Loader2 className="w-4 h-4 animate-spin shrink-0" />
+                <span>Generando...</span>
+              </>
+            ) : (
+              <>
+                <FilePlus2 className="w-4 h-4 shrink-0" />
+                <span>Generar factura individual</span>
+              </>
+            )}
+          </button>
+        </div>
+
+        {previewIndividual && (
+          <div className="p-3 bg-stone-50 border border-stone-200 rounded-lg text-xs text-stone-700 space-y-1">
+            {!previewIndividual.encontrado ? (
+              <span className="font-semibold text-amber-800">
+                No existe un medidor registrado con el N° {previewIndividual.numeroMedidor}.
+              </span>
+            ) : (
+              <>
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <span>
+                    <b className="text-stone-900">Medidor #{previewIndividual.medidor.numero_medidor}</b> —{' '}
+                    {previewIndividual.clienteNombre}
+                  </span>
+                  <span className="uppercase font-bold text-[11px] text-stone-600">
+                    Estado: {previewIndividual.medidor.estado.replace('_', ' ')}
+                  </span>
+                </div>
+                {previewIndividual.lectura ? (
+                  <p className="text-stone-600">
+                    Lectura {indPeriodoConsumo} ({previewIndividual.lectura.estado}): Ant{' '}
+                    <b>{previewIndividual.lectura.lectura_anterior}</b> → Act{' '}
+                    <b>{previewIndividual.lectura.lectura_actual}</b> (
+                    <b>{previewIndividual.lectura.consumo_m3} m³</b>)
+                  </p>
+                ) : (
+                  <p className="text-amber-800 font-semibold">
+                    No hay lectura registrada para este medidor en {indPeriodoConsumo}.
+                  </p>
+                )}
+                {previewIndividual.facturaActivaPeriodo && (
+                  <p className="text-amber-800 font-semibold">
+                    Atención: este medidor ya tiene una factura activa en el período {indPeriodoFacturado}.
+                  </p>
+                )}
+              </>
+            )}
+          </div>
+        )}
+
+        {indErrorMsg && (
+          <div
+            role="alert"
+            className="p-3.5 bg-red-50 border border-red-300 rounded-lg text-red-800 text-xs font-semibold flex items-start gap-2"
+          >
+            <AlertTriangle className="w-4 h-4 text-red-600 shrink-0 mt-0.5" />
+            <span>{indErrorMsg}</span>
+          </div>
+        )}
+
+        {indResultado && (
+          <div className="p-4 bg-emerald-50 border border-emerald-300 rounded-lg flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+            <div className="space-y-0.5 text-xs">
+              <div className="flex items-center gap-2 font-bold text-emerald-900 text-sm">
+                <CheckCircle2 className="w-4 h-4 text-emerald-700 shrink-0" />
+                <span>
+                  Factura {formatearNumeroFactura(indResultado.factura)} emitida — Medidor #
+                  {indResultado.numeroMedidor}
+                </span>
+              </div>
+              <p className="text-emerald-800">
+                Titular: <b>{indResultado.clienteNombre}</b> · Consumo:{' '}
+                <b>{indResultado.factura.periodo_consumo}</b> · Boleta:{' '}
+                <b>{indResultado.factura.periodo_facturado}</b> · Total:{' '}
+                <b>{formatGs(indResultado.factura.total)}</b>
+              </p>
+            </div>
+
+            <button
+              type="button"
+              onClick={() => onVerFacturasGeneradas(indResultado.factura.periodo_facturado)}
+              className="min-h-[40px] px-4 py-2 bg-stone-900 hover:bg-stone-800 text-white text-xs font-bold rounded-lg inline-flex items-center justify-center gap-2 cursor-pointer whitespace-nowrap"
+            >
+              <span>Ver en listado</span>
+              <ArrowRight className="w-4 h-4" />
+            </button>
+          </div>
+        )}
+      </form>
 
       {/* Estado de carga explícito */}
       {isProcessing && (

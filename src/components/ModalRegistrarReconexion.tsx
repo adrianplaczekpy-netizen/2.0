@@ -53,6 +53,7 @@ export const ModalRegistrarReconexion: React.FC<Props> = ({
   const [lecturaInicial, setLecturaInicial] = useState<string>('0');
   const [observaciones, setObservaciones] = useState<string>('');
   const [errorValidacion, setErrorValidacion] = useState<string | null>(null);
+  const [procesando, setProcesando] = useState<boolean>(false);
 
   // Estado una vez completada la reconexión con éxito
   const [resultadoReconexion, setResultadoReconexion] = useState<{
@@ -79,10 +80,13 @@ export const ModalRegistrarReconexion: React.FC<Props> = ({
   }
 
   const { medidor, cliente, liquidacionReconexion, facturas } = medidorDetalle;
-  const facturasImpagas = facturas.filter((f) => f.estado !== 'pagada');
+  const facturasImpagas = facturas.filter(
+    (f) => f.estado !== 'pagada' && f.estado !== 'anulada' && f.estado !== 'refinanciada'
+  );
 
-  const handleConfirmar = (e: React.FormEvent) => {
+  const handleConfirmar = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (procesando) return;
     setErrorValidacion(null);
 
     // Validar tipo de reinstalación
@@ -114,8 +118,9 @@ export const ModalRegistrarReconexion: React.FC<Props> = ({
       return;
     }
 
+    setProcesando(true);
     try {
-      const res = db.confirmarReconexion(medidor.id, {
+      const res = await db.confirmarReconexionAsync(medidor.id, {
         cobradorId: operario || 'Caja Central',
         metodoPago,
         tipoReinstalacion,
@@ -129,7 +134,9 @@ export const ModalRegistrarReconexion: React.FC<Props> = ({
       setResultadoReconexion(res);
       onSuccess(res);
     } catch (err: any) {
-      setErrorValidacion(err.message || 'Error al procesar reconexión.');
+      setErrorValidacion(err?.message || 'Error al procesar reconexión.');
+    } finally {
+      setProcesando(false);
     }
   };
 
@@ -267,7 +274,7 @@ export const ModalRegistrarReconexion: React.FC<Props> = ({
 
               <div className="bg-stone-50 border border-stone-200 rounded-xl p-3.5 space-y-2 text-xs">
                 <div className="flex justify-between items-center text-stone-700">
-                  <span>1. Deuda anterior acumulada ({facturasImpagas.length} boletas impagas):</span>
+                  <span>1. Deuda anterior (última boleta impaga de {facturasImpagas.length} pendientes):</span>
                   <span className="font-semibold text-stone-900">
                     {formatGs(liquidacionReconexion.subtotalFacturas)}
                   </span>
@@ -295,7 +302,7 @@ export const ModalRegistrarReconexion: React.FC<Props> = ({
                 <div className="flex justify-between items-center text-stone-600 border-t border-stone-200 pt-1.5">
                   <span>Aporte Regulador ERSSAN (2% sobre conceptos):</span>
                   <span className="font-semibold text-stone-900">
-                    {formatGs(liquidacionReconexion.erssan)}
+                    {formatGs(liquidacionReconexion.montoErssan)}
                   </span>
                 </div>
                 <div className="flex justify-between items-center text-sm font-black text-stone-900 border-t-2 border-stone-300 pt-2">
@@ -476,10 +483,15 @@ export const ModalRegistrarReconexion: React.FC<Props> = ({
               </button>
               <button
                 type="submit"
-                className="px-5 py-2.5 bg-emerald-600 hover:bg-emerald-700 active:bg-emerald-800 text-white rounded-lg text-xs font-bold flex items-center gap-1.5 cursor-pointer shadow-xs transition-colors"
+                disabled={procesando}
+                className="px-5 py-2.5 bg-emerald-600 hover:bg-emerald-700 active:bg-emerald-800 disabled:opacity-60 text-white rounded-lg text-xs font-bold flex items-center gap-1.5 cursor-pointer shadow-xs transition-colors"
               >
                 <CheckCircle2 className="w-4 h-4" />
-                <span>Confirmar Pago, Regularización y Reconexión</span>
+                <span>
+                  {procesando
+                    ? 'Procesando reconexión...'
+                    : 'Confirmar Pago, Regularización y Reconexión'}
+                </span>
               </button>
             </div>
           </form>

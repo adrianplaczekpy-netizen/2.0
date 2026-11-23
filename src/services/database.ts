@@ -28,11 +28,15 @@ import {
   TARIFAS_DEFAULT,
   calcularFacturaMedidor,
   evaluarEstadoMedidor,
+  evaluarEstadoMedidorPorVencidas,
+  esFacturaVencida,
   calcularMoraMedidor,
+  obtenerMoraDeFactura,
   verificarAlertaConsumo,
   validarNumeroMedidor,
   liquidarReconexion,
   generarFacturaRegularizacion,
+  resolverPeriodoRegularizacion,
   validarLecturaIngreso,
   validarEdicionLectura,
   validarRegistroCargo,
@@ -48,7 +52,15 @@ import {
   MedidorOmitidoFacturacion,
   ErrorFacturacionMedidor,
 } from './billingEngine';
+import { validarSolicitudFacturaIndividual } from './facturacionHelpers';
 import { generarFotoPlaceholder } from '../utils/imageCompressor';
+import {
+  enqueueLecturaOffline,
+  getLecturasOfflineQueue,
+  isOfflineOrNetworkError,
+  removeLecturaOffline,
+  StorageLike,
+} from './lecturasOfflineQueue';
 
 // Nombres y apellidos paraguayos comunes
 const NOMBRES = [
@@ -67,14 +79,12 @@ const APELLIDOS = [
 ];
 
 const ZONAS_AGUATERIA = [
-  { nombre: 'Zona Centro San Lorenzo', lat: -25.3405, lng: -57.5105 },
-  { nombre: 'Barrio San José', lat: -25.3325, lng: -57.5015 },
-  { nombre: 'Reducto', lat: -25.3650, lng: -57.5180 },
-  { nombre: 'Barcequillo', lat: -25.3280, lng: -57.5350 },
-  { nombre: 'Cuarto Barrio - Luque', lat: -25.2715, lng: -57.4895 },
-  { nombre: 'Posta Ybycuá - Capiatá', lat: -25.3720, lng: -57.4420 },
-  { nombre: 'Ruta 2 Km 18', lat: -25.3580, lng: -57.4600 },
-  { nombre: 'Patiño - Itauguá', lat: -25.3690, lng: -57.3420 }
+  { nombre: 'SAN GABRIEL', lat: -25.391332, lng: -57.384889 },
+  { nombre: 'SAN JOSE', lat: -25.3885, lng: -57.3812 },
+  { nombre: 'LAS ROSAS', lat: -25.3941, lng: -57.3884 },
+  { nombre: 'RESIDENCIAL', lat: -25.3898, lng: -57.3892 },
+  { nombre: 'DON FELIX', lat: -25.3952, lng: -57.3815 },
+  { nombre: 'MBOKAJATY DEL SUR', lat: -25.3976, lng: -57.3858 },
 ];
 
 const CALLES = [
@@ -117,6 +127,23 @@ export interface LoadFromSupabaseResult {
   clientesCount: number;
   medidoresCount: number;
   error?: string;
+}
+
+export interface CambioEstadoMedidor {
+  medidorId: string;
+  numeroMedidor: number;
+  anterior: EstadoMedidor;
+  nuevo: EstadoMedidor;
+  vencidasCount: number;
+}
+
+export interface ResumenRecalculoEstadosMedidores {
+  totalEvaluados: number;
+  actualizados: number;
+  facturasVencidasMarcadas: number;
+  facturasVencidasIds: string[];
+  cambios: CambioEstadoMedidor[];
+  origen?: 'rpc' | 'directo' | 'local';
 }
 
 class DatabaseEngine {
@@ -302,16 +329,56 @@ class DatabaseEngine {
         planesRes,
         usuariosRes,
       ] = await Promise.all([
-        client.from('tarifas').select('*').order('vigente_desde', { ascending: true }).order('fecha_creacion', { ascending: true }),
-        client.from('clientes').select('*').order('created_at', { ascending: false }).limit(5000),
-        client.from('medidores').select('*').order('numero_medidor', { ascending: true }).limit(5000),
-        client.from('contratos').select('*').limit(5000),
-        client.from('lecturas').select('*').order('fecha_lectura', { ascending: false }).limit(10000),
-        client.from('facturas').select('*').order('created_at', { ascending: false }).limit(10000),
-        client.from('detalle_factura').select('*').limit(20000),
-        client.from('pagos').select('*').order('fecha_pago', { ascending: false }).limit(10000),
-        client.from('cargos_pendientes').select('*').limit(5000),
-        client.from('planes_financiamiento').select('*').limit(5000),
+        this.fetchTablePaginated(
+          client,
+          'tarifas',
+          (q) => q.order('vigente_desde', { ascending: true }).order('fecha_creacion', { ascending: true })
+        ),
+        this.fetchTablePaginated(
+          client,
+          'clientes',
+          (q) => q.order('created_at', { ascending: false }).order('id', { ascending: true })
+        ),
+        this.fetchTablePaginated(
+          client,
+          'medidores',
+          (q) => q.order('numero_medidor', { ascending: true })
+        ),
+        this.fetchTablePaginated(
+          client,
+          'contratos',
+          (q) => q.order('id', { ascending: true })
+        ),
+        this.fetchTablePaginated(
+          client,
+          'lecturas',
+          (q) => q.order('fecha_lectura', { ascending: false }).order('id', { ascending: true })
+        ),
+        this.fetchTablePaginated(
+          client,
+          'facturas',
+          (q) => q.order('created_at', { ascending: false }).order('id', { ascending: true })
+        ),
+        this.fetchTablePaginated(
+          client,
+          'detalle_factura',
+          (q) => q.order('id', { ascending: true })
+        ),
+        this.fetchTablePaginated(
+          client,
+          'pagos',
+          (q) => q.order('fecha_pago', { ascending: false }).order('id', { ascending: true })
+        ),
+        this.fetchTablePaginated(
+          client,
+          'cargos_pendientes',
+          (q) => q.order('id', { ascending: true })
+        ),
+        this.fetchTablePaginated(
+          client,
+          'planes_financiamiento',
+          (q) => q.order('id', { ascending: true })
+        ),
         client.from('usuarios').select('id, nombre_completo, email').limit(500),
       ]);
 
@@ -423,7 +490,7 @@ class DatabaseEngine {
             ? Number(f.saldo_pendiente)
             : f.saldo !== undefined && f.saldo !== null
               ? Number(f.saldo)
-              : f.estado === 'pagada' || f.estado === 'anulada'
+              : f.estado === 'pagada' || f.estado === 'anulada' || f.estado === 'refinanciada'
                 ? 0
                 : totalNum;
         const montoPagado =
@@ -431,7 +498,7 @@ class DatabaseEngine {
             ? Number(f.monto_pagado)
             : f.estado === 'pagada'
               ? totalNum
-              : f.estado === 'anulada'
+              : f.estado === 'anulada' || f.estado === 'refinanciada'
                 ? 0
                 : Math.max(0, totalNum - saldoPendiente);
 
@@ -455,6 +522,7 @@ class DatabaseEngine {
           estado: f.estado,
           fecha_pago: f.fecha_pago || null,
           motivo_anulacion: f.motivo_anulacion || null,
+          motivo: f.motivo || null,
           lectura_anterior:
             f.lectura_anterior !== undefined && f.lectura_anterior !== null
               ? Number(f.lectura_anterior)
@@ -502,42 +570,55 @@ class DatabaseEngine {
         };
       });
 
+      if (!usuariosRes?.error && Array.isArray(usuariosRes?.data)) {
+        this.usuariosMap.clear();
+        for (const u of usuariosRes.data) {
+          if (u?.id) {
+            this.usuariosMap.set(u.id, u.nombre_completo || u.email || u.id);
+          }
+        }
+      }
+
       const tarifas: TarifaConfig[] =
         tarifasRes.data && tarifasRes.data.length > 0
-          ? tarifasRes.data.map((t: any) => ({
-              id: t.id,
-              precio_m3: Number(t.precio_m3),
-              consumo_minimo_m3: Number(t.consumo_minimo_m3),
-              monto_minimo_consumo: Number(t.monto_minimo_consumo),
-              monto_mora_fijo: Number(t.monto_mora_fijo),
-              monto_reconexion: Number(t.monto_reconexion),
-              erssan_porcentaje: Number(t.erssan_porcentaje),
-              dia_vencimiento_boletas_normales:
-                t.dia_vencimiento_boletas_normales === 'ultimo_dia_mes' ||
-                t.dia_vencimiento_boletas_normales === '0' ||
-                t.dia_vencimiento_boletas_normales === 0
-                  ? 'ultimo_dia_mes'
-                  : Number(t.dia_vencimiento_boletas_normales),
-              dia_vencimiento_tercera_boleta: Number(t.dia_vencimiento_tercera_boleta),
-              umbral_alerta_consumo: Number(t.umbral_alerta_consumo),
-              texto_alerta_consumo: t.texto_alerta_consumo,
-              max_numero_medidor: Number(t.max_numero_medidor),
-              vigente_desde: t.vigente_desde,
-              creado_por: t.creado_por || 'admin',
-              fecha_creacion: t.fecha_creacion || t.vigente_desde,
-              motivo_cambio: t.motivo_cambio,
-              cambios_auditados: Array.isArray(t.cambios_auditados) ? t.cambios_auditados : [],
-              auditoria: t.cambios_auditados
-                ? {
-                    id: t.id,
-                    tarifa_id: t.id,
-                    usuario: t.creado_por || 'admin',
-                    fecha: t.fecha_creacion || t.vigente_desde,
-                    cambios: t.cambios_auditados,
-                    motivo: t.motivo_cambio,
-                  }
-                : undefined,
-            }))
+          ? tarifasRes.data.map((t: any) => {
+              const creadorResuelto = this.resolverNombreUsuario(t.creado_por);
+              return {
+                id: t.id,
+                precio_m3: Number(t.precio_m3),
+                consumo_minimo_m3: Number(t.consumo_minimo_m3),
+                monto_minimo_consumo: Number(t.monto_minimo_consumo),
+                monto_mora_fijo: Number(t.monto_mora_fijo),
+                monto_reconexion: Number(t.monto_reconexion),
+                erssan_porcentaje: Number(t.erssan_porcentaje),
+                dia_vencimiento_boletas_normales:
+                  t.dia_vencimiento_boletas_normales === 'ultimo_dia_mes' ||
+                  t.dia_vencimiento_boletas_normales === '0' ||
+                  t.dia_vencimiento_boletas_normales === 0
+                    ? 'ultimo_dia_mes'
+                    : Number(t.dia_vencimiento_boletas_normales),
+                dia_vencimiento_tercera_boleta: Number(t.dia_vencimiento_tercera_boleta),
+                umbral_alerta_consumo: Number(t.umbral_alerta_consumo),
+                texto_alerta_consumo: t.texto_alerta_consumo,
+                max_numero_medidor: Number(t.max_numero_medidor),
+                vigente_desde: t.vigente_desde,
+                creado_por: t.creado_por || 'admin',
+                creado_por_nombre: creadorResuelto,
+                fecha_creacion: t.fecha_creacion || t.vigente_desde,
+                motivo_cambio: t.motivo_cambio,
+                cambios_auditados: Array.isArray(t.cambios_auditados) ? t.cambios_auditados : [],
+                auditoria: t.cambios_auditados
+                  ? {
+                      id: t.id,
+                      tarifa_id: t.id,
+                      usuario: creadorResuelto,
+                      fecha: t.fecha_creacion || t.vigente_desde,
+                      cambios: t.cambios_auditados,
+                      motivo: t.motivo_cambio,
+                    }
+                  : undefined,
+              };
+            })
           : [];
 
       const planes_financiamiento: PlanFinanciamiento[] = (planesRes?.data || []).map((p: any) => ({
@@ -557,15 +638,6 @@ class DatabaseEngine {
         motivo_anulacion: p.motivo_anulacion,
       }));
 
-      if (!usuariosRes?.error && Array.isArray(usuariosRes?.data)) {
-        this.usuariosMap.clear();
-        for (const u of usuariosRes.data) {
-          if (u?.id) {
-            this.usuariosMap.set(u.id, u.nombre_completo || u.email || u.id);
-          }
-        }
-      }
-
       this.data = {
         clientes,
         medidores,
@@ -579,6 +651,16 @@ class DatabaseEngine {
         pin_seguridad: { pin: '1234', activo: false },
         version: 2,
       };
+
+      // Sincronización automática de facturas vencidas y estados de medidores al iniciar la app
+      if (!options?.clientOverride && medidores.length > 0) {
+        const resumenAuto = this.recalcularEstadosMedidores(new Date());
+        if (resumenAuto.actualizados > 0 || resumenAuto.facturasVencidasMarcadas > 0) {
+          this.persistirRecalculoSupabaseAsync(client, resumenAuto).catch((err) => {
+            console.warn('[DatabaseEngine] Aviso sincronizando recálculo automático de medidores:', err);
+          });
+        }
+      }
 
       this.connectionStatus = 'connected';
       this.dbError = null;
@@ -925,6 +1007,18 @@ class DatabaseEngine {
     );
   }
 
+  public resolverNombreUsuario(idONombre?: string | null): string {
+    if (!idONombre) return 'admin';
+    const limpio = String(idONombre).trim();
+    if (!limpio) return 'admin';
+    const mapped = this.usuariosMap.get(limpio);
+    if (mapped) return mapped;
+    if (this.esUuidValido(limpio)) {
+      return `Usuario eliminado (${limpio.slice(0, 8)})`;
+    }
+    return limpio;
+  }
+
   public getTarifasVigentes(): TarifaConfig {
     if (!this.data.tarifas || this.data.tarifas.length === 0) {
       return TARIFAS_DEFAULT;
@@ -962,7 +1056,8 @@ class DatabaseEngine {
 
   public async cargarValoresIniciales(
     creadoPor = 'admin',
-    fechaVigencia = new Date().toISOString().split('T')[0]
+    fechaVigencia = new Date().toISOString().split('T')[0],
+    options?: { clientOverride?: any }
   ): Promise<TarifaConfig> {
     const nuevoId = generarUUID();
     const ahoraIso = new Date().toISOString();
@@ -976,13 +1071,17 @@ class DatabaseEngine {
       cambios_auditados: [],
     };
 
-    this.data.tarifas = [tarifaInicial];
-    this.saveData(this.data);
-
-    if (supabase && isSupabaseConfigured) {
-      const sb = supabase;
-      const { data: { session } } = await sb.auth.getSession();
-      const creadoPorUuid = this.esUuidValido(creadoPor) ? creadoPor : session?.user?.id || null;
+    const sb = options?.clientOverride ?? (isSupabaseConfigured ? supabase : null);
+    if (sb) {
+      let creadoPorUuid: string | null = this.esUuidValido(creadoPor) ? creadoPor : null;
+      if (!creadoPorUuid) {
+        try {
+          const { data: { session } } = await sb.auth.getSession();
+          creadoPorUuid = session?.user?.id || null;
+        } catch {
+          creadoPorUuid = null;
+        }
+      }
 
       const { error } = await sb.from('tarifas').insert({
         id: nuevoId,
@@ -1004,12 +1103,12 @@ class DatabaseEngine {
       });
 
       if (error) {
-        console.warn('[Supabase] Error insertando tarifa inicial:', error);
-        this.dbError = `No se pudo conectar a la base de datos: ${error.message}`;
-        this.notify();
+        throw new Error(`No se pudieron cargar los valores iniciales: ${error.message}`);
       }
     }
 
+    this.data.tarifas = [tarifaInicial];
+    this.saveData(this.data);
     this.notify();
     return tarifaInicial;
   }
@@ -1076,18 +1175,12 @@ class DatabaseEngine {
     };
   }
 
-  /**
-   * Actualiza el pliego tarifario creando una nueva versión inmutable con vigente_desde.
-   * NUNCA modifica ni borra tarifas anteriores.
-   * NUNCA modifica facturas ya emitidas.
-   * Genera registro de auditoría con usuario, fecha, valor anterior y valor nuevo por parámetro modificado.
-   */
-  public actualizarTarifas(
+  private prepararNuevaTarifa(
     nuevas: Partial<TarifaConfig>,
     creadoPor = 'admin',
     motivo = 'Ajuste de pliego tarifario',
     vigenteDesde?: string
-  ): TarifaConfig & { cambiosAuditados: AuditoriaCambioParametro[] } {
+  ): { actualizada: TarifaConfig; cambios: AuditoriaCambioParametro[] } {
     const actual = this.getTarifasVigentes();
 
     // Validar parámetros conforme al pliego ERSSAN y especificación
@@ -1140,7 +1233,6 @@ class DatabaseEngine {
       }
     }
 
-    // Detectar cambios campo por campo para la auditoría
     const cambios: AuditoriaCambioParametro[] = [];
     const keysToCheck: (keyof TarifaConfig)[] = [
       'precio_m3',
@@ -1170,13 +1262,20 @@ class DatabaseEngine {
       max_numero_medidor: 'Capacidad Máxima de Medidores',
     };
 
+    const nuevasNormalizadas: Partial<TarifaConfig> = {
+      ...nuevas,
+      ...(nuevas.texto_alerta_consumo !== undefined
+        ? { texto_alerta_consumo: nuevas.texto_alerta_consumo.trim() }
+        : {}),
+    };
+
     for (const key of keysToCheck) {
-      if (nuevas[key] !== undefined && String(nuevas[key]) !== String(actual[key])) {
+      if (nuevasNormalizadas[key] !== undefined && String(nuevasNormalizadas[key]) !== String(actual[key])) {
         cambios.push({
           parametro: key,
           etiqueta: labels[key] || key,
           valor_anterior: actual[key] as any,
-          valor_nuevo: nuevas[key] as any,
+          valor_nuevo: nuevasNormalizadas[key] as any,
         });
       }
     }
@@ -1187,7 +1286,12 @@ class DatabaseEngine {
 
     const nuevoId = generarUUID();
     const ahoraIso = new Date().toISOString();
-    const fechaVigencia = vigenteDesde && vigenteDesde.trim() ? vigenteDesde.trim() : ahoraIso.split('T')[0];
+    const fechaVigencia =
+      vigenteDesde && vigenteDesde.trim() ? vigenteDesde.trim() : ahoraIso.split('T')[0];
+
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(fechaVigencia)) {
+      throw new Error('Debe especificar una fecha de vigencia válida (YYYY-MM-DD).');
+    }
 
     const auditoria: RegistroAuditoriaTarifa = {
       id: generarUUID(),
@@ -1200,7 +1304,7 @@ class DatabaseEngine {
 
     const actualizada: TarifaConfig = {
       ...actual,
-      ...nuevas,
+      ...nuevasNormalizadas,
       id: nuevoId,
       vigente_desde: fechaVigencia,
       creado_por: creadoPor,
@@ -1209,6 +1313,28 @@ class DatabaseEngine {
       cambios_auditados: cambios,
       auditoria,
     };
+
+    return { actualizada, cambios };
+  }
+
+  /**
+   * Actualiza el pliego tarifario creando una nueva versión inmutable con vigente_desde.
+   * NUNCA modifica ni borra tarifas anteriores.
+   * NUNCA modifica facturas ya emitidas.
+   * Genera registro de auditoría con usuario, fecha, valor anterior y valor nuevo por parámetro modificado.
+   */
+  public actualizarTarifas(
+    nuevas: Partial<TarifaConfig>,
+    creadoPor = 'admin',
+    motivo = 'Ajuste de pliego tarifario',
+    vigenteDesde?: string
+  ): TarifaConfig & { cambiosAuditados: AuditoriaCambioParametro[] } {
+    const { actualizada, cambios } = this.prepararNuevaTarifa(
+      nuevas,
+      creadoPor,
+      motivo,
+      vigenteDesde
+    );
 
     // NUNCA se borran ni modifican tarifas anteriores; siempre se añade al histórico
     this.data.tarifas.push(actualizada);
@@ -1220,7 +1346,7 @@ class DatabaseEngine {
       sb.auth.getSession().then(async ({ data: { session } }) => {
         const creadoPorUuid = this.esUuidValido(creadoPor) ? creadoPor : session?.user?.id || null;
         const { error } = await sb.from('tarifas').insert({
-          id: nuevoId,
+          id: actualizada.id,
           precio_m3: actualizada.precio_m3,
           consumo_minimo_m3: actualizada.consumo_minimo_m3,
           monto_minimo_consumo: actualizada.monto_minimo_consumo,
@@ -1246,6 +1372,90 @@ class DatabaseEngine {
       });
     }
 
+    this.notify();
+    return Object.assign(actualizada, { cambiosAuditados: cambios });
+  }
+
+  /**
+   * Creación asíncrona de una nueva versión tarifaria en Supabase.
+   * Si falla el INSERT en public.tarifas, NO muta el estado local.
+   * NUNCA modifica tarifas anteriores ni facturas ya emitidas.
+   */
+  public async actualizarTarifasAsync(
+    nuevas: Partial<TarifaConfig>,
+    creadoPor = 'admin',
+    motivo = 'Ajuste de pliego tarifario',
+    vigenteDesde?: string,
+    options?: { clientOverride?: any }
+  ): Promise<TarifaConfig & { cambiosAuditados: AuditoriaCambioParametro[] }> {
+    const { actualizada, cambios } = this.prepararNuevaTarifa(
+      nuevas,
+      creadoPor,
+      motivo,
+      vigenteDesde
+    );
+
+    const sb = options?.clientOverride ?? (isSupabaseConfigured ? supabase : null);
+    if (sb) {
+      try {
+        const nombreCreador = String(creadoPor || '').trim();
+        let creadoPorUuid: string | null = this.esUuidValido(creadoPor) ? creadoPor : null;
+        if (!creadoPorUuid) {
+          try {
+            const { data: { session } } = await sb.auth.getSession();
+            creadoPorUuid = session?.user?.id || null;
+          } catch {
+            creadoPorUuid = null;
+          }
+        }
+
+        if (creadoPorUuid && !this.esUuidValido(creadoPor) && nombreCreador) {
+          this.usuariosMap.set(creadoPorUuid, nombreCreador);
+        }
+
+        const { error } = await sb.from('tarifas').insert({
+          id: actualizada.id,
+          precio_m3: actualizada.precio_m3,
+          consumo_minimo_m3: actualizada.consumo_minimo_m3,
+          monto_minimo_consumo: actualizada.monto_minimo_consumo,
+          monto_mora_fijo: actualizada.monto_mora_fijo,
+          monto_reconexion: actualizada.monto_reconexion,
+          erssan_porcentaje: actualizada.erssan_porcentaje,
+          dia_vencimiento_boletas_normales: String(actualizada.dia_vencimiento_boletas_normales),
+          dia_vencimiento_tercera_boleta: actualizada.dia_vencimiento_tercera_boleta,
+          umbral_alerta_consumo: actualizada.umbral_alerta_consumo,
+          texto_alerta_consumo: actualizada.texto_alerta_consumo,
+          max_numero_medidor: actualizada.max_numero_medidor,
+          vigente_desde: actualizada.vigente_desde,
+          creado_por: creadoPorUuid,
+          motivo_cambio: motivo,
+          cambios_auditados: cambios,
+        });
+
+        if (error) {
+          throw new Error(`No se pudo guardar la nueva tarifa: ${error.message}`);
+        }
+
+        if (creadoPorUuid) {
+          actualizada.creado_por = creadoPorUuid;
+          actualizada.creado_por_nombre = this.resolverNombreUsuario(creadoPorUuid);
+          if (actualizada.auditoria) {
+            actualizada.auditoria.usuario = actualizada.creado_por_nombre;
+          }
+        }
+      } catch (err: any) {
+        if (err?.message?.startsWith('No se pudo guardar la nueva tarifa')) {
+          throw err;
+        }
+        throw new Error(`No se pudo guardar la nueva tarifa: ${err?.message || 'Error de conexión'}`);
+      }
+    } else {
+      actualizada.creado_por_nombre = this.resolverNombreUsuario(creadoPor);
+    }
+
+    // Solo tras confirmar INSERT en Supabase: agregar versión histórica sin tocar versiones previas ni facturas
+    this.data.tarifas.push(actualizada);
+    this.saveData(this.data);
     this.notify();
     return Object.assign(actualizada, { cambiosAuditados: cambios });
   }
@@ -1319,7 +1529,11 @@ class DatabaseEngine {
 
     const medidoresEnriched = medidoresCliente.map((m) => {
       const facturasImpagas = this.data.facturas.filter(
-        (f) => f.medidor_id === m.id && f.estado !== 'pagada' && f.estado !== 'anulada'
+        (f) =>
+          f.medidor_id === m.id &&
+          f.estado !== 'pagada' &&
+          f.estado !== 'anulada' &&
+          f.estado !== 'refinanciada'
       );
       const deudaTotal = facturasImpagas.reduce(
         (acc, f) => acc + (f.saldo_pendiente ?? f.saldo ?? f.total),
@@ -1384,7 +1598,7 @@ class DatabaseEngine {
     // Index de deudas por medidor O(1)
     const deudasMap = new Map<string, { total: number; count: number }>();
     for (const f of this.data.facturas) {
-      if (f.estado !== 'pagada' && f.estado !== 'anulada') {
+      if (f.estado !== 'pagada' && f.estado !== 'anulada' && f.estado !== 'refinanciada') {
         const d = deudasMap.get(f.medidor_id) || { total: 0, count: 0 };
         d.total += f.saldo_pendiente ?? f.saldo ?? f.total;
         d.count += 1;
@@ -1439,6 +1653,39 @@ class DatabaseEngine {
     };
   }
 
+  /**
+   * Búsqueda exacta de un medidor por su número único (sin coincidencias parciales por CI/dirección).
+   */
+  public getMedidorPorNumero(
+    numeroMedidor: number
+  ): (Medidor & { clienteNombre: string; clienteDoc: string; deudaTotal: number; facturasPendientes: number }) | null {
+    const medidor = this.data.medidores.find((m) => m.numero_medidor === numeroMedidor);
+    if (!medidor) return null;
+
+    const cli = this.data.clientes.find((c) => c.id === medidor.cliente_id);
+    let deudaTotal = 0;
+    let facturasPendientes = 0;
+    for (const f of this.data.facturas) {
+      if (
+        f.medidor_id === medidor.id &&
+        f.estado !== 'pagada' &&
+        f.estado !== 'anulada' &&
+        f.estado !== 'refinanciada'
+      ) {
+        deudaTotal += f.saldo_pendiente ?? f.saldo ?? f.total;
+        facturasPendientes += 1;
+      }
+    }
+
+    return {
+      ...medidor,
+      clienteNombre: cli ? cli.nombre_completo : 'Desconocido',
+      clienteDoc: cli ? cli.documento : '',
+      deudaTotal,
+      facturasPendientes,
+    };
+  }
+
   public getMedidorDetalle(medidorId: string): {
     medidor: Medidor | null;
     cliente: Cliente | null;
@@ -1463,19 +1710,23 @@ class DatabaseEngine {
       (c) => c.medidor_id === medidorId && c.estado === 'pendiente'
     );
 
-    const facturasImpagas = facturas.filter((f) => f.estado !== 'pagada' && f.estado !== 'anulada');
+    const facturasImpagas = facturas.filter(
+      (f) => f.estado !== 'pagada' && f.estado !== 'anulada' && f.estado !== 'refinanciada'
+    );
     const totalDeuda = facturasImpagas.reduce(
       (acc, f) => acc + (f.saldo_pendiente ?? f.saldo ?? f.total),
       0
     );
 
     const tarifa = this.getTarifasVigentes();
+    const moraDirecta = calcularMoraMedidor(facturasImpagas, tarifa.monto_mora_fijo).moraTotal;
+    const maxMoraEnActiva = Math.max(0, ...facturasImpagas.map((f) => obtenerMoraDeFactura(f)));
     const moraCalculada =
       medidor.mora_congelada !== null && medidor.mora_congelada !== undefined
         ? medidor.mora_congelada
-        : calcularMoraMedidor(facturasImpagas, tarifa.monto_mora_fijo).moraTotal;
+        : Math.max(moraDirecta, maxMoraEnActiva);
 
-    const liquidacion = liquidarReconexion(medidor, facturasImpagas, tarifa);
+    const liquidacion = liquidarReconexion(medidor, facturasImpagas, tarifa, cargosPendientes);
 
     return {
       medidor,
@@ -1512,7 +1763,7 @@ class DatabaseEngine {
 
     const deudasMap = new Map<string, number>();
     for (const f of this.data.facturas) {
-      if (f.estado !== 'pagada' && f.estado !== 'anulada') {
+      if (f.estado !== 'pagada' && f.estado !== 'anulada' && f.estado !== 'refinanciada') {
         deudasMap.set(
           f.medidor_id,
           (deudasMap.get(f.medidor_id) || 0) + (f.saldo_pendiente ?? f.saldo ?? f.total)
@@ -1662,6 +1913,276 @@ class DatabaseEngine {
   }
 
   /**
+   * Registro asíncrono de lectura con persistencia confirmada en Supabase
+   * y soporte de cola offline en localStorage ante fallas de conectividad.
+   */
+  public async registrarLecturaAsync(
+    params: {
+      numeroMedidor: number;
+      lecturaActual: number;
+      fechaLectura?: string;
+      fotoUrl: string;
+      observaciones?: string;
+      fotoObservacionUrl?: string;
+      estado?: 'borrador' | 'confirmada';
+      registradoPor?: string;
+      registradoPorId?: string;
+      esAdmin?: boolean;
+      justificacionAdmin?: string;
+    },
+    options?: {
+      clientOverride?: any;
+      storageOverride?: StorageLike | null;
+      forceOffline?: boolean;
+      skipOfflineQueue?: boolean;
+    }
+  ): Promise<{ lectura: Lectura; alertaElevado: boolean; razonElevado: number; consumoM3: number }> {
+    const medidor = this.data.medidores.find((m) => m.numero_medidor === params.numeroMedidor);
+    if (!medidor) {
+      throw new Error(`Medidor N° ${params.numeroMedidor} no encontrado`);
+    }
+
+    const fechaLectura = params.fechaLectura || new Date().toISOString().split('T')[0];
+    const partesFecha = fechaLectura.split('-');
+    const periodo = `${partesFecha[0]}-${partesFecha[1]}`;
+
+    const idxExistente = this.data.lecturas.findIndex(
+      (l) => l.medidor_id === medidor.id && l.periodo === periodo
+    );
+    const lecturaExistente = idxExistente >= 0 ? this.data.lecturas[idxExistente] : null;
+
+    const lecturasAnteriores = this.data.lecturas
+      .filter((l) => l.medidor_id === medidor.id && l.periodo !== periodo)
+      .sort((a, b) => b.fecha_lectura.localeCompare(a.fecha_lectura));
+
+    const ultimaLectura = lecturasAnteriores[0];
+    const lecturaAnterior = lecturaExistente
+      ? lecturaExistente.lectura_anterior
+      : ultimaLectura
+        ? ultimaLectura.lectura_actual
+        : 0;
+
+    const validacion = validarLecturaIngreso({
+      lecturaActual: params.lecturaActual,
+      lecturaAnterior,
+      esAdmin: Boolean(params.esAdmin),
+      justificacionAdmin: params.justificacionAdmin,
+    });
+
+    if (!validacion.valida) {
+      throw new Error(validacion.error || 'Error en validación de lectura.');
+    }
+
+    const consumoM3 = Math.max(0, params.lecturaActual - lecturaAnterior);
+    const historico = lecturasAnteriores.map((l) => l.consumo_m3);
+    const tarifa = this.getTarifasVigentes();
+
+    const alerta = verificarAlertaConsumo(consumoM3, historico, tarifa.umbral_alerta_consumo);
+    const alertaElevado = alerta.esElevado;
+    const razonElevado = alerta.razon;
+
+    const ahoraIso = new Date().toISOString();
+    const fotoFinal =
+      params.fotoUrl || generarFotoPlaceholder(medidor.numero_medidor, params.lecturaActual);
+    const estadoFinal = params.estado || 'confirmada';
+    const lecturaId = lecturaExistente ? lecturaExistente.id : generarUUID();
+    let registradoPorFinal = params.registradoPorId || params.registradoPor || 'lector-movil';
+
+    const sb = options?.clientOverride ?? (isSupabaseConfigured ? supabase : null);
+
+    const encolarOffline = (): never => {
+      enqueueLecturaOffline(
+        {
+          numeroMedidor: params.numeroMedidor,
+          lecturaActual: params.lecturaActual,
+          fechaLectura,
+          fotoUrl: fotoFinal,
+          observaciones: params.observaciones?.trim() || undefined,
+          fotoObservacionUrl: params.fotoObservacionUrl || undefined,
+          estado: estadoFinal,
+          registradoPor: params.registradoPor,
+          registradoPorId: params.registradoPorId,
+          esAdmin: params.esAdmin,
+          justificacionAdmin: params.justificacionAdmin,
+        },
+        options?.storageOverride
+      );
+      const offlineErr = new Error(
+        'Sin conexión. La lectura quedó guardada en cola local y se sincronizará automáticamente cuando vuelva la señal.'
+      );
+      (offlineErr as any).queuedOffline = true;
+      throw offlineErr;
+    };
+
+    if (sb) {
+      const estaOffline =
+        options?.forceOffline === true ||
+        (typeof navigator !== 'undefined' && navigator.onLine === false);
+
+      if (estaOffline) {
+        if (!options?.skipOfflineQueue) {
+          encolarOffline();
+        }
+        throw new Error('Sin conexión a internet para sincronizar la lectura.');
+      }
+
+      let dbErrorMessage: string | null = null;
+
+      try {
+        let registradoPorUuid: string | null = this.esUuidValido(params.registradoPorId)
+          ? params.registradoPorId
+          : this.esUuidValido(params.registradoPor)
+            ? params.registradoPor
+            : null;
+
+        if (!registradoPorUuid && sb.auth?.getSession) {
+          const {
+            data: { session },
+          } = await sb.auth.getSession();
+          if (session?.user?.id && this.esUuidValido(session.user.id)) {
+            registradoPorUuid = session.user.id;
+          }
+        }
+
+        if (registradoPorUuid) {
+          registradoPorFinal = registradoPorUuid;
+          if (params.registradoPor && !this.esUuidValido(params.registradoPor)) {
+            this.usuariosMap.set(registradoPorUuid, params.registradoPor);
+          }
+        }
+
+        const payloadSupabase = {
+          id: lecturaId,
+          medidor_id: medidor.id,
+          periodo,
+          fecha_lectura: fechaLectura,
+          lectura_anterior: lecturaAnterior,
+          lectura_actual: params.lecturaActual,
+          consumo_m3: consumoM3,
+          foto_medidor_url: fotoFinal,
+          observaciones: params.observaciones?.trim() || null,
+          foto_observacion_url: params.fotoObservacionUrl || null,
+          estado: estadoFinal,
+          registrado_por: registradoPorUuid,
+          fecha_registro: ahoraIso,
+          motivo_edicion: params.justificacionAdmin || null,
+        };
+
+        const res = lecturaExistente
+          ? await sb.from('lecturas').update(payloadSupabase).eq('id', lecturaId)
+          : await sb.from('lecturas').insert(payloadSupabase);
+
+        if (res?.error) {
+          if (!options?.skipOfflineQueue && isOfflineOrNetworkError(res.error, options?.forceOffline)) {
+            encolarOffline();
+          }
+          dbErrorMessage = res.error.message || 'Error desconocido en Supabase';
+        }
+      } catch (err: any) {
+        if (err?.queuedOffline) {
+          throw err;
+        }
+        if (!options?.skipOfflineQueue && isOfflineOrNetworkError(err, options?.forceOffline)) {
+          encolarOffline();
+        }
+        throw new Error(`No se pudo guardar la lectura: ${err?.message || 'Error de conexión'}`);
+      }
+
+      if (dbErrorMessage) {
+        throw new Error(`No se pudo guardar la lectura: ${dbErrorMessage}`);
+      }
+    }
+
+    const nuevaLectura: Lectura = {
+      id: lecturaId,
+      medidor_id: medidor.id,
+      periodo,
+      fecha_lectura: fechaLectura,
+      lectura_anterior: lecturaAnterior,
+      lectura_actual: params.lecturaActual,
+      consumo_m3: consumoM3,
+      foto_medidor_url: fotoFinal,
+      observaciones: params.observaciones?.trim() || null,
+      foto_observacion_url: params.fotoObservacionUrl || null,
+      estado: estadoFinal,
+      registrado_por: registradoPorFinal,
+      fecha_registro: ahoraIso,
+      motivo_edicion: params.justificacionAdmin || null,
+    };
+
+    if (idxExistente >= 0) {
+      nuevaLectura.factura_id = this.data.lecturas[idxExistente].factura_id;
+      this.data.lecturas[idxExistente] = nuevaLectura;
+    } else {
+      this.data.lecturas.unshift(nuevaLectura);
+    }
+
+    this.saveData(this.data);
+    this.notify();
+
+    return {
+      lectura: nuevaLectura,
+      alertaElevado,
+      razonElevado,
+      consumoM3,
+    };
+  }
+
+  /**
+   * Reintenta sincronizar hacia Supabase todas las lecturas encoladas localmente
+   * cuando se recupera la conectividad.
+   */
+  public async sincronizarLecturasOfflineAsync(options?: {
+    clientOverride?: any;
+    storageOverride?: StorageLike | null;
+    forceOffline?: boolean;
+  }): Promise<{
+    total: number;
+    syncedCount: number;
+    remainingCount: number;
+    errors: string[];
+  }> {
+    const queue = getLecturasOfflineQueue(options?.storageOverride);
+    if (queue.length === 0) {
+      return { total: 0, syncedCount: 0, remainingCount: 0, errors: [] };
+    }
+
+    let syncedCount = 0;
+    const errors: string[] = [];
+
+    for (const item of queue) {
+      try {
+        await this.registrarLecturaAsync(item.payload, {
+          clientOverride: options?.clientOverride,
+          storageOverride: options?.storageOverride,
+          forceOffline: options?.forceOffline,
+          skipOfflineQueue: true,
+        });
+        removeLecturaOffline(item.queueId, options?.storageOverride);
+        syncedCount++;
+      } catch (err: any) {
+        const msg = err?.message || 'Error al sincronizar lectura';
+        errors.push(`Medidor N° ${item.payload.numeroMedidor}: ${msg}`);
+        if (isOfflineOrNetworkError(err, options?.forceOffline)) {
+          break;
+        }
+      }
+    }
+
+    if (syncedCount > 0 && isSupabaseConfigured && !options?.clientOverride) {
+      await this.loadFromSupabase({ force: true });
+    }
+
+    const remainingCount = getLecturasOfflineQueue(options?.storageOverride).length;
+    return {
+      total: queue.length,
+      syncedCount,
+      remainingCount,
+      errors,
+    };
+  }
+
+  /**
    * Historial de lecturas con filtros y paginación en servidor (máximo 50 por página)
    * Filtros: cliente, numero_medidor, período, lector, estado (borrador/confirmada)
    */
@@ -1682,6 +2203,8 @@ class DatabaseEngine {
       direccion: string;
       factura_estado?: string | null;
       factura_pagada: boolean;
+      registrado_por_nombre?: string;
+      editado_por_nombre?: string | null;
     })[];
     total: number;
     page: number;
@@ -1773,6 +2296,10 @@ class DatabaseEngine {
         direccion: med ? med.direccion : '',
         factura_estado: factura ? factura.estado : null,
         factura_pagada: factura ? factura.estado === 'pagada' : false,
+        registrado_por_nombre: this.usuariosMap.get(l.registrado_por) || l.registrado_por,
+        editado_por_nombre: l.editado_por
+          ? this.usuariosMap.get(l.editado_por) || l.editado_por
+          : null,
       };
     });
 
@@ -1871,8 +2398,13 @@ class DatabaseEngine {
       lectura.motivo_edicion = params.motivoEdicion;
     }
 
-    // Si la lectura está confirmada y la factura NO está pagada, recalcular la factura de ESE medidor
-    if (facturaAsociada && facturaAsociada.estado !== 'pagada' && params.lecturaActual !== undefined) {
+    // Si la lectura está confirmada y la factura NO está pagada ni refinanciada, recalcular la factura de ESE medidor
+    if (
+      facturaAsociada &&
+      facturaAsociada.estado !== 'pagada' &&
+      facturaAsociada.estado !== 'refinanciada' &&
+      params.lecturaActual !== undefined
+    ) {
       facturaAsociada.lectura_actual = lectura.lectura_actual;
       facturaAsociada.consumo_m3 = lectura.consumo_m3;
       const tarifa = this.getTarifasVigentes();
@@ -1935,6 +2467,298 @@ class DatabaseEngine {
     return true;
   }
 
+  /**
+   * Actualización asíncrona de lectura en Supabase + recálculo de factura impaga si aplica.
+   * No muta el estado local si falla la persistencia remota.
+   */
+  public async actualizarLecturaAsync(
+    id: string,
+    params: {
+      lecturaActual?: number;
+      fechaLectura?: string;
+      estado?: 'borrador' | 'confirmada';
+      observaciones?: string;
+      fotoUrl?: string;
+      fotoObservacionUrl?: string;
+      motivoEdicion?: string;
+    },
+    usuario: { id: string; rol: string; nombre: string },
+    options?: { clientOverride?: any }
+  ): Promise<Lectura> {
+    const lectura = this.data.lecturas.find((l) => l.id === id);
+    if (!lectura) {
+      throw new Error('Lectura no encontrada.');
+    }
+
+    const facturaPorId = lectura.factura_id
+      ? this.data.facturas.find((f) => f.id === lectura.factura_id && f.estado !== 'anulada') || null
+      : null;
+    const facturaAsociada =
+      facturaPorId ||
+      this.data.facturas.find(
+        (f) => f.estado !== 'anulada' && lecturaTieneFacturaActiva(lectura, [f])
+      ) ||
+      null;
+
+    const validacion = validarEdicionLectura({
+      lectura,
+      factura: facturaAsociada,
+      usuarioRol: usuario.rol,
+      motivoEdicion: params.motivoEdicion,
+    });
+
+    if (!validacion.permitida) {
+      throw new Error(validacion.error || 'No tiene permisos para modificar esta lectura.');
+    }
+
+    let nextLecturaActual = lectura.lectura_actual;
+    let nextConsumoM3 = lectura.consumo_m3;
+    if (params.lecturaActual !== undefined) {
+      if (!Number.isInteger(params.lecturaActual) || params.lecturaActual < 0) {
+        throw new Error('La lectura actual debe ser un entero no negativo.');
+      }
+      if (params.lecturaActual < lectura.lectura_anterior && usuario.rol !== 'admin') {
+        throw new Error(
+          `La lectura actual (${params.lecturaActual}) no puede ser menor que la lectura anterior (${lectura.lectura_anterior}).`
+        );
+      }
+      nextLecturaActual = params.lecturaActual;
+      nextConsumoM3 = Math.max(0, params.lecturaActual - lectura.lectura_anterior);
+    }
+
+    let nextFechaLectura = lectura.fecha_lectura;
+    let nextPeriodo = lectura.periodo;
+    if (params.fechaLectura) {
+      nextFechaLectura = params.fechaLectura;
+      const partes = params.fechaLectura.split('-');
+      nextPeriodo = `${partes[0]}-${partes[1]}`;
+    }
+
+    const nextEstado = params.estado || lectura.estado;
+    const nextObservaciones =
+      params.observaciones !== undefined ? params.observaciones.trim() || null : lectura.observaciones;
+    const nextFotoUrl = params.fotoUrl || lectura.foto_medidor_url;
+    const nextFotoObsUrl =
+      params.fotoObservacionUrl !== undefined
+        ? params.fotoObservacionUrl || null
+        : lectura.foto_observacion_url;
+    const motivoTrimmed = params.motivoEdicion !== undefined ? params.motivoEdicion.trim() : '';
+    const nextMotivoEdicion = motivoTrimmed
+      ? motivoTrimmed
+      : lectura.motivo_edicion || null;
+    const fechaEdicion = new Date().toISOString();
+
+    // Calcular recálculo de factura impaga sin mutar todavía
+    let recalcFactura: {
+      total: number;
+      saldoPendiente: number;
+      montoConsumo: number;
+      montoErssan: number;
+    } | null = null;
+
+    if (
+      facturaAsociada &&
+      facturaAsociada.estado !== 'pagada' &&
+      facturaAsociada.estado !== 'refinanciada' &&
+      params.lecturaActual !== undefined
+    ) {
+      const tarifa = this.getTarifasVigentes();
+      const nuevoMontoConsumo =
+        nextConsumoM3 <= tarifa.consumo_minimo_m3
+          ? Math.max(nextConsumoM3 * tarifa.precio_m3, tarifa.monto_minimo_consumo)
+          : nextConsumoM3 * tarifa.precio_m3;
+
+      if (facturaAsociada.detalles && facturaAsociada.detalles.length > 0) {
+        const otros = facturaAsociada.detalles
+          .filter((d) => d.concepto !== 'erssan')
+          .reduce((acc, d) => acc + (d.concepto === 'consumo_agua' ? nuevoMontoConsumo : d.monto), 0);
+        const montoErssan = Math.round(otros * (tarifa.erssan_porcentaje / 100));
+        const nuevoTotal = otros + montoErssan;
+        const nuevoSaldoPendiente = Math.max(0, nuevoTotal - (facturaAsociada.monto_pagado || 0));
+        recalcFactura = {
+          total: nuevoTotal,
+          saldoPendiente: nuevoSaldoPendiente,
+          montoConsumo: nuevoMontoConsumo,
+          montoErssan,
+        };
+      }
+    }
+
+    let editadoPorLocal = usuario.nombre || usuario.id;
+    const sb = options?.clientOverride ?? (isSupabaseConfigured ? supabase : null);
+
+    if (sb) {
+      let editadoPorUuid: string | null = this.esUuidValido(usuario.id) ? usuario.id : null;
+      if (!editadoPorUuid && sb.auth?.getSession) {
+        const {
+          data: { session },
+        } = await sb.auth.getSession();
+        if (session?.user?.id && this.esUuidValido(session.user.id)) {
+          editadoPorUuid = session.user.id;
+        }
+      }
+
+      if (editadoPorUuid) {
+        editadoPorLocal = editadoPorUuid;
+        if (usuario.nombre) {
+          this.usuariosMap.set(editadoPorUuid, usuario.nombre);
+        }
+      }
+
+      const { data: updatedRows, error } = await sb
+        .from('lecturas')
+        .update({
+          lectura_actual: nextLecturaActual,
+          consumo_m3: nextConsumoM3,
+          fecha_lectura: nextFechaLectura,
+          periodo: nextPeriodo,
+          estado: nextEstado,
+          observaciones: nextObservaciones,
+          foto_medidor_url: nextFotoUrl,
+          foto_observacion_url: nextFotoObsUrl,
+          editado_por: editadoPorUuid,
+          fecha_edicion: fechaEdicion,
+          motivo_edicion: nextMotivoEdicion,
+        })
+        .eq('id', id)
+        .select('id, motivo_edicion');
+
+      if (error) {
+        throw new Error(`No se pudo actualizar la lectura: ${error.message}`);
+      }
+      if (Array.isArray(updatedRows) && updatedRows.length === 0) {
+        throw new Error(
+          'No se pudo actualizar la lectura en Supabase: el registro no existe o tu usuario no tiene permisos RLS para modificar esta lectura.'
+        );
+      }
+
+      if (facturaAsociada && recalcFactura) {
+        const { error: facErr } = await sb
+          .from('facturas')
+          .update({
+            lectura_actual: nextLecturaActual,
+            consumo_m3: nextConsumoM3,
+            total: recalcFactura.total,
+            saldo_pendiente: recalcFactura.saldoPendiente,
+          })
+          .eq('id', facturaAsociada.id);
+
+        if (facErr) {
+          throw new Error(
+            `Lectura actualizada, pero no se pudo recalcular la factura en Supabase: ${facErr.message}`
+          );
+        }
+
+        const detConsumo = facturaAsociada.detalles?.find((d) => d.concepto === 'consumo_agua');
+        if (detConsumo) {
+          await sb
+            .from('detalle_factura')
+            .update({ monto: recalcFactura.montoConsumo })
+            .eq('id', detConsumo.id);
+        }
+        const detErssan = facturaAsociada.detalles?.find((d) => d.concepto === 'erssan');
+        if (detErssan) {
+          await sb
+            .from('detalle_factura')
+            .update({ monto: recalcFactura.montoErssan })
+            .eq('id', detErssan.id);
+        }
+      }
+    }
+
+    lectura.lectura_actual = nextLecturaActual;
+    lectura.consumo_m3 = nextConsumoM3;
+    lectura.fecha_lectura = nextFechaLectura;
+    lectura.periodo = nextPeriodo;
+    lectura.estado = nextEstado;
+    lectura.observaciones = nextObservaciones;
+    lectura.foto_medidor_url = nextFotoUrl;
+    lectura.foto_observacion_url = nextFotoObsUrl;
+    lectura.editado_por = editadoPorLocal;
+    lectura.fecha_edicion = fechaEdicion;
+    if (nextMotivoEdicion) {
+      lectura.motivo_edicion = nextMotivoEdicion;
+    }
+
+    if (facturaAsociada && recalcFactura) {
+      facturaAsociada.lectura_actual = nextLecturaActual;
+      facturaAsociada.consumo_m3 = nextConsumoM3;
+      facturaAsociada.total = recalcFactura.total;
+      facturaAsociada.saldo_pendiente = recalcFactura.saldoPendiente;
+      facturaAsociada.saldo = recalcFactura.saldoPendiente;
+      if (facturaAsociada.detalles) {
+        const detConsumo = facturaAsociada.detalles.find((d) => d.concepto === 'consumo_agua');
+        if (detConsumo) detConsumo.monto = recalcFactura.montoConsumo;
+        const detErssan = facturaAsociada.detalles.find((d) => d.concepto === 'erssan');
+        if (detErssan) detErssan.monto = recalcFactura.montoErssan;
+      }
+    }
+
+    this.saveData(this.data);
+    this.notify();
+    return lectura;
+  }
+
+  /**
+   * Eliminación asíncrona de lectura en Supabase.
+   * No elimina del estado local si falla la operación remota.
+   */
+  public async eliminarLecturaAsync(
+    id: string,
+    usuario: { id: string; rol: string; nombre: string },
+    motivo?: string,
+    options?: { clientOverride?: any }
+  ): Promise<boolean> {
+    const idx = this.data.lecturas.findIndex((l) => l.id === id);
+    if (idx < 0) {
+      throw new Error('Lectura no encontrada.');
+    }
+
+    const lectura = this.data.lecturas[idx];
+    const facturaPorId = lectura.factura_id
+      ? this.data.facturas.find((f) => f.id === lectura.factura_id && f.estado !== 'anulada') || null
+      : null;
+    const facturaAsociada =
+      facturaPorId ||
+      this.data.facturas.find(
+        (f) => f.estado !== 'anulada' && lecturaTieneFacturaActiva(lectura, [f])
+      ) ||
+      null;
+
+    const validacion = validarEdicionLectura({
+      lectura,
+      factura: facturaAsociada,
+      usuarioRol: usuario.rol,
+      motivoEdicion: motivo,
+    });
+
+    if (!validacion.permitida) {
+      throw new Error(validacion.error || 'No tiene permisos para eliminar esta lectura.');
+    }
+
+    const sb = options?.clientOverride ?? (isSupabaseConfigured ? supabase : null);
+    if (sb) {
+      const { data: deletedRows, error } = await sb
+        .from('lecturas')
+        .delete()
+        .eq('id', id)
+        .select('id');
+      if (error) {
+        throw new Error(`No se pudo eliminar la lectura: ${error.message}`);
+      }
+      if (Array.isArray(deletedRows) && deletedRows.length === 0) {
+        throw new Error(
+          'No se pudo eliminar la lectura en Supabase: el registro no existe o tu usuario no tiene permisos RLS para eliminarlo.'
+        );
+      }
+    }
+
+    this.data.lecturas.splice(idx, 1);
+    this.saveData(this.data);
+    this.notify();
+    return true;
+  }
+
   public buildFacturaInsertPayload(factura: Factura): Record<string, any> {
     const periodoConsumo = factura.periodo_consumo || factura.periodo_facturado;
     const saldoPendiente = factura.saldo_pendiente ?? factura.saldo ?? factura.total;
@@ -1968,11 +2792,23 @@ class DatabaseEngine {
     cargosFacturadosIds: string[];
     medidorId: string;
     estadoMedidor: EstadoMedidor;
+    facturaAnteriorARefinanciar?: {
+      id: string;
+      periodo_facturado: string;
+      motivo: string;
+    } | null;
     clientOverride?: any;
   }): Promise<string | null> {
     const sb = params.clientOverride || (isSupabaseConfigured ? supabase : null);
     if (!sb) return null;
-    const { factura, detalles, cargosFacturadosIds, medidorId, estadoMedidor } = params;
+    const {
+      factura,
+      detalles,
+      cargosFacturadosIds,
+      medidorId,
+      estadoMedidor,
+      facturaAnteriorARefinanciar,
+    } = params;
 
     // 1. Insertar factura primero (padre requerido por FK de detalle_factura y cargos_pendientes)
     const insertPayload = this.buildFacturaInsertPayload(factura);
@@ -2018,7 +2854,7 @@ class DatabaseEngine {
       return `Error persistiendo factura ${factura.id}: ${facErr.message}`;
     }
 
-    // 2. Insertar detalles, actualizar cargos_pendientes y actualizar estado del medidor en paralelo
+    // 2. Insertar detalles, actualizar cargos_pendientes, refinanciar factura N-1 y actualizar estado del medidor
     const promesas: Promise<string | null>[] = [];
 
     if (detalles.length > 0) {
@@ -2053,6 +2889,41 @@ class DatabaseEngine {
       );
     }
 
+    if (facturaAnteriorARefinanciar) {
+      promesas.push(
+        (async () => {
+          const { error } = await sb
+            .from('facturas')
+            .update({
+              estado: 'refinanciada',
+              saldo_pendiente: 0,
+              motivo: facturaAnteriorARefinanciar.motivo,
+            })
+            .eq('id', facturaAnteriorARefinanciar.id);
+          if (!error) return null;
+
+          const colFaltante = extraerColumnaFaltante(error.message);
+          if (colFaltante === 'motivo') {
+            const { error: retryErr } = await sb
+              .from('facturas')
+              .update({
+                estado: 'refinanciada',
+                saldo_pendiente: 0,
+              })
+              .eq('id', facturaAnteriorARefinanciar.id);
+            if (!retryErr) return null;
+            return retryErr.message.includes('facturas_estado_check')
+              ? `Error marcando factura anterior ${facturaAnteriorARefinanciar.periodo_facturado} como refinanciada (${retryErr.message}). Ejecutá la migración de supabase/schema.sql para habilitar el estado 'refinanciada' en public.facturas.`
+              : `Error marcando factura anterior ${facturaAnteriorARefinanciar.periodo_facturado} como refinanciada: ${retryErr.message}`;
+          }
+
+          return error.message.includes('facturas_estado_check')
+            ? `Error marcando factura anterior ${facturaAnteriorARefinanciar.periodo_facturado} como refinanciada (${error.message}). Ejecutá la migración de supabase/schema.sql para habilitar el estado 'refinanciada' en public.facturas.`
+            : `Error marcando factura anterior ${facturaAnteriorARefinanciar.periodo_facturado} como refinanciada: ${error.message}`;
+        })()
+      );
+    }
+
     promesas.push(
       Promise.resolve(
         sb
@@ -2067,7 +2938,128 @@ class DatabaseEngine {
     );
 
     const errores = (await Promise.all(promesas)).filter((e): e is string => Boolean(e));
-    return errores.length > 0 ? errores.join(' | ') : null;
+    if (errores.length > 0) {
+      // Rollback best-effort de la factura recién insertada para no dejar facturas huérfanas si falló algún paso posterior (ej. refinanciada N-1)
+      try {
+        if (cargosFacturadosIds.length > 0) {
+          const cp = sb.from('cargos_pendientes');
+          if (cp && typeof cp.update === 'function') {
+            await cp.update({ estado: 'pendiente', factura_id: null }).in('id', cargosFacturadosIds);
+          }
+        }
+        const facDel = sb.from('facturas');
+        if (facDel && typeof facDel.delete === 'function') {
+          await facDel.delete().eq('id', factura.id);
+        }
+      } catch (rollbackErr) {
+        console.warn('[DatabaseEngine] Aviso en rollback de factura huérfana:', rollbackErr);
+      }
+      return errores.join(' | ');
+    }
+
+    return null;
+  }
+
+  /**
+   * Pagina cualquier tabla de Supabase con .range(from, to) en bloques de 1000 filas
+   * para evitar el límite por defecto de 1000 filas de PostgREST (incluyendo detalle_factura).
+   */
+  private async fetchTablePaginated(
+    client: any,
+    tableName: string,
+    buildQuery: (q: any) => any,
+    pageSize = 1000,
+    maxPages = 50
+  ): Promise<{ data: any[]; error: any }> {
+    const firstQuery = buildQuery(client.from(tableName).select('*'));
+    if (!firstQuery || typeof firstQuery.range !== 'function') {
+      const fallbackQuery =
+        firstQuery && typeof firstQuery.limit === 'function'
+          ? firstQuery.limit(10000)
+          : firstQuery;
+      const res = await fallbackQuery;
+      return { data: res?.data || [], error: res?.error || null };
+    }
+
+    const allRows: any[] = [];
+    for (let page = 0; page < maxPages; page++) {
+      const from = page * pageSize;
+      const to = from + pageSize - 1;
+      const pageQuery = buildQuery(client.from(tableName).select('*')).range(from, to);
+      const res = await pageQuery;
+      if (res?.error) {
+        return { data: allRows, error: res.error };
+      }
+      const chunk = Array.isArray(res?.data) ? res.data : [];
+      allRows.push(...chunk);
+      if (chunk.length < pageSize) {
+        break;
+      }
+    }
+    return { data: allRows, error: null };
+  }
+
+  /**
+   * Garantiza desde Supabase que las facturas indicadas tengan cargada su colección `detalles`
+   * antes de calcular deuda_anterior = saldo_pendiente - mora(N-1).
+   */
+  private async cargarDetallesFacturasDesdeSupabase(
+    sb: any,
+    facturas: Factura[]
+  ): Promise<void> {
+    if (!sb || typeof sb.from !== 'function' || facturas.length === 0) return;
+    const probe = sb.from('detalle_factura');
+    if (!probe || typeof probe.select !== 'function') return;
+
+    const ordenConceptos: Record<string, number> = {
+      consumo_agua: 1,
+      deuda_anterior: 2,
+      mora: 3,
+      otros_trabajos: 4,
+      cuota_conexion: 5,
+      perdida_financiada: 6,
+      reconexion: 7,
+      erssan: 8,
+    };
+
+    const ids = Array.from(new Set(facturas.map((f) => f.id).filter(Boolean)));
+    const batchSize = 200;
+    const fetchedByFactura = new Map<string, DetalleFactura[]>();
+
+    for (let i = 0; i < ids.length; i += batchSize) {
+      const batch = ids.slice(i, i + batchSize);
+      const q = sb.from('detalle_factura').select('*');
+      let res: any = null;
+      if (q && typeof q.in === 'function') {
+        res = await q.in('factura_id', batch);
+      } else if (q && typeof q.eq === 'function' && batch.length === 1) {
+        res = await q.eq('factura_id', batch[0]);
+      } else {
+        return;
+      }
+
+      if (res?.error || !Array.isArray(res?.data)) continue;
+      for (const d of res.data) {
+        const list = fetchedByFactura.get(d.factura_id) || [];
+        list.push({
+          id: d.id || generarUUID(),
+          factura_id: d.factura_id,
+          concepto: d.concepto,
+          descripcion: d.descripcion,
+          monto: Number(d.monto),
+          cargo_pendiente_id: d.cargo_pendiente_id || null,
+        });
+        fetchedByFactura.set(d.factura_id, list);
+      }
+    }
+
+    for (const fac of facturas) {
+      const rows = fetchedByFactura.get(fac.id);
+      if (rows && rows.length > 0) {
+        rows.sort((a, b) => (ordenConceptos[a.concepto] || 99) - (ordenConceptos[b.concepto] || 99));
+        fac.detalles = rows;
+      }
+    }
   }
 
   private ejecutarFacturacionMensualInterno(
@@ -2083,6 +3075,10 @@ class DatabaseEngine {
 
     const tarifa = this.getTarifaParaFecha(fechaEmision);
     const fechaEjecucion = new Date().toISOString();
+    const fechaReferenciaFacturacion = fechaEmision
+      ? new Date(`${fechaEmision.slice(0, 10)}T12:00:00Z`)
+      : new Date();
+    const hoyIsoFacturacion = fechaReferenciaFacturacion.toISOString().slice(0, 10);
     const facturasGeneradas: Factura[] = [];
     const medidoresOmitidos: MedidorOmitidoFacturacion[] = [];
     const errores: ErrorFacturacionMedidor[] = [];
@@ -2093,6 +3089,62 @@ class DatabaseEngine {
     let tercerasBoletasCount = 0;
 
     for (const medidor of this.data.medidores) {
+      // 0. Paso del tiempo: actualizar facturas vencidas y recalcular estado del medidor antes de facturar
+      if (medidor.estado !== 'cortado' && medidor.estado !== 'retirado') {
+        const facturasMedidor = this.data.facturas.filter((f) => f.medidor_id === medidor.id);
+        const facturasPasadasAVencida: string[] = [];
+
+        for (const f of facturasMedidor) {
+          if (
+            f.estado === 'pendiente' &&
+            f.fecha_vencimiento &&
+            String(f.fecha_vencimiento).slice(0, 10) < hoyIsoFacturacion
+          ) {
+            f.estado = 'vencida';
+            facturasPasadasAVencida.push(f.id);
+          }
+        }
+
+        const estadoRecalculado = evaluarEstadoMedidorPorVencidas(
+          medidor,
+          facturasMedidor,
+          fechaReferenciaFacturacion,
+          tarifa.monto_mora_fijo
+        );
+        const cambioEstadoPrevio = estadoRecalculado !== medidor.estado;
+        if (cambioEstadoPrevio) {
+          medidor.estado = estadoRecalculado;
+        }
+
+        if (supabase && isSupabaseConfigured && (facturasPasadasAVencida.length > 0 || cambioEstadoPrevio)) {
+          const sb = supabase;
+          if (facturasPasadasAVencida.length > 0) {
+            persistPromises.push(
+              Promise.resolve(
+                sb
+                  .from('facturas')
+                  .update({ estado: 'vencida' })
+                  .in('id', facturasPasadasAVencida)
+              ).then(({ error }) =>
+                error ? `Error marcando facturas vencidas (${medidor.id}): ${error.message}` : null
+              )
+            );
+          }
+          if (cambioEstadoPrevio) {
+            persistPromises.push(
+              Promise.resolve(
+                sb
+                  .from('medidores')
+                  .update({ estado: medidor.estado })
+                  .eq('id', medidor.id)
+              ).then(({ error }) =>
+                error ? `Error actualizando estado previo del medidor (${medidor.id}): ${error.message}` : null
+              )
+            );
+          }
+        }
+      }
+
       // 1. Filtrado de medidores a facturar:
       // Medidores con estado "cortado", "retirado" o "pendiente_corte" NO reciben factura mensual.
       if (medidor.estado === 'cortado') {
@@ -2187,13 +3239,14 @@ class DatabaseEngine {
           )
           .sort((a, b) => b.periodo.localeCompare(a.periodo) || b.fecha_lectura.localeCompare(a.fecha_lectura));
 
-        // Facturas impagas anteriores
+        // Facturas impagas de períodos anteriores (N-1 para deuda/mora consolidada; excluye pagadas/anuladas/refinanciadas)
         const facturasImpagas = this.data.facturas.filter(
           (f) =>
             f.medidor_id === medidor.id &&
             f.estado !== 'pagada' &&
             f.estado !== 'anulada' &&
-            f.periodo_facturado !== periodo
+            f.estado !== 'refinanciada' &&
+            f.periodo_facturado < periodo
         );
 
         // Cargos pendientes del período
@@ -2238,6 +3291,19 @@ class DatabaseEngine {
         lecturaMes.factura_id = resultado.factura.id;
         facturasGeneradas.push(resultado.factura);
 
+        // Regla 3: Marcar la factura N-1 consolidada como 'refinanciada' con saldo 0
+        if (resultado.facturaAnteriorARefinanciar) {
+          const facAnt = this.data.facturas.find(
+            (f) => f.id === resultado.facturaAnteriorARefinanciar!.id
+          );
+          if (facAnt) {
+            facAnt.estado = 'refinanciada';
+            facAnt.saldo_pendiente = 0;
+            facAnt.saldo = 0;
+            facAnt.motivo = resultado.facturaAnteriorARefinanciar.motivo;
+          }
+        }
+
         // Marcar cargos pendientes como facturados
         for (const cargoId of resultado.cargosFacturadosIds) {
           const cargo = this.data.cargos_pendientes.find((c) => c.id === cargoId);
@@ -2250,7 +3316,7 @@ class DatabaseEngine {
         // Actualizar estado del medidor
         medidor.estado = resultado.nuevoEstadoMedidor;
 
-        // Persistir en Supabase garantizando orden FK: facturas -> detalle_factura / cargos / medidores
+        // Persistir en Supabase garantizando orden FK: facturas -> detalle_factura / cargos / medidores / refinanciada N-1
         if (supabase && isSupabaseConfigured) {
           persistPromises.push(
             this.persistirFacturaGeneradaSupabase({
@@ -2259,6 +3325,7 @@ class DatabaseEngine {
               cargosFacturadosIds: resultado.cargosFacturadosIds,
               medidorId: medidor.id,
               estadoMedidor: medidor.estado,
+              facturaAnteriorARefinanciar: resultado.facturaAnteriorARefinanciar,
             })
           );
         }
@@ -2328,6 +3395,19 @@ class DatabaseEngine {
     if (supabase && isSupabaseConfigured && this.connectionStatus !== 'connected') {
       await this.loadFromSupabase();
     }
+    if (supabase && isSupabaseConfigured) {
+      const facturasSinDetalles = this.data.facturas.filter(
+        (f) =>
+          f.estado !== 'pagada' &&
+          f.estado !== 'anulada' &&
+          f.estado !== 'refinanciada' &&
+          f.periodo_facturado < periodo &&
+          (!f.detalles || f.detalles.length === 0)
+      );
+      if (facturasSinDetalles.length > 0) {
+        await this.cargarDetallesFacturasDesdeSupabase(supabase, facturasSinDetalles);
+      }
+    }
     const { resumen, persistPromises } = this.ejecutarFacturacionMensualInterno(periodo, fechaEmision);
     if (persistPromises.length > 0) {
       const msgs = await Promise.all(persistPromises);
@@ -2339,6 +3419,198 @@ class DatabaseEngine {
       }
     }
     return resumen;
+  }
+
+  /**
+   * Emite una ÚNICA factura para un medidor específico y un período de consumo específico (YYYY-MM).
+   * Persiste en Supabase ANTES de confirmar estado en memoria (sin crear facturas para otros medidores).
+   */
+  public async generarFacturaIndividualAsync(params: {
+    numeroMedidor: number | string;
+    periodoConsumo: string;
+    periodoFacturado?: string;
+    fechaEmision?: string;
+    clientOverride?: any;
+  }): Promise<{
+    factura: Factura;
+    detalles: DetalleFactura[];
+    numeroMedidor: number;
+    clienteNombre: string;
+  }> {
+    const sb = params.clientOverride || (isSupabaseConfigured ? supabase : null);
+    if (!params.clientOverride && supabase && isSupabaseConfigured && this.connectionStatus !== 'connected') {
+      await this.loadFromSupabase();
+    }
+
+    const validacion = validarSolicitudFacturaIndividual(params);
+    if (!validacion.valido || !validacion.numeroMedidor || !validacion.periodoConsumo || !validacion.periodoFacturado) {
+      throw new Error(validacion.error || 'Datos inválidos para generar factura individual.');
+    }
+
+    const { numeroMedidor, periodoConsumo, periodoFacturado } = validacion;
+
+    const medidor = this.data.medidores.find((m) => m.numero_medidor === numeroMedidor);
+    if (!medidor) {
+      throw new Error(`No se encontró ningún medidor con el N° ${numeroMedidor}.`);
+    }
+
+    if (medidor.estado === 'cortado' || medidor.estado === 'retirado' || medidor.estado === 'pendiente_corte') {
+      throw new Error(
+        `El Medidor N° ${numeroMedidor} está en estado "${medidor.estado.replace('_', ' ')}" y no admite emisión de factura regular.`
+      );
+    }
+
+    const yaFacturadoEnPeriodo = this.data.facturas.some(
+      (f) => f.medidor_id === medidor.id && f.periodo_facturado === periodoFacturado && f.estado !== 'anulada'
+    );
+    if (yaFacturadoEnPeriodo) {
+      throw new Error(
+        `El Medidor N° ${numeroMedidor} ya tiene una factura activa en el período de facturación ${periodoFacturado}.`
+      );
+    }
+
+    const lecturasDelPeriodo = this.data.lecturas.filter(
+      (l) => l.medidor_id === medidor.id && l.periodo === periodoConsumo
+    );
+    if (lecturasDelPeriodo.length === 0) {
+      throw new Error(
+        `El Medidor N° ${numeroMedidor} no tiene lectura registrada para el período de consumo ${periodoConsumo}.`
+      );
+    }
+
+    const lecturaObjetivo = lecturasDelPeriodo.find((l) => l.estado === 'confirmada');
+    if (!lecturaObjetivo) {
+      throw new Error(
+        `La lectura del Medidor N° ${numeroMedidor} (${periodoConsumo}) está en estado "borrador". Confirmala primero para poder facturarla.`
+      );
+    }
+
+    if (lecturaTieneFacturaActiva(lecturaObjetivo, this.data.facturas)) {
+      throw new Error(
+        `La lectura del Medidor N° ${numeroMedidor} del período ${periodoConsumo} ya tiene una factura activa emitida.`
+      );
+    }
+
+    const fechaEmisionEfectiva = params.fechaEmision || `${periodoFacturado}-01`;
+    const fechaReferencia = params.fechaEmision
+      ? new Date(`${params.fechaEmision.slice(0, 10)}T12:00:00Z`)
+      : new Date();
+    const tarifa = this.getTarifaParaFecha(fechaEmisionEfectiva);
+
+    const lecturasAnteriores = this.data.lecturas
+      .filter(
+        (l) =>
+          l.medidor_id === medidor.id &&
+          l.estado === 'confirmada' &&
+          l.id !== lecturaObjetivo.id &&
+          l.periodo < lecturaObjetivo.periodo
+      )
+      .sort((a, b) => b.periodo.localeCompare(a.periodo) || b.fecha_lectura.localeCompare(a.fecha_lectura));
+
+    const facturasImpagas = this.data.facturas.filter(
+      (f) =>
+        f.medidor_id === medidor.id &&
+        f.estado !== 'pagada' &&
+        f.estado !== 'anulada' &&
+        f.estado !== 'refinanciada' &&
+        f.periodo_facturado < periodoFacturado
+    );
+
+    if (sb && facturasImpagas.length > 0) {
+      const facturasSinDetalles = facturasImpagas.filter(
+        (f) => !f.detalles || f.detalles.length === 0
+      );
+      if (facturasSinDetalles.length > 0) {
+        await this.cargarDetallesFacturasDesdeSupabase(sb, facturasSinDetalles);
+      }
+    }
+
+    const cargosPendientes = this.data.cargos_pendientes.filter(
+      (c) =>
+        c.medidor_id === medidor.id &&
+        c.periodo_facturacion === periodoFacturado &&
+        c.estado === 'pendiente'
+    );
+
+    const planesActivos = (this.data.planes_financiamiento || []).filter(
+      (p) =>
+        p.medidor_id === medidor.id &&
+        p.estado === 'activo' &&
+        p.cuotas_pagadas < p.cantidad_cuotas &&
+        p.periodo_inicio <= periodoFacturado
+    );
+
+    const correlativo =
+      Math.max(
+        0,
+        ...this.data.facturas
+          .filter((f) => f.medidor_id === medidor.id)
+          .map((f) => Number(f.numero_boleta_medidor) || 0)
+      ) + 1;
+
+    const resultado = calcularFacturaIndividual({
+      medidor,
+      clienteId: medidor.cliente_id,
+      periodo: periodoFacturado,
+      lecturaMes: lecturaObjetivo,
+      lecturasAnteriores,
+      facturasImpagasAnteriores: facturasImpagas,
+      cargosPendientes,
+      planesFinanciamiento: planesActivos,
+      tarifa,
+      fechaEmision: fechaEmisionEfectiva,
+      fechaReferencia,
+      correlativoPorMedidor: correlativo,
+    });
+
+    if (sb) {
+      const errMsg = await this.persistirFacturaGeneradaSupabase({
+        factura: resultado.factura,
+        detalles: resultado.detalles,
+        cargosFacturadosIds: resultado.cargosFacturadosIds,
+        medidorId: medidor.id,
+        estadoMedidor: resultado.nuevoEstadoMedidor,
+        facturaAnteriorARefinanciar: resultado.facturaAnteriorARefinanciar,
+        clientOverride: params.clientOverride,
+      });
+      if (errMsg) {
+        throw new Error(errMsg);
+      }
+    }
+
+    // Confirmar mutaciones en memoria solo tras éxito remoto
+    this.data.facturas.push(resultado.factura);
+    lecturaObjetivo.factura_id = resultado.factura.id;
+    if (resultado.facturaAnteriorARefinanciar) {
+      const facAnt = this.data.facturas.find(
+        (f) => f.id === resultado.facturaAnteriorARefinanciar!.id
+      );
+      if (facAnt) {
+        facAnt.estado = 'refinanciada';
+        facAnt.saldo_pendiente = 0;
+        facAnt.saldo = 0;
+        facAnt.motivo = resultado.facturaAnteriorARefinanciar.motivo;
+      }
+    }
+    for (const cargoId of resultado.cargosFacturadosIds) {
+      const cargo = this.data.cargos_pendientes.find((c) => c.id === cargoId);
+      if (cargo) {
+        cargo.estado = 'facturado';
+        cargo.factura_id = resultado.factura.id;
+      }
+    }
+    medidor.estado = resultado.nuevoEstadoMedidor;
+
+    this.saveData(this.data);
+    this.notify();
+
+    const cliente = this.data.clientes.find((c) => c.id === medidor.cliente_id);
+    return {
+      factura: resultado.factura,
+      detalles: resultado.detalles,
+      numeroMedidor: medidor.numero_medidor,
+      clienteNombre: cliente?.nombre_completo || 'Titular',
+    };
   }
 
   /**
@@ -2374,6 +3646,10 @@ class DatabaseEngine {
 
     if (factura.estado === 'anulada') {
       throw new Error('No se puede registrar un pago sobre una factura anulada.');
+    }
+
+    if (factura.estado === 'refinanciada') {
+      throw new Error('No se puede cobrar una factura refinanciada/consolidada en una factura posterior.');
     }
 
     if (factura.estado === 'pagada') {
@@ -2452,19 +3728,28 @@ class DatabaseEngine {
 
     const estadoAnterior = medidor.estado;
 
-    // Re-evaluar estado del medidor (excluyendo facturas pagadas o anuladas)
+    // Re-evaluar estado del medidor (excluyendo facturas pagadas, anuladas o refinanciadas)
     const facturasRestantes = this.data.facturas.filter(
-      (f) => f.medidor_id === medidor.id && f.estado !== 'pagada' && f.estado !== 'anulada'
+      (f) =>
+        f.medidor_id === medidor.id &&
+        f.estado !== 'pagada' &&
+        f.estado !== 'anulada' &&
+        f.estado !== 'refinanciada'
     );
 
     if (facturasRestantes.length === 0) {
-      // Si un medidor tiene todas sus facturas pagadas, pasa de moroso o pendiente_corte a activo automáticamente
+      // Si un medidor tiene todas sus facturas activas pagadas (las refinanciadas quedan con saldo 0), pasa a activo
       if (medidor.estado !== 'cortado' && medidor.estado !== 'retirado') {
         medidor.estado = 'activo';
       }
     } else {
       if (medidor.estado !== 'cortado' && medidor.estado !== 'retirado') {
-        medidor.estado = evaluarEstadoMedidor(medidor, facturasRestantes);
+        medidor.estado = evaluarEstadoMedidor(
+          medidor,
+          facturasRestantes,
+          new Date(),
+          this.getTarifasVigentes().monto_mora_fijo
+        );
       }
     }
 
@@ -2529,6 +3814,7 @@ class DatabaseEngine {
     numeroRecibo?: string;
     cobradorId?: string;
     cobradorNombre?: string;
+    clientOverride?: any;
   }): Promise<{
     pago: Pago;
     factura: Factura;
@@ -2550,6 +3836,10 @@ class DatabaseEngine {
 
     if (factura.estado === 'anulada') {
       throw new Error('No se puede registrar un pago sobre una factura anulada.');
+    }
+
+    if (factura.estado === 'refinanciada') {
+      throw new Error('No se puede cobrar una factura refinanciada/consolidada en una factura posterior.');
     }
 
     if (factura.estado === 'pagada') {
@@ -2603,8 +3893,8 @@ class DatabaseEngine {
 
     let cobradorIdFinal = params.cobradorId || 'cobrador-caja';
 
-    if (supabase && isSupabaseConfigured) {
-      const sb = supabase;
+    const sb = params.clientOverride ?? (supabase && isSupabaseConfigured ? supabase : null);
+    if (sb) {
       const {
         data: { session },
         error: sessErr,
@@ -2711,17 +4001,27 @@ class DatabaseEngine {
         medidor.estado = medRes.data.estado as EstadoMedidor;
       } else {
         const facturasRestantes = this.data.facturas.filter(
-          (f) => f.medidor_id === medidor.id && f.estado !== 'pagada' && f.estado !== 'anulada'
+          (f) =>
+            f.medidor_id === medidor.id &&
+            f.estado !== 'pagada' &&
+            f.estado !== 'anulada' &&
+            f.estado !== 'refinanciada'
         );
         if (medidor.estado !== 'cortado' && medidor.estado !== 'retirado') {
           medidor.estado =
             facturasRestantes.length === 0
               ? 'activo'
-              : evaluarEstadoMedidor(medidor, facturasRestantes);
+              : evaluarEstadoMedidor(
+                  medidor,
+                  facturasRestantes,
+                  new Date(),
+                  this.getTarifasVigentes().monto_mora_fijo
+                );
         }
       }
 
       this.saveData(this.data);
+      this.notify();
       return {
         pago,
         factura,
@@ -2775,16 +4075,26 @@ class DatabaseEngine {
     this.data.pagos.unshift(pago);
 
     const facturasRestantes = this.data.facturas.filter(
-      (f) => f.medidor_id === medidor.id && f.estado !== 'pagada' && f.estado !== 'anulada'
+      (f) =>
+        f.medidor_id === medidor.id &&
+        f.estado !== 'pagada' &&
+        f.estado !== 'anulada' &&
+        f.estado !== 'refinanciada'
     );
     if (medidor.estado !== 'cortado' && medidor.estado !== 'retirado') {
       medidor.estado =
         facturasRestantes.length === 0
           ? 'activo'
-          : evaluarEstadoMedidor(medidor, facturasRestantes);
+          : evaluarEstadoMedidor(
+              medidor,
+              facturasRestantes,
+              new Date(),
+              this.getTarifasVigentes().monto_mora_fijo
+            );
     }
 
     this.saveData(this.data);
+    this.notify();
     return {
       pago,
       factura,
@@ -2822,6 +4132,12 @@ class DatabaseEngine {
     const factura = this.data.facturas[idx];
     if (factura.estado === 'anulada') {
       throw new Error('La factura ya se encuentra anulada.');
+    }
+
+    if (factura.estado === 'refinanciada') {
+      throw new Error(
+        'No se puede anular directamente una factura refinanciada/consolidada en una factura posterior.'
+      );
     }
 
     if (factura.estado === 'pagada' || (factura.monto_pagado || 0) > 0) {
@@ -2868,6 +4184,25 @@ class DatabaseEngine {
       factura.saldo = 0;
     }
 
+    // 2b. Si esta factura había consolidado la factura N-1 (refinanciada), restaurarla a su estado impago original
+    const hoyIsoAnul = new Date().toISOString().slice(0, 10);
+    const facConsolidada = this.data.facturas.find(
+      (f) =>
+        f.medidor_id === medidor.id &&
+        f.estado === 'refinanciada' &&
+        f.motivo === `Consolidada en factura ${factura.periodo_facturado}`
+    );
+    if (facConsolidada) {
+      const saldoRestaurado = Math.max(0, facConsolidada.total - (facConsolidada.monto_pagado || 0));
+      facConsolidada.estado =
+        facConsolidada.fecha_vencimiento && String(facConsolidada.fecha_vencimiento).slice(0, 10) < hoyIsoAnul
+          ? 'vencida'
+          : 'pendiente';
+      facConsolidada.saldo_pendiente = saldoRestaurado;
+      facConsolidada.saldo = saldoRestaurado;
+      facConsolidada.motivo = null;
+    }
+
     // Liberar vínculo en memoria de cualquier lectura asociada a la factura anulada
     for (const l of this.data.lecturas) {
       if (l.factura_id === factura.id || (factura.lectura_id && l.id === factura.lectura_id)) {
@@ -2877,10 +4212,19 @@ class DatabaseEngine {
 
     // 3. Re-evaluar estado del medidor con las facturas activas restantes
     const facturasRestantes = this.data.facturas.filter(
-      (f) => f.medidor_id === medidor.id && f.estado !== 'pagada' && f.estado !== 'anulada'
+      (f) =>
+        f.medidor_id === medidor.id &&
+        f.estado !== 'pagada' &&
+        f.estado !== 'anulada' &&
+        f.estado !== 'refinanciada'
     );
     if (medidor.estado !== 'cortado' && medidor.estado !== 'retirado') {
-      medidor.estado = evaluarEstadoMedidor(medidor, facturasRestantes);
+      medidor.estado = evaluarEstadoMedidor(
+        medidor,
+        facturasRestantes,
+        new Date(),
+        this.getTarifasVigentes().monto_mora_fijo
+      );
     }
 
     // 4. Persistir en Supabase si está configurado
@@ -2917,6 +4261,22 @@ class DatabaseEngine {
           .eq('id', factura.id)
           .then(({ error }) => {
             if (error) console.warn('[DatabaseEngine] Error anulando factura en Supabase:', error);
+          });
+      }
+
+      if (facConsolidada) {
+        supabase
+          .from('facturas')
+          .update({
+            estado: facConsolidada.estado,
+            saldo_pendiente: facConsolidada.saldo_pendiente,
+            motivo: null,
+          })
+          .eq('id', facConsolidada.id)
+          .then(({ error }) => {
+            if (error) {
+              console.warn('[DatabaseEngine] Error restaurando factura consolidada en Supabase:', error);
+            }
           });
       }
 
@@ -2958,6 +4318,11 @@ class DatabaseEngine {
     if (factura.estado === 'anulada') {
       throw new Error('La factura ya se encuentra anulada.');
     }
+    if (factura.estado === 'refinanciada') {
+      throw new Error(
+        'No se puede anular directamente una factura refinanciada/consolidada en una factura posterior.'
+      );
+    }
     const tienePagos =
       factura.estado === 'pagada' ||
       (factura.monto_pagado || 0) > 0 ||
@@ -2975,12 +4340,38 @@ class DatabaseEngine {
       throw new Error('Medidor asociado no encontrado');
     }
 
-    const facturasRestantesPreview = this.data.facturas.filter(
-      (f) => f.id !== factura.id && f.medidor_id === medidor.id && f.estado !== 'pagada' && f.estado !== 'anulada'
+    const hoyIsoAnul = new Date().toISOString().slice(0, 10);
+    const facConsolidada = this.data.facturas.find(
+      (f) =>
+        f.medidor_id === medidor.id &&
+        f.estado === 'refinanciada' &&
+        f.motivo === `Consolidada en factura ${factura.periodo_facturado}`
     );
+    const estadoRestaurado: EstadoFactura | null = facConsolidada
+      ? facConsolidada.fecha_vencimiento && String(facConsolidada.fecha_vencimiento).slice(0, 10) < hoyIsoAnul
+        ? 'vencida'
+        : 'pendiente'
+      : null;
+    const saldoRestaurado = facConsolidada
+      ? Math.max(0, facConsolidada.total - (facConsolidada.monto_pagado || 0))
+      : 0;
+
+    const facturasRestantesPreview = this.data.facturas
+      .filter((f) => f.id !== factura.id && f.medidor_id === medidor.id)
+      .map((f) =>
+        facConsolidada && f.id === facConsolidada.id && estadoRestaurado
+          ? { ...f, estado: estadoRestaurado, saldo_pendiente: saldoRestaurado, saldo: saldoRestaurado, motivo: null }
+          : f
+      )
+      .filter((f) => f.estado !== 'pagada' && f.estado !== 'anulada' && f.estado !== 'refinanciada');
     const nuevoEstadoMedidor =
       medidor.estado !== 'cortado' && medidor.estado !== 'retirado'
-        ? evaluarEstadoMedidor(medidor, facturasRestantesPreview)
+        ? evaluarEstadoMedidor(
+            medidor,
+            facturasRestantesPreview,
+            new Date(),
+            this.getTarifasVigentes().monto_mora_fijo
+          )
         : medidor.estado;
 
     if (supabase && isSupabaseConfigured) {
@@ -2996,6 +4387,29 @@ class DatabaseEngine {
 
       if (facErr) {
         throw new Error(`No se pudo anular la factura en Supabase: ${facErr.message}`);
+      }
+
+      if (facConsolidada && estadoRestaurado) {
+        const { error: refErr } = await sb
+          .from('facturas')
+          .update({
+            estado: estadoRestaurado,
+            saldo_pendiente: saldoRestaurado,
+            motivo: null,
+          })
+          .eq('id', facConsolidada.id);
+        if (refErr) {
+          const { error: retryErr } = await sb
+            .from('facturas')
+            .update({
+              estado: estadoRestaurado,
+              saldo_pendiente: saldoRestaurado,
+            })
+            .eq('id', facConsolidada.id);
+          if (retryErr) {
+            console.warn('[DatabaseEngine] Aviso restaurando factura consolidada en Supabase:', retryErr.message);
+          }
+        }
       }
 
       if (nuevoEstadoMedidor !== medidor.estado) {
@@ -3028,6 +4442,12 @@ class DatabaseEngine {
     factura.motivo_anulacion = motivoTrim;
     factura.saldo_pendiente = 0;
     factura.saldo = 0;
+    if (facConsolidada && estadoRestaurado) {
+      facConsolidada.estado = estadoRestaurado;
+      facConsolidada.saldo_pendiente = saldoRestaurado;
+      facConsolidada.saldo = saldoRestaurado;
+      facConsolidada.motivo = null;
+    }
     medidor.estado = nuevoEstadoMedidor;
 
     // Liberar vínculo en memoria de la lectura asociada para permitir regenerar
@@ -3055,22 +4475,223 @@ class DatabaseEngine {
 
     const tarifa = this.getTarifasVigentes();
     const facturasImpagas = this.data.facturas.filter(
-      (f) => f.medidor_id === medidor.id && f.estado !== 'pagada' && f.estado !== 'anulada'
+      (f) =>
+        f.medidor_id === medidor.id &&
+        f.estado !== 'pagada' &&
+        f.estado !== 'anulada' &&
+        f.estado !== 'refinanciada'
     );
-    const mora = calcularMoraMedidor(facturasImpagas, tarifa.monto_mora_fijo).moraTotal;
+    const moraDirecta = calcularMoraMedidor(facturasImpagas, tarifa.monto_mora_fijo).moraTotal;
+    const moraConsolidada = facturasImpagas.reduce(
+      (maxM, f) => Math.max(maxM, obtenerMoraDeFactura(f)),
+      0
+    );
+    const mora = Math.max(moraDirecta, moraConsolidada);
 
     medidor.estado = 'cortado';
     medidor.fecha_corte = new Date().toISOString().split('T')[0];
     medidor.mora_congelada = mora;
 
     this.saveData(this.data);
+    this.notify();
+
+    if (supabase && isSupabaseConfigured) {
+      Promise.resolve(
+        supabase
+          .from('medidores')
+          .update({
+            estado: medidor.estado,
+            fecha_corte: medidor.fecha_corte,
+            mora_congelada: medidor.mora_congelada,
+          })
+          .eq('id', medidor.id)
+      )
+        .then(({ error }) => {
+          if (error) {
+            console.warn('[DatabaseEngine] Error persistiendo corte físico en Supabase:', error);
+            this.dbError = `Error guardando corte físico en Supabase: ${error.message}`;
+            this.notify();
+          }
+        })
+        .catch((err) => {
+          console.warn('[DatabaseEngine] Error de red al confirmar corte físico:', err);
+        });
+    }
+
     return medidor;
   }
 
-  public confirmarReconexion(
+  public async confirmarCorteFisicoAsync(medidorId: string): Promise<Medidor> {
+    const medidor = this.data.medidores.find((m) => m.id === medidorId);
+    if (!medidor) throw new Error('Medidor no encontrado');
+
+    const tarifa = this.getTarifasVigentes();
+    const facturasImpagas = this.data.facturas.filter(
+      (f) =>
+        f.medidor_id === medidor.id &&
+        f.estado !== 'pagada' &&
+        f.estado !== 'anulada' &&
+        f.estado !== 'refinanciada'
+    );
+    const moraDirecta = calcularMoraMedidor(facturasImpagas, tarifa.monto_mora_fijo).moraTotal;
+    const moraConsolidada = facturasImpagas.reduce(
+      (maxM, f) => Math.max(maxM, obtenerMoraDeFactura(f)),
+      0
+    );
+    const mora = Math.max(moraDirecta, moraConsolidada);
+    const fechaCorte = new Date().toISOString().split('T')[0];
+
+    if (supabase && isSupabaseConfigured) {
+      const { error } = await supabase
+        .from('medidores')
+        .update({
+          estado: 'cortado',
+          fecha_corte: fechaCorte,
+          mora_congelada: mora,
+        })
+        .eq('id', medidor.id);
+
+      if (error) {
+        throw new Error(`No se pudo confirmar el retiro físico en Supabase: ${error.message}`);
+      }
+    }
+
+    medidor.estado = 'cortado';
+    medidor.fecha_corte = fechaCorte;
+    medidor.mora_congelada = mora;
+
+    this.saveData(this.data);
+    this.notify();
+    return medidor;
+  }
+
+  /**
+   * Recalcula los estados de todos los medidores no cortados/retirados según sus facturas vencidas:
+   * - 0 vencidas → activo
+   * - 1-2 vencidas → moroso
+   * - 3+ vencidas → pendiente_corte
+   * También marca como 'vencida' cualquier factura 'pendiente' cuya fecha_vencimiento < hoy.
+   */
+  public recalcularEstadosMedidores(fechaReferencia: Date = new Date()): ResumenRecalculoEstadosMedidores {
+    const hoyIso = fechaReferencia.toISOString().slice(0, 10);
+    const facturasVencidasIds: string[] = [];
+
+    for (const f of this.data.facturas) {
+      if (
+        f.estado === 'pendiente' &&
+        f.fecha_vencimiento &&
+        String(f.fecha_vencimiento).slice(0, 10) < hoyIso
+      ) {
+        f.estado = 'vencida';
+        facturasVencidasIds.push(f.id);
+      }
+    }
+
+    const facturasPorMedidor = new Map<string, Factura[]>();
+    for (const f of this.data.facturas) {
+      const lista = facturasPorMedidor.get(f.medidor_id) || [];
+      lista.push(f);
+      facturasPorMedidor.set(f.medidor_id, lista);
+    }
+
+    const cambios: CambioEstadoMedidor[] = [];
+    let totalEvaluados = 0;
+
+    for (const medidor of this.data.medidores) {
+      if (medidor.estado === 'cortado' || medidor.estado === 'retirado') {
+        continue;
+      }
+      totalEvaluados++;
+      const facturasMedidor = facturasPorMedidor.get(medidor.id) || [];
+      const vencidasCount = facturasMedidor.filter((f) => esFacturaVencida(f, fechaReferencia)).length;
+      const nuevoEstado = evaluarEstadoMedidorPorVencidas(medidor, facturasMedidor, fechaReferencia);
+
+      if (nuevoEstado !== medidor.estado) {
+        cambios.push({
+          medidorId: medidor.id,
+          numeroMedidor: medidor.numero_medidor,
+          anterior: medidor.estado,
+          nuevo: nuevoEstado,
+          vencidasCount,
+        });
+        medidor.estado = nuevoEstado;
+      }
+    }
+
+    if (facturasVencidasIds.length > 0 || cambios.length > 0) {
+      this.saveData(this.data);
+      this.notify();
+    }
+
+    return {
+      totalEvaluados,
+      actualizados: cambios.length,
+      facturasVencidasMarcadas: facturasVencidasIds.length,
+      facturasVencidasIds,
+      cambios,
+      origen: 'local',
+    };
+  }
+
+  private async persistirRecalculoSupabaseAsync(
+    client: any,
+    resumen: ResumenRecalculoEstadosMedidores
+  ): Promise<'rpc' | 'directo'> {
+    if (typeof client?.rpc === 'function') {
+      const { error: rpcErr } = await client.rpc('recalcular_todos_los_estados_medidores');
+      if (!rpcErr) {
+        return 'rpc';
+      }
+      console.warn('[DatabaseEngine] RPC recalcular_todos_los_estados_medidores no disponible o con error, usando fallback directo:', rpcErr.message);
+    }
+
+    if (resumen.facturasVencidasIds.length > 0) {
+      const { error: facErr } = await client
+        .from('facturas')
+        .update({ estado: 'vencida' })
+        .in('id', resumen.facturasVencidasIds);
+      if (facErr) {
+        throw new Error(`No se pudieron actualizar facturas vencidas en Supabase: ${facErr.message}`);
+      }
+    }
+
+    for (const cambio of resumen.cambios) {
+      const { error: medErr } = await client
+        .from('medidores')
+        .update({ estado: cambio.nuevo })
+        .eq('id', cambio.medidorId);
+      if (medErr) {
+        throw new Error(`No se pudo actualizar estado del medidor N° ${cambio.numeroMedidor}: ${medErr.message}`);
+      }
+    }
+
+    return 'directo';
+  }
+
+  public async recalcularEstadosMedidoresAsync(options?: {
+    fechaReferencia?: Date;
+  }): Promise<ResumenRecalculoEstadosMedidores> {
+    const fechaRef = options?.fechaReferencia || new Date();
+    const resumen = this.recalcularEstadosMedidores(fechaRef);
+
+    if (supabase && isSupabaseConfigured) {
+      const origen = await this.persistirRecalculoSupabaseAsync(supabase, resumen);
+      return {
+        ...resumen,
+        origen,
+      };
+    }
+
+    return {
+      ...resumen,
+      origen: 'local',
+    };
+  }
+
+  private prepararReconexion(
     medidorId: string,
     cobradorOOpciones?: string | OpcionesReconexion
-  ): { medidor: Medidor; facturaRegularizacion: Factura; pago: Pago } {
+  ) {
     const medidor = this.data.medidores.find((m) => m.id === medidorId);
     if (!medidor) throw new Error('Medidor no encontrado');
 
@@ -3085,12 +4706,13 @@ class DatabaseEngine {
     const ahora = opts.fechaReconexion || new Date().toISOString().split('T')[0];
     const tipoReinstalacion = opts.tipoReinstalacion || 'mismo_medidor';
 
-    // 5. Se registra la reinstalación del medidor (o nuevo medidor)
+    let numeroMedidorFinal = medidor.numero_medidor;
+    let numeroMedidorAnterior = medidor.numero_medidor_anterior;
+
     if (tipoReinstalacion === 'nuevo_medidor') {
       if (!opts.nuevoNumeroMedidor) {
         throw new Error('Debe especificar el número del nuevo medidor.');
       }
-      // Validar numero_medidor según reglas del pliego
       const resVal = validarNumeroMedidor(
         opts.nuevoNumeroMedidor,
         this.data.medidores.filter((m) => m.id !== medidor.id).map((m) => m.numero_medidor),
@@ -3100,16 +4722,21 @@ class DatabaseEngine {
         throw new Error(resVal.error || 'Número de nuevo medidor inválido');
       }
 
-      medidor.numero_medidor_anterior = medidor.numero_medidor;
-      medidor.numero_medidor = opts.nuevoNumeroMedidor;
+      numeroMedidorAnterior = medidor.numero_medidor;
+      numeroMedidorFinal = opts.nuevoNumeroMedidor;
     }
 
     const facturasImpagas = this.data.facturas.filter(
-      (f) => f.medidor_id === medidor.id && f.estado !== 'pagada' && f.estado !== 'anulada'
+      (f) => f.medidor_id === medidor.id && (f.estado === 'pendiente' || f.estado === 'vencida')
     );
     const cargosPendientes = this.data.cargos_pendientes.filter(
       (c) => c.medidor_id === medidor.id && c.estado === 'pendiente'
     );
+
+    const periodosOcupados = this.data.facturas
+      .filter((f) => f.medidor_id === medidor.id && f.estado !== 'anulada')
+      .map((f) => f.periodo_facturado);
+    const periodoRegularizacion = resolverPeriodoRegularizacion(ahora, periodosOcupados);
 
     const correlativo =
       Math.max(
@@ -3119,8 +4746,6 @@ class DatabaseEngine {
           .map((f) => Number(f.numero_boleta_medidor) || 0)
       ) + 1;
 
-    // 2. Sistema genera factura de regularización del medidor con:
-    // deuda anterior + mora congelada + reconexión + cargos pendientes + ERSSAN 2%
     const { factura: facReg } = generarFacturaRegularizacion({
       medidor,
       clienteId: medidor.cliente_id,
@@ -3131,8 +4756,80 @@ class DatabaseEngine {
         monto: c.monto,
       })),
       tarifa,
+      fechaEmision: ahora,
+      periodo: periodoRegularizacion,
       correlativoPorMedidor: correlativo,
     });
+
+    const nuevoPago: Pago = {
+      id: generarUUID(),
+      factura_id: facReg.id,
+      fecha_pago: ahora,
+      monto: facReg.total,
+      metodo_pago: metodoPago,
+      numero_recibo: `REC-REG-${Date.now().toString().slice(-6)}`,
+      cobrador_id: cobradorId,
+    };
+
+    const lecturaInicial =
+      opts.lecturaInicial !== undefined ? Math.max(0, Math.floor(opts.lecturaInicial)) : 0;
+    const periodoActual = ahora.slice(0, 7);
+    const lecturaReinstalacion: Lectura = {
+      id: generarUUID(),
+      medidor_id: medidor.id,
+      periodo: periodoActual,
+      fecha_lectura: ahora,
+      lectura_actual: lecturaInicial,
+      lectura_anterior: lecturaInicial,
+      consumo_m3: 0,
+      foto_medidor_url: 'https://images.unsplash.com/photo-1581092160607-ee22621dd758?w=400',
+      observaciones: `Reinstalación de ${
+        tipoReinstalacion === 'nuevo_medidor'
+          ? `nuevo medidor N° ${numeroMedidorFinal} (anterior: N° ${numeroMedidorAnterior})`
+          : `mismo medidor N° ${numeroMedidorFinal}`
+      }. Operario: ${opts.operario || 'Cuadrilla'}. ${opts.observaciones || ''}`,
+      estado: 'confirmada',
+      registrado_por: opts.operario || cobradorId,
+      fecha_registro: new Date().toISOString(),
+    };
+
+    return {
+      medidor,
+      opts,
+      cobradorId,
+      ahora,
+      tipoReinstalacion,
+      numeroMedidorFinal,
+      numeroMedidorAnterior,
+      facturasImpagas,
+      cargosPendientes,
+      facReg,
+      nuevoPago,
+      lecturaInicial,
+      lecturaReinstalacion,
+    };
+  }
+
+  private aplicarReconexionEnMemoria(prep: ReturnType<DatabaseEngine['prepararReconexion']>) {
+    const {
+      medidor,
+      opts,
+      ahora,
+      tipoReinstalacion,
+      numeroMedidorFinal,
+      numeroMedidorAnterior,
+      facturasImpagas,
+      cargosPendientes,
+      facReg,
+      nuevoPago,
+      lecturaInicial,
+      lecturaReinstalacion,
+    } = prep;
+
+    if (tipoReinstalacion === 'nuevo_medidor') {
+      medidor.numero_medidor_anterior = numeroMedidorAnterior;
+      medidor.numero_medidor = numeroMedidorFinal;
+    }
 
     facReg.estado = 'pagada';
     facReg.fecha_pago = ahora;
@@ -3156,52 +4853,155 @@ class DatabaseEngine {
       c.factura_id = facReg.id;
     }
 
-    // 3. Se registra pago
-    const nuevoPago: Pago = {
-      id: `pago-reg-${Date.now()}-${Math.floor(Math.random() * 1000)}`,
-      factura_id: facReg.id,
-      fecha_pago: ahora,
-      monto: facReg.total,
-      metodo_pago: metodoPago,
-      numero_recibo: `REC-REG-${Date.now().toString().slice(-6)}`,
-      cobrador_id: cobradorId,
-    };
     this.data.pagos.push(nuevoPago);
 
-    // 4. Al quedar paga, el medidor pasa a activo
     medidor.estado = 'activo';
     medidor.fecha_corte = null;
     medidor.mora_congelada = null;
     medidor.fecha_reconexion = ahora;
     medidor.fecha_instalacion = ahora;
     medidor.observaciones_reconexion = opts.observaciones || null;
-
-    // 5. Registrar lectura inicial de reinstalación
-    const lecturaInicial = opts.lecturaInicial !== undefined ? Math.max(0, Math.floor(opts.lecturaInicial)) : 0;
     medidor.lectura_inicial_reconexion = lecturaInicial;
 
-    const periodoActual = ahora.slice(0, 7);
-    this.data.lecturas.push({
-      id: `lec-rec-${Date.now()}`,
-      medidor_id: medidor.id,
-      periodo: periodoActual,
-      fecha_lectura: ahora,
-      lectura_actual: lecturaInicial,
-      lectura_anterior: lecturaInicial,
-      consumo_m3: 0,
-      foto_medidor_url: 'https://images.unsplash.com/photo-1581092160607-ee22621dd758?w=400',
-      observaciones: `Reinstalación de ${
-        tipoReinstalacion === 'nuevo_medidor'
-          ? `nuevo medidor N° ${medidor.numero_medidor} (anterior: N° ${medidor.numero_medidor_anterior})`
-          : `mismo medidor N° ${medidor.numero_medidor}`
-      }. Operario: ${opts.operario || 'Cuadrilla'}. ${opts.observaciones || ''}`,
-      estado: 'confirmada',
-      registrado_por: opts.operario || cobradorId,
-      fecha_registro: new Date().toISOString(),
-    });
+    this.data.lecturas.push(lecturaReinstalacion);
 
     this.saveData(this.data);
+    this.notify();
+
     return { medidor, facturaRegularizacion: facReg, pago: nuevoPago };
+  }
+
+  private async persistirReconexionSupabaseAsync(
+    prep: ReturnType<DatabaseEngine['prepararReconexion']>,
+    clientOverride?: any
+  ): Promise<void> {
+    const sb = clientOverride || (supabase && isSupabaseConfigured ? supabase : null);
+    if (!sb) return;
+
+    const {
+      medidor,
+      cobradorId,
+      ahora,
+      numeroMedidorFinal,
+      facturasImpagas,
+      cargosPendientes,
+      facReg,
+      nuevoPago,
+    } = prep;
+
+    const esUuidValido = (v?: string | null) =>
+      Boolean(
+        v && /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(v)
+      );
+
+    let sessionUserId: string | undefined;
+    if (sb.auth && typeof sb.auth.getSession === 'function') {
+      const {
+        data: { session },
+      } = await sb.auth.getSession();
+      sessionUserId = session?.user?.id;
+    }
+    const cobradorUuid = esUuidValido(cobradorId) ? cobradorId : sessionUserId;
+
+    // 1. Marcar facturas impagas anteriores como pagadas en Supabase
+    for (const f of facturasImpagas) {
+      const { error: facAntErr } = await sb
+        .from('facturas')
+        .update({
+          estado: 'pagada',
+          saldo_pendiente: 0,
+          monto_pagado: f.total,
+          fecha_pago: ahora,
+        })
+        .eq('id', f.id);
+      if (facAntErr) {
+        throw new Error(`No se pudo saldar la factura anterior ${f.id}: ${facAntErr.message}`);
+      }
+    }
+
+    // 2. Actualizar estado del medidor en Supabase
+    const { error: medErr } = await sb
+      .from('medidores')
+      .update({
+        estado: 'activo',
+        numero_medidor: numeroMedidorFinal,
+        fecha_corte: null,
+        mora_congelada: 0,
+        fecha_instalacion: ahora,
+      })
+      .eq('id', medidor.id);
+    if (medErr) {
+      throw new Error(`No se pudo actualizar el medidor en Supabase: ${medErr.message}`);
+    }
+
+    // 3. Persistir factura de regularización (como pendiente antes de aplicar el pago)
+    const facPendiente: Factura = {
+      ...facReg,
+      estado: 'pendiente',
+      saldo_pendiente: facReg.total,
+      saldo: facReg.total,
+      monto_pagado: 0,
+    };
+    const facErrMsg = await this.persistirFacturaGeneradaSupabase({
+      factura: facPendiente,
+      detalles: facReg.detalles || [],
+      cargosFacturadosIds: cargosPendientes.map((c) => c.id),
+      medidorId: medidor.id,
+      estadoMedidor: 'activo',
+      clientOverride: sb,
+    });
+    if (facErrMsg) {
+      throw new Error(facErrMsg);
+    }
+
+    // 4. Registrar el pago de regularización (el trigger actualiza saldo_pendiente=0, monto_pagado=total, estado='pagada')
+    const pagoPayload: Record<string, any> = {
+      id: nuevoPago.id,
+      factura_id: facReg.id,
+      fecha_pago: ahora,
+      monto: nuevoPago.monto,
+      metodo_pago: nuevoPago.metodo_pago,
+      numero_recibo: nuevoPago.numero_recibo,
+    };
+    if (cobradorUuid) {
+      pagoPayload.cobrador_id = cobradorUuid;
+    }
+
+    const { error: pagoErr } = await sb.from('pagos').insert(pagoPayload);
+    if (pagoErr) {
+      throw new Error(
+        `No se pudo registrar el pago de la factura de regularización (${facReg.id}): ${pagoErr.message}`
+      );
+    }
+  }
+
+  public async confirmarReconexionAsync(
+    medidorId: string,
+    cobradorOOpciones?: string | OpcionesReconexion,
+    options?: { clientOverride?: any }
+  ): Promise<{ medidor: Medidor; facturaRegularizacion: Factura; pago: Pago }> {
+    const prep = this.prepararReconexion(medidorId, cobradorOOpciones);
+    await this.persistirReconexionSupabaseAsync(prep, options?.clientOverride);
+    return this.aplicarReconexionEnMemoria(prep);
+  }
+
+  public confirmarReconexion(
+    medidorId: string,
+    cobradorOOpciones?: string | OpcionesReconexion
+  ): { medidor: Medidor; facturaRegularizacion: Factura; pago: Pago } {
+    const prep = this.prepararReconexion(medidorId, cobradorOOpciones);
+    const res = this.aplicarReconexionEnMemoria(prep);
+
+    if (supabase && isSupabaseConfigured) {
+      this.persistirReconexionSupabaseAsync(prep).catch((err) => {
+        const msg = err?.message || 'Error persistiendo reconexión en Supabase.';
+        console.error('[DatabaseEngine] Error persistiendo reconexión en Supabase:', err);
+        this.dbError = msg;
+        this.notify();
+      });
+    }
+
+    return res;
   }
 
   public agregarCliente(cliente: Omit<Cliente, 'id' | 'fecha_alta'>): Cliente {
@@ -3321,6 +5121,292 @@ class DatabaseEngine {
     }
   }
 
+  /**
+   * Registro asíncrono de cliente y contrato en Supabase.
+   * Valida campos obligatorios y documento único, y NO muta estado local si falla.
+   */
+  public async agregarClienteAsync(
+    cliente: Omit<Cliente, 'id' | 'fecha_alta'>,
+    options?: { clientOverride?: any }
+  ): Promise<Cliente> {
+    const nombreLimpio = (cliente.nombre_completo || '').trim();
+    const documentoLimpio = (cliente.documento || '').trim();
+    const direccionLimpia = (cliente.direccion || '').trim();
+    const telefonoLimpio = (cliente.telefono || '').trim();
+    const emailLimpio = (cliente.email || '').trim();
+
+    if (!nombreLimpio) {
+      throw new Error('El nombre es obligatorio');
+    }
+    if (!documentoLimpio) {
+      throw new Error('El documento (C.I./RUC) es obligatorio');
+    }
+    if (!direccionLimpia) {
+      throw new Error('La dirección es obligatoria');
+    }
+
+    const existe = this.data.clientes.some((c) => c.documento.trim() === documentoLimpio);
+    if (existe) {
+      throw new Error('Ya existe un cliente con ese documento');
+    }
+
+    const nuevoId = generarUUID();
+    const fechaAlta = new Date().toISOString().split('T')[0];
+    const nuevo: Cliente = {
+      id: nuevoId,
+      nombre_completo: nombreLimpio,
+      documento: documentoLimpio,
+      direccion: direccionLimpia,
+      telefono: telefonoLimpio,
+      email: emailLimpio,
+      fecha_alta: fechaAlta,
+    };
+
+    const nuevoContrato: Contrato = {
+      id: generarUUID(),
+      cliente_id: nuevoId,
+      fecha_inicio: fechaAlta,
+      fecha_fin: null,
+      condiciones: 'Suministro de agua potable conforme a normativas de ERSSAN.',
+      estado: 'vigente',
+    };
+
+    const sb = options?.clientOverride ?? (isSupabaseConfigured ? supabase : null);
+    if (sb) {
+      try {
+        const { error: cliErr } = await sb.from('clientes').insert({
+          id: nuevo.id,
+          nombre_completo: nuevo.nombre_completo,
+          documento: nuevo.documento,
+          direccion: nuevo.direccion,
+          telefono: nuevo.telefono || null,
+          email: nuevo.email || null,
+          fecha_alta: nuevo.fecha_alta,
+        });
+
+        if (cliErr) {
+          const msgLower = (cliErr.message || '').toLowerCase();
+          if (cliErr.code === '23505' || msgLower.includes('duplicate') || msgLower.includes('unique')) {
+            throw new Error('Ya existe un cliente con ese documento');
+          }
+          throw new Error(`No se pudo registrar el cliente: ${cliErr.message}`);
+        }
+
+        const { error: conErr } = await sb.from('contratos').insert({
+          id: nuevoContrato.id,
+          cliente_id: nuevoContrato.cliente_id,
+          fecha_inicio: nuevoContrato.fecha_inicio,
+          condiciones: nuevoContrato.condiciones,
+          estado: nuevoContrato.estado,
+        });
+
+        if (conErr) {
+          // Rollback best-effort del cliente para no dejar titular sin contrato
+          try {
+            await sb.from('clientes').delete().eq('id', nuevo.id);
+          } catch {
+            // ignorar error secundario
+          }
+          throw new Error(`No se pudo registrar el contrato del cliente: ${conErr.message}`);
+        }
+      } catch (err: any) {
+        if (
+          err?.message === 'Ya existe un cliente con ese documento' ||
+          err?.message?.startsWith('No se pudo registrar el ')
+        ) {
+          throw err;
+        }
+        throw new Error(`No se pudo registrar el cliente: ${err?.message || 'Error de conexión'}`);
+      }
+    }
+
+    this.data.clientes.unshift(nuevo);
+    this.data.contratos.unshift(nuevoContrato);
+    this.saveData(this.data);
+    this.notify();
+    return nuevo;
+  }
+
+  /**
+   * Actualización asíncrona de cliente en Supabase.
+   * No muta estado local si falla.
+   */
+  public async actualizarClienteAsync(
+    clienteId: string,
+    datos: Partial<Omit<Cliente, 'id' | 'fecha_alta'>>,
+    options?: { clientOverride?: any }
+  ): Promise<Cliente> {
+    const idx = this.data.clientes.findIndex((c) => c.id === clienteId);
+    if (idx === -1) {
+      throw new Error('Cliente no encontrado');
+    }
+
+    const actual = this.data.clientes[idx];
+    const nombreFinal =
+      datos.nombre_completo !== undefined ? datos.nombre_completo.trim() : actual.nombre_completo;
+    const documentoFinal =
+      datos.documento !== undefined ? datos.documento.trim() : actual.documento;
+    const direccionFinal =
+      datos.direccion !== undefined ? datos.direccion.trim() : actual.direccion;
+    const telefonoFinal =
+      datos.telefono !== undefined ? datos.telefono.trim() : actual.telefono;
+    const emailFinal =
+      datos.email !== undefined ? datos.email.trim() : actual.email;
+
+    if (!nombreFinal) {
+      throw new Error('El nombre es obligatorio');
+    }
+    if (!documentoFinal) {
+      throw new Error('El documento (C.I./RUC) es obligatorio');
+    }
+    if (!direccionFinal) {
+      throw new Error('La dirección es obligatoria');
+    }
+
+    if (documentoFinal !== actual.documento.trim()) {
+      const existe = this.data.clientes.some(
+        (c) => c.documento.trim() === documentoFinal && c.id !== clienteId
+      );
+      if (existe) {
+        throw new Error('Ya existe un cliente con ese documento');
+      }
+    }
+
+    const actualizado: Cliente = {
+      ...actual,
+      nombre_completo: nombreFinal,
+      documento: documentoFinal,
+      direccion: direccionFinal,
+      telefono: telefonoFinal,
+      email: emailFinal,
+    };
+
+    const sb = options?.clientOverride ?? (isSupabaseConfigured ? supabase : null);
+    if (sb) {
+      try {
+        const { data: updatedRows, error } = await sb
+          .from('clientes')
+          .update({
+            nombre_completo: actualizado.nombre_completo,
+            documento: actualizado.documento,
+            direccion: actualizado.direccion,
+            telefono: actualizado.telefono || null,
+            email: actualizado.email || null,
+          })
+          .eq('id', clienteId)
+          .select('id');
+
+        if (error) {
+          const msgLower = (error.message || '').toLowerCase();
+          if (error.code === '23505' || msgLower.includes('duplicate') || msgLower.includes('unique')) {
+            throw new Error('Ya existe un cliente con ese documento');
+          }
+          throw new Error(`No se pudo actualizar el cliente: ${error.message}`);
+        }
+        if (Array.isArray(updatedRows) && updatedRows.length === 0) {
+          throw new Error(
+            'No se pudo actualizar el cliente en Supabase: el registro no existe o tu usuario no tiene permisos RLS.'
+          );
+        }
+      } catch (err: any) {
+        if (
+          err?.message === 'Ya existe un cliente con ese documento' ||
+          err?.message?.startsWith('No se pudo actualizar el cliente')
+        ) {
+          throw err;
+        }
+        throw new Error(`No se pudo actualizar el cliente: ${err?.message || 'Error de conexión'}`);
+      }
+    }
+
+    this.data.clientes[idx] = actualizado;
+    this.saveData(this.data);
+    this.notify();
+    return actualizado;
+  }
+
+  /**
+   * Eliminación asíncrona de cliente en Supabase.
+   * Bloquea si tiene medidores asociados (local o en Supabase) y no muta estado local si falla.
+   */
+  public async eliminarClienteAsync(
+    clienteId: string,
+    options?: { clientOverride?: any }
+  ): Promise<boolean> {
+    const idx = this.data.clientes.findIndex((c) => c.id === clienteId);
+    if (idx === -1) {
+      throw new Error('Cliente no encontrado');
+    }
+
+    const tieneMedidoresLocal = this.data.medidores.some((m) => m.cliente_id === clienteId);
+    if (tieneMedidoresLocal) {
+      throw new Error(
+        'No se puede eliminar un cliente con medidores. Eliminá primero los medidores o desactivalo.'
+      );
+    }
+
+    const sb = options?.clientOverride ?? (isSupabaseConfigured ? supabase : null);
+    if (sb) {
+      try {
+        const { data: medRows, error: medCheckErr } = await sb
+          .from('medidores')
+          .select('id')
+          .eq('cliente_id', clienteId)
+          .limit(1);
+
+        if (medCheckErr) {
+          throw new Error(`No se pudo verificar los medidores del cliente: ${medCheckErr.message}`);
+        }
+        if (Array.isArray(medRows) && medRows.length > 0) {
+          throw new Error(
+            'No se puede eliminar un cliente con medidores. Eliminá primero los medidores o desactivalo.'
+          );
+        }
+
+        const { data: deletedRows, error } = await sb
+          .from('clientes')
+          .delete()
+          .eq('id', clienteId)
+          .select('id');
+
+        if (error) {
+          const msgLower = (error.message || '').toLowerCase();
+          if (error.code === '23503' || msgLower.includes('foreign key')) {
+            if (msgLower.includes('medidores')) {
+              throw new Error(
+                'No se puede eliminar un cliente con medidores. Eliminá primero los medidores o desactivalo.'
+              );
+            }
+            throw new Error(
+              'No se puede eliminar un cliente con historial de facturas o movimientos asociados.'
+            );
+          }
+          throw new Error(`No se pudo eliminar el cliente: ${error.message}`);
+        }
+        if (Array.isArray(deletedRows) && deletedRows.length === 0) {
+          throw new Error(
+            'No se pudo eliminar el cliente en Supabase: el registro no existe o tu usuario no tiene permisos RLS.'
+          );
+        }
+      } catch (err: any) {
+        if (
+          err?.message ===
+            'No se puede eliminar un cliente con medidores. Eliminá primero los medidores o desactivalo.' ||
+          err?.message?.startsWith('No se pudo ')
+        ) {
+          throw err;
+        }
+        throw new Error(`No se pudo eliminar el cliente: ${err?.message || 'Error de conexión'}`);
+      }
+    }
+
+    this.data.clientes = this.data.clientes.filter((c) => c.id !== clienteId);
+    this.data.contratos = this.data.contratos.filter((con) => con.cliente_id !== clienteId);
+    this.saveData(this.data);
+    this.notify();
+    return true;
+  }
+
   public actualizarMedidor(medidorId: string, datos: Partial<Omit<Medidor, 'id' | 'numero_medidor'>>): Medidor {
     const idx = this.data.medidores.findIndex((m) => m.id === medidorId);
     if (idx === -1) throw new Error('Medidor no encontrado');
@@ -3421,6 +5507,263 @@ class DatabaseEngine {
     return nuevo;
   }
 
+  /**
+   * Registro asíncrono de medidor en Supabase.
+   * Valida rango, duplicados y cliente titular antes de insertar y NO muta estado local si falla.
+   */
+  public async agregarMedidorAsync(
+    medidor: Omit<Medidor, 'id' | 'mora_congelada' | 'fecha_corte' | 'numero_medidor'> & {
+      numero_medidor: number | string;
+    },
+    options?: { clientOverride?: any }
+  ): Promise<Medidor> {
+    if (!medidor.cliente_id || !String(medidor.cliente_id).trim()) {
+      throw new Error('Debe seleccionar un cliente titular existente.');
+    }
+    if (!medidor.direccion || !medidor.direccion.trim()) {
+      throw new Error('Debe ingresar la dirección del terreno.');
+    }
+
+    const tarifa = this.getTarifasVigentes();
+    const existentes = new Set(this.data.medidores.map((m) => m.numero_medidor));
+    const val = validarNumeroMedidor(
+      medidor.numero_medidor,
+      existentes,
+      tarifa.max_numero_medidor,
+      this.data.medidores.length
+    );
+
+    if (!val.valido || !val.numero) {
+      throw new Error(val.error || 'Número de medidor inválido');
+    }
+
+    const latNum = Number(medidor.latitud);
+    const lngNum = Number(medidor.longitud);
+    const latitudFinal = Number.isFinite(latNum) ? latNum : -25.34;
+    const longitudFinal = Number.isFinite(lngNum) ? lngNum : -57.51;
+    const fechaInstalacion = medidor.fecha_instalacion || new Date().toISOString().split('T')[0];
+    const direccionLimpia = medidor.direccion.trim();
+    const zonaFinal = medidor.zona?.trim() || 'Centro';
+    const estadoFinal = medidor.estado || 'activo';
+    const nuevoId = generarUUID();
+
+    const sb = options?.clientOverride ?? (isSupabaseConfigured ? supabase : null);
+    if (sb) {
+      try {
+        const { error } = await sb.from('medidores').insert({
+          id: nuevoId,
+          cliente_id: medidor.cliente_id,
+          numero_medidor: val.numero,
+          direccion: direccionLimpia,
+          zona: zonaFinal,
+          latitud: latitudFinal,
+          longitud: longitudFinal,
+          fecha_instalacion: fechaInstalacion,
+          estado: estadoFinal,
+          fecha_corte: null,
+          mora_congelada: 0,
+        });
+
+        if (error) {
+          const msgLower = (error.message || '').toLowerCase();
+          if (error.code === '23505' || msgLower.includes('duplicate') || msgLower.includes('unique')) {
+            throw new Error('Ya existe un medidor con ese número');
+          }
+          if (error.code === '23514' && msgLower.includes('numero_medidor')) {
+            throw new Error(`El número de medidor debe estar entre 1 y ${tarifa.max_numero_medidor}`);
+          }
+          throw new Error(`No se pudo registrar el medidor: ${error.message}`);
+        }
+      } catch (err: any) {
+        if (
+          err?.message === 'Ya existe un medidor con ese número' ||
+          err?.message?.startsWith('No se pudo registrar el medidor') ||
+          err?.message?.startsWith('El número de medidor debe estar')
+        ) {
+          throw err;
+        }
+        throw new Error(`No se pudo registrar el medidor: ${err?.message || 'Error de conexión'}`);
+      }
+    }
+
+    const nuevo: Medidor = {
+      id: nuevoId,
+      cliente_id: medidor.cliente_id,
+      numero_medidor: val.numero,
+      fecha_instalacion: fechaInstalacion,
+      direccion: direccionLimpia,
+      zona: zonaFinal,
+      latitud: latitudFinal,
+      longitud: longitudFinal,
+      estado: estadoFinal,
+      fecha_corte: null,
+      mora_congelada: null,
+    };
+
+    this.data.medidores.push(nuevo);
+    this.saveData(this.data);
+    this.notify();
+    return nuevo;
+  }
+
+  /**
+   * Actualización asíncrona de medidor en Supabase.
+   * No muta estado local si la operación remota falla.
+   */
+  public async actualizarMedidorAsync(
+    medidorId: string,
+    datos: Partial<Omit<Medidor, 'id' | 'numero_medidor'>>,
+    options?: { clientOverride?: any }
+  ): Promise<Medidor> {
+    const idx = this.data.medidores.findIndex((m) => m.id === medidorId);
+    if (idx === -1) {
+      throw new Error('Medidor no encontrado');
+    }
+
+    const actual = this.data.medidores[idx];
+    if (datos.direccion !== undefined && !datos.direccion.trim()) {
+      throw new Error('La dirección del terreno no puede estar vacía.');
+    }
+
+    const nextLat =
+      datos.latitud !== undefined && Number.isFinite(Number(datos.latitud))
+        ? Number(datos.latitud)
+        : actual.latitud;
+    const nextLng =
+      datos.longitud !== undefined && Number.isFinite(Number(datos.longitud))
+        ? Number(datos.longitud)
+        : actual.longitud;
+
+    const actualizado: Medidor = {
+      ...actual,
+      ...datos,
+      direccion: datos.direccion !== undefined ? datos.direccion.trim() : actual.direccion,
+      zona: datos.zona !== undefined ? datos.zona : actual.zona,
+      latitud: nextLat,
+      longitud: nextLng,
+    };
+
+    const sb = options?.clientOverride ?? (isSupabaseConfigured ? supabase : null);
+    if (sb) {
+      try {
+        const { data: updatedRows, error } = await sb
+          .from('medidores')
+          .update({
+            cliente_id: actualizado.cliente_id,
+            direccion: actualizado.direccion,
+            zona: actualizado.zona,
+            latitud: actualizado.latitud,
+            longitud: actualizado.longitud,
+            fecha_instalacion: actualizado.fecha_instalacion,
+            estado: actualizado.estado,
+            fecha_corte: actualizado.fecha_corte ?? null,
+            mora_congelada: actualizado.mora_congelada ?? 0,
+          })
+          .eq('id', medidorId)
+          .select('id');
+
+        if (error) {
+          throw new Error(`No se pudo actualizar el medidor: ${error.message}`);
+        }
+        if (Array.isArray(updatedRows) && updatedRows.length === 0) {
+          throw new Error(
+            'No se pudo actualizar el medidor en Supabase: el registro no existe o tu usuario no tiene permisos RLS.'
+          );
+        }
+      } catch (err: any) {
+        if (err?.message?.startsWith('No se pudo actualizar el medidor')) {
+          throw err;
+        }
+        throw new Error(`No se pudo actualizar el medidor: ${err?.message || 'Error de conexión'}`);
+      }
+    }
+
+    this.data.medidores[idx] = actualizado;
+    this.saveData(this.data);
+    this.notify();
+    return actualizado;
+  }
+
+  /**
+   * Eliminación asíncrona de medidor en Supabase.
+   * Bloquea la eliminación si tiene facturas asociadas y no muta estado local si falla.
+   */
+  public async eliminarMedidorAsync(
+    medidorId: string,
+    options?: { clientOverride?: any }
+  ): Promise<boolean> {
+    const idx = this.data.medidores.findIndex((m) => m.id === medidorId);
+    if (idx === -1) {
+      throw new Error('Medidor no encontrado');
+    }
+
+    const tieneFacturasLocal = this.data.facturas.some((f) => f.medidor_id === medidorId);
+    if (tieneFacturasLocal) {
+      throw new Error(
+        "No se puede eliminar un medidor con facturas. Cambialo a estado 'retirado' en su lugar."
+      );
+    }
+
+    const sb = options?.clientOverride ?? (isSupabaseConfigured ? supabase : null);
+    if (sb) {
+      try {
+        const { data: factRows, error: factCheckErr } = await sb
+          .from('facturas')
+          .select('id')
+          .eq('medidor_id', medidorId)
+          .limit(1);
+
+        if (factCheckErr) {
+          throw new Error(`No se pudo verificar facturas del medidor: ${factCheckErr.message}`);
+        }
+        if (Array.isArray(factRows) && factRows.length > 0) {
+          throw new Error(
+            "No se puede eliminar un medidor con facturas. Cambialo a estado 'retirado' en su lugar."
+          );
+        }
+
+        const { data: deletedRows, error } = await sb
+          .from('medidores')
+          .delete()
+          .eq('id', medidorId)
+          .select('id');
+
+        if (error) {
+          const msgLower = (error.message || '').toLowerCase();
+          if (error.code === '23503' || msgLower.includes('foreign key')) {
+            if (msgLower.includes('facturas')) {
+              throw new Error(
+                "No se puede eliminar un medidor con facturas. Cambialo a estado 'retirado' en su lugar."
+              );
+            }
+            throw new Error(
+              "No se puede eliminar un medidor con historial de lecturas o movimientos. Cambialo a estado 'retirado' en su lugar."
+            );
+          }
+          throw new Error(`No se pudo eliminar el medidor: ${error.message}`);
+        }
+        if (Array.isArray(deletedRows) && deletedRows.length === 0) {
+          throw new Error(
+            'No se pudo eliminar el medidor en Supabase: el registro no existe o tu usuario no tiene permisos RLS.'
+          );
+        }
+      } catch (err: any) {
+        if (
+          err?.message?.includes("estado 'retirado'") ||
+          err?.message?.startsWith('No se pudo ')
+        ) {
+          throw err;
+        }
+        throw new Error(`No se pudo eliminar el medidor: ${err?.message || 'Error de conexión'}`);
+      }
+    }
+
+    this.data.medidores.splice(idx, 1);
+    this.saveData(this.data);
+    this.notify();
+    return true;
+  }
+
   public agregarCargoPendiente(cargo: Omit<CargoPendiente, 'id' | 'estado' | 'fecha_registro'>): CargoPendiente {
     const medidor = this.data.medidores.find((m) => m.id === cargo.medidor_id);
     const numMedidor = medidor ? medidor.numero_medidor : 0;
@@ -3439,12 +5782,94 @@ class DatabaseEngine {
 
     const nuevo: CargoPendiente = {
       ...cargo,
-      id: `cargo-${Date.now()}-${Math.floor(Math.random() * 1000)}`,
+      id: generarUUID(),
       estado: 'pendiente',
       fecha_registro: new Date().toISOString(),
     };
     this.data.cargos_pendientes.push(nuevo);
     this.saveData(this.data);
+    return nuevo;
+  }
+
+  public async agregarCargoPendienteAsync(
+    cargo: Omit<CargoPendiente, 'id' | 'estado' | 'fecha_registro'>,
+    options?: { clientOverride?: any }
+  ): Promise<CargoPendiente> {
+    const medidor = this.data.medidores.find((m) => m.id === cargo.medidor_id);
+    if (!medidor) {
+      throw new Error('Medidor no encontrado para registrar el cargo.');
+    }
+
+    const val = validarRegistroCargo({
+      monto: cargo.monto,
+      periodoFacturacion: cargo.periodo_facturacion,
+      medidorId: cargo.medidor_id,
+      numeroMedidor: medidor.numero_medidor,
+      facturasExistentesMedidor: this.data.facturas,
+    });
+
+    if (!val.valido) {
+      throw new Error(val.error || 'Error al validar cargo pendiente');
+    }
+
+    const nuevoId = generarUUID();
+    const fechaRegistro = new Date().toISOString();
+    const descripcionLimpia = cargo.descripcion.trim();
+    const montoEntero = Math.round(cargo.monto);
+    let registradoPorFinal = cargo.registrado_por || 'admin';
+
+    const sb = options?.clientOverride ?? (isSupabaseConfigured ? supabase : null);
+    if (sb) {
+      const { data: { session } } = await sb.auth.getSession();
+      const registradoPorUuid = this.esUuidValido(cargo.registrado_por)
+        ? cargo.registrado_por
+        : session?.user?.id || null;
+
+      if (!registradoPorUuid) {
+        throw new Error(
+          'No hay una sesión de usuario válida (UUID) para registrar el cargo en Supabase.'
+        );
+      }
+
+      registradoPorFinal = registradoPorUuid;
+
+      const { error } = await sb.from('cargos_pendientes').insert({
+        id: nuevoId,
+        medidor_id: cargo.medidor_id,
+        cliente_id: cargo.cliente_id,
+        fecha_trabajo: cargo.fecha_trabajo,
+        descripcion: descripcionLimpia,
+        monto: montoEntero,
+        periodo_facturacion: cargo.periodo_facturacion,
+        estado: 'pendiente',
+        factura_id: null,
+        comprobante_url: cargo.comprobante_url ?? null,
+        registrado_por: registradoPorUuid,
+        fecha_registro: fechaRegistro,
+        motivo_anulacion: null,
+      });
+
+      if (error) {
+        throw new Error(`Error al registrar cargo en Supabase: ${error.message}`);
+      }
+    }
+
+    const nuevo: CargoPendiente = {
+      ...cargo,
+      id: nuevoId,
+      descripcion: descripcionLimpia,
+      monto: montoEntero,
+      estado: 'pendiente',
+      factura_id: null,
+      comprobante_url: cargo.comprobante_url ?? null,
+      registrado_por: registradoPorFinal,
+      fecha_registro: fechaRegistro,
+      motivo_anulacion: null,
+    };
+
+    this.data.cargos_pendientes.push(nuevo);
+    this.saveData(this.data);
+    this.notify();
     return nuevo;
   }
 
@@ -3486,6 +5911,73 @@ class DatabaseEngine {
     return cargo;
   }
 
+  public async actualizarCargoPendienteAsync(
+    cargoId: string,
+    datos: {
+      descripcion?: string;
+      monto?: number;
+      periodo_facturacion?: string;
+      fecha_trabajo?: string;
+    },
+    editadoPor = 'admin',
+    options?: { clientOverride?: any }
+  ): Promise<CargoPendiente> {
+    const cargo = this.data.cargos_pendientes.find((c) => c.id === cargoId);
+    if (!cargo) throw new Error('Cargo no encontrado');
+
+    const medidor = this.data.medidores.find((m) => m.id === cargo.medidor_id);
+    const val = validarEdicionCargo({
+      cargo,
+      nuevoPeriodo: datos.periodo_facturacion,
+      nuevoMonto: datos.monto,
+      facturasExistentesMedidor: this.data.facturas,
+      numeroMedidor: medidor?.numero_medidor,
+    });
+
+    if (!val.permitida) {
+      throw new Error(val.error || 'No se puede editar este cargo');
+    }
+
+    const nuevaDescripcion =
+      datos.descripcion !== undefined ? datos.descripcion.trim() : cargo.descripcion;
+    const nuevoMonto =
+      datos.monto !== undefined ? Math.round(datos.monto) : cargo.monto;
+    const nuevoPeriodo =
+      datos.periodo_facturacion !== undefined
+        ? datos.periodo_facturacion
+        : cargo.periodo_facturacion;
+    const nuevaFechaTrabajo =
+      datos.fecha_trabajo !== undefined ? datos.fecha_trabajo : cargo.fecha_trabajo;
+
+    const sb = options?.clientOverride ?? (isSupabaseConfigured ? supabase : null);
+    if (sb) {
+      const { error } = await sb
+        .from('cargos_pendientes')
+        .update({
+          descripcion: nuevaDescripcion,
+          monto: nuevoMonto,
+          periodo_facturacion: nuevoPeriodo,
+          fecha_trabajo: nuevaFechaTrabajo,
+        })
+        .eq('id', cargoId);
+
+      if (error) {
+        throw new Error(`Error al actualizar cargo en Supabase: ${error.message}`);
+      }
+    }
+
+    cargo.descripcion = nuevaDescripcion;
+    cargo.monto = nuevoMonto;
+    cargo.periodo_facturacion = nuevoPeriodo;
+    cargo.fecha_trabajo = nuevaFechaTrabajo;
+    cargo.editado_por = editadoPor;
+    cargo.fecha_edicion = new Date().toISOString();
+
+    this.saveData(this.data);
+    this.notify();
+    return cargo;
+  }
+
   public anularCargo(cargoId: string, motivo: string, anuladoPor = 'admin'): CargoPendiente {
     const cargo = this.data.cargos_pendientes.find((c) => c.id === cargoId);
     if (!cargo) throw new Error('Cargo no encontrado');
@@ -3498,6 +5990,44 @@ class DatabaseEngine {
     cargo.estado = 'anulado';
     cargo.motivo_anulacion = `${motivo.trim()} (Anulado por: ${anuladoPor} el ${new Date().toISOString().split('T')[0]})`;
     this.saveData(this.data);
+    return cargo;
+  }
+
+  public async anularCargoPendienteAsync(
+    cargoId: string,
+    motivo: string,
+    anuladoPor = 'admin',
+    options?: { clientOverride?: any }
+  ): Promise<CargoPendiente> {
+    const cargo = this.data.cargos_pendientes.find((c) => c.id === cargoId);
+    if (!cargo) throw new Error('Cargo no encontrado');
+
+    const val = validarAnulacionCargo({ cargo, motivo });
+    if (!val.permitida) {
+      throw new Error(val.error || 'No se puede anular este cargo');
+    }
+
+    const motivoFinal = `${motivo.trim()} (Anulado por: ${anuladoPor} el ${new Date().toISOString().split('T')[0]})`;
+
+    const sb = options?.clientOverride ?? (isSupabaseConfigured ? supabase : null);
+    if (sb) {
+      const { error } = await sb
+        .from('cargos_pendientes')
+        .update({
+          estado: 'anulado',
+          motivo_anulacion: motivoFinal,
+        })
+        .eq('id', cargoId);
+
+      if (error) {
+        throw new Error(`Error al anular cargo en Supabase: ${error.message}`);
+      }
+    }
+
+    cargo.estado = 'anulado';
+    cargo.motivo_anulacion = motivoFinal;
+    this.saveData(this.data);
+    this.notify();
     return cargo;
   }
 
@@ -3614,6 +6144,7 @@ class DatabaseEngine {
       medidorDireccion: string;
       clienteNombre: string;
       clienteDoc: string;
+      registradoPorNombre: string;
     })[];
     total: number;
     page: number;
@@ -3685,6 +6216,7 @@ class DatabaseEngine {
         medidorDireccion: med?.direccion || '',
         clienteNombre: cli?.nombre_completo || 'Cliente',
         clienteDoc: cli?.documento || '',
+        registradoPorNombre: this.usuariosMap.get(c.registrado_por) || c.registrado_por,
       };
     });
 
@@ -3749,9 +6281,9 @@ class DatabaseEngine {
     const pagosMes = this.data.pagos.filter((p) => p.fecha_pago.startsWith(periodoActual));
     const totalRecaudadoMes = pagosMes.reduce((acc, p) => acc + p.monto, 0);
 
-    // Deuda total impaga acumulada
+    // Deuda total impaga acumulada (excluye pagadas, anuladas y refinanciadas/consolidadas)
     const facturasImpagas = this.data.facturas.filter(
-      (f) => f.estado !== 'pagada' && f.estado !== 'anulada'
+      (f) => f.estado !== 'pagada' && f.estado !== 'anulada' && f.estado !== 'refinanciada'
     );
     const totalDeudaAcumulada = facturasImpagas.reduce(
       (acc, f) => acc + (f.saldo_pendiente ?? f.saldo ?? f.total),
@@ -3764,7 +6296,7 @@ class DatabaseEngine {
     );
     const totalFacturadoMes = facturasMes.reduce((acc, f) => acc + f.total, 0);
     const facturasPendientesMes = facturasMes.filter(
-      (f) => f.estado !== 'pagada' && f.estado !== 'anulada'
+      (f) => f.estado !== 'pagada' && f.estado !== 'anulada' && f.estado !== 'refinanciada'
     ).length;
 
     // Cargos pendientes de facturar este mes
@@ -3808,7 +6340,11 @@ class DatabaseEngine {
     return pendientes.map((m) => {
       const cli = clientesMap.get(m.cliente_id);
       const facturasVencidas = this.data.facturas.filter(
-        (f) => f.medidor_id === m.id && f.estado !== 'pagada' && f.estado !== 'anulada'
+        (f) =>
+          f.medidor_id === m.id &&
+          f.estado !== 'pagada' &&
+          f.estado !== 'anulada' &&
+          f.estado !== 'refinanciada'
       );
       const totalDeuda = facturasVencidas.reduce(
         (a, f) => a + (f.saldo_pendiente ?? f.saldo ?? f.total),
@@ -3833,9 +6369,16 @@ class DatabaseEngine {
     return cortados.map((m) => {
       const cli = clientesMap.get(m.cliente_id);
       const facturasImpagas = this.data.facturas.filter(
-        (f) => f.medidor_id === m.id && f.estado !== 'pagada' && f.estado !== 'anulada'
+        (f) =>
+          f.medidor_id === m.id &&
+          f.estado !== 'pagada' &&
+          f.estado !== 'anulada' &&
+          f.estado !== 'refinanciada'
       );
-      const liq = liquidarReconexion(m, facturasImpagas, tarifa);
+      const cargosPendientes = this.data.cargos_pendientes.filter(
+        (c) => c.medidor_id === m.id && c.estado === 'pendiente'
+      );
+      const liq = liquidarReconexion(m, facturasImpagas, tarifa, cargosPendientes);
       return {
         ...m,
         clienteNombre: cli ? cli.nombre_completo : '',
@@ -3917,19 +6460,19 @@ class DatabaseEngine {
       const cli = clientesMap.get(f.cliente_id);
       const med = medidoresMap.get(f.medidor_id);
       const saldoPend =
-        f.saldo_pendiente !== undefined && f.saldo_pendiente !== null
-          ? f.saldo_pendiente
-          : f.saldo !== undefined && f.saldo !== null
-            ? f.saldo
-            : f.estado === 'pagada' || f.estado === 'anulada'
-              ? 0
+        f.estado === 'pagada' || f.estado === 'anulada' || f.estado === 'refinanciada'
+          ? 0
+          : f.saldo_pendiente !== undefined && f.saldo_pendiente !== null
+            ? f.saldo_pendiente
+            : f.saldo !== undefined && f.saldo !== null
+              ? f.saldo
               : f.total;
       const montoPagado =
         f.monto_pagado !== undefined && f.monto_pagado !== null
           ? f.monto_pagado
           : f.estado === 'pagada'
             ? f.total
-            : f.estado === 'anulada'
+            : f.estado === 'anulada' || f.estado === 'refinanciada'
               ? 0
               : Math.max(0, f.total - saldoPend);
 

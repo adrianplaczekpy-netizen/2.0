@@ -3,11 +3,12 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import { useAuth } from '../context/AuthContext';
 import { db } from '../services/database';
+import { isSupabaseConfigured } from '../services/supabaseClient';
 import { formatGs } from '../services/billingRules';
-import { Factura, MetodoPago, Medidor, Cliente } from '../types';
+import { Factura, MetodoPago } from '../types';
 import { generarBoletaPDF } from '../services/pdfService';
 import {
   CreditCard,
@@ -36,7 +37,17 @@ export const CajaCobranzasView: React.FC = () => {
   const [modalCobroFactura, setModalCobroFactura] = useState<Factura | null>(null);
   const [modalReconexionOpen, setModalReconexionOpen] = useState(false);
   const [montoACobrarInput, setMontoACobrarInput] = useState<string>('');
+  const [imprimirReciboAlConfirmar, setImprimirReciboAlConfirmar] = useState(false);
+  const [guardandoCobro, setGuardandoCobro] = useState(false);
+  const [procesandoReconexion, setProcesandoReconexion] = useState(false);
   const [errorCobro, setErrorCobro] = useState<string | null>(null);
+  const [toast, setToast] = useState<{ type: 'success' | 'error'; message: string } | null>(null);
+
+  useEffect(() => {
+    if (!toast) return;
+    const timer = setTimeout(() => setToast(null), 5000);
+    return () => clearTimeout(timer);
+  }, [toast]);
 
   const [comprobantePago, setComprobantePago] = useState<{
     recibo: string;
@@ -53,6 +64,11 @@ export const CajaCobranzasView: React.FC = () => {
 
   const [mensajeExito, setMensajeExito] = useState<string | null>(null);
 
+  const obtenerSaldoFactura = (factura: Factura): number =>
+    factura.estado === 'pagada' || factura.estado === 'anulada' || factura.estado === 'refinanciada'
+      ? 0
+      : factura.saldo_pendiente ?? (factura.saldo !== undefined ? factura.saldo : factura.total);
+
   // Buscar medidores / clientes
   const medidoresRes = db.getMedidores({ search: searchTerm, limit: 15 });
   const medidorActual = selectedMedidorId
@@ -62,17 +78,26 @@ export const CajaCobranzasView: React.FC = () => {
     : null;
 
   const abrirModalCobro = (factura: Factura) => {
-    const saldo = factura.saldo !== undefined ? factura.saldo : factura.total;
+    const saldo = obtenerSaldoFactura(factura);
     setModalCobroFactura(factura);
     setMontoACobrarInput(String(saldo));
+    setImprimirReciboAlConfirmar(false);
     setErrorCobro(null);
   };
 
-  const handleConfirmarCobro = () => {
-    if (!modalCobroFactura || !medidorActual?.medidor || !medidorActual?.cliente) return;
+  const handleConfirmarCobro = async () => {
+    if (
+      guardandoCobro ||
+      !modalCobroFactura ||
+      !medidorActual?.medidor ||
+      !medidorActual?.cliente
+    ) {
+      return;
+    }
 
+    setErrorCobro(null);
     const montoNum = parseInt(montoACobrarInput.replace(/\D/g, ''), 10);
-    const saldo = modalCobroFactura.saldo !== undefined ? modalCobroFactura.saldo : modalCobroFactura.total;
+    const saldo = obtenerSaldoFactura(modalCobroFactura);
 
     if (isNaN(montoNum) || montoNum <= 0) {
       setErrorCobro('El monto a cobrar debe ser mayor a 0 Gs.');
@@ -80,16 +105,25 @@ export const CajaCobranzasView: React.FC = () => {
     }
 
     if (montoNum > saldo) {
-      setErrorCobro(`El monto (${formatGs(montoNum)}) no puede superar el saldo pendiente (${formatGs(saldo)}).`);
+      setErrorCobro(
+        `El monto (${formatGs(montoNum)}) no puede superar el saldo pendiente (${formatGs(saldo)}).`
+      );
       return;
     }
 
+    const debeImprimir = imprimirReciboAlConfirmar;
+    const medidorIdActual = medidorActual.medidor.id;
+    const medidorNumActual = medidorActual.medidor.numero_medidor;
+    const clienteNombreActual = medidorActual.cliente.nombre_completo;
+
+    setGuardandoCobro(true);
     try {
-      const res = db.registrarCobro({
+      const res = await db.registrarCobroAsync({
         facturaId: modalCobroFactura.id,
         monto: montoNum,
         metodoPago,
-        cobradorId: user?.id || 'Cobrador de Caja',
+        cobradorId: user?.id,
+        cobradorNombre: user?.nombre || user?.email || 'Cobrador de Caja',
       });
 
       setComprobantePago({
@@ -97,8 +131,8 @@ export const CajaCobranzasView: React.FC = () => {
         monto: res.pago.monto,
         metodo: metodoPago,
         facturaId: modalCobroFactura.id,
-        medidorNum: medidorActual.medidor.numero_medidor,
-        clienteNombre: medidorActual.cliente.nombre_completo,
+        medidorNum: medidorNumActual,
+        clienteNombre: clienteNombreActual,
         saldoRestante: res.saldoRestante,
         medidorPasoAActivo: res.medidorPasoAActivo,
         salioDePendienteCorte: res.salioDePendienteCorte,
@@ -106,17 +140,35 @@ export const CajaCobranzasView: React.FC = () => {
       });
 
       const esPagoTotal = res.saldoRestante === 0;
-      let msg = `Cobro de ${formatGs(montoNum)} registrado con éxito (${esPagoTotal ? 'Pago Total' : `Pago Parcial - Saldo restante: ${formatGs(res.saldoRestante)}`}).`;
+      const toastMsg = esPagoTotal
+        ? `Factura pagada completamente (${formatGs(montoNum)}).`
+        : `Cobro registrado (${formatGs(montoNum)}). Saldo restante: ${formatGs(res.saldoRestante)}.`;
+
+      let msg = `Cobro de ${formatGs(montoNum)} registrado con éxito (${esPagoTotal ? 'Factura pagada completamente' : `Pago Parcial - Saldo restante: ${formatGs(res.saldoRestante)}`}).`;
       if (res.medidorPasoAActivo) {
-        msg += ` ¡Todas las facturas están saldadas! El Medidor N° ${medidorActual.medidor.numero_medidor} pasa a estado ACTIVO automáticamente.`;
+        msg += ` ¡Todas las facturas están saldadas! El Medidor N° ${medidorNumActual} pasa a estado ACTIVO automáticamente.`;
       } else if (res.salioDePendienteCorte) {
-        msg += ` Se abonó la 3ra boleta que originó el aviso de corte. El Medidor N° ${medidorActual.medidor.numero_medidor} deja de estar en pendiente de corte (estado actualizado a ${res.estadoMedidorActualizado.toUpperCase()}).`;
+        msg += ` Se abonó la 3ra boleta que originó el aviso de corte. El Medidor N° ${medidorNumActual} deja de estar en pendiente de corte (estado actualizado a ${res.estadoMedidorActualizado.toUpperCase()}).`;
       }
 
-      setMensajeExito(msg);
       setModalCobroFactura(null);
+      setMensajeExito(msg);
+      setToast({ type: 'success', message: toastMsg });
+      setSelectedMedidorId(medidorIdActual);
+
+      if (isSupabaseConfigured) {
+        await db.loadFromSupabase({ force: true });
+      }
+
+      if (debeImprimir && typeof window !== 'undefined' && typeof window.print === 'function') {
+        setTimeout(() => window.print(), 150);
+      }
     } catch (e: any) {
-      setErrorCobro(e.message);
+      const errMsg = e?.message || 'Error al registrar el cobro en Supabase.';
+      setErrorCobro(errMsg);
+      setToast({ type: 'error', message: errMsg });
+    } finally {
+      setGuardandoCobro(false);
     }
   };
 
@@ -131,31 +183,93 @@ export const CajaCobranzasView: React.FC = () => {
     doc.save(`Boleta_${factura.periodo_facturado}_Med_${medidorActual.medidor.numero_medidor}.pdf`);
   };
 
-  const handleCobrarReconexion = () => {
-    if (!medidorActual || !medidorActual.medidor || !medidorActual.cliente || !medidorActual.liquidacionReconexion) return;
+  const handleCobrarReconexion = async () => {
+    if (
+      procesandoReconexion ||
+      !medidorActual ||
+      !medidorActual.medidor ||
+      !medidorActual.cliente ||
+      !medidorActual.liquidacionReconexion
+    ) {
+      return;
+    }
+
+    const medidorIdActual = medidorActual.medidor.id;
+    const medidorNumActual = medidorActual.medidor.numero_medidor;
+    const clienteNombreActual = medidorActual.cliente.nombre_completo;
+
+    setErrorCobro(null);
+    setProcesandoReconexion(true);
     try {
-      const { facturaRegularizacion } = db.confirmarReconexion(medidorActual.medidor.id, 'Caja Central');
+      const { facturaRegularizacion, pago } = await db.confirmarReconexionAsync(
+        medidorIdActual,
+        {
+          cobradorId: user?.id || 'Caja Central',
+          metodoPago,
+          operario: user?.nombre || user?.email || 'Caja Central',
+        }
+      );
+
+      if (isSupabaseConfigured) {
+        await db.loadFromSupabase({ force: true });
+      }
+
       setComprobantePago({
-        recibo: `REC-REG-${Date.now().toString().slice(-5)}`,
+        recibo: pago.numero_recibo || `REC-REG-${Date.now().toString().slice(-5)}`,
         monto: facturaRegularizacion.total,
-        metodo: 'Efectivo / Caja',
+        metodo: metodoPago,
         facturaId: facturaRegularizacion.id,
-        medidorNum: medidorActual.medidor.numero_medidor,
-        clienteNombre: medidorActual.cliente.nombre_completo,
+        medidorNum: medidorNumActual,
+        clienteNombre: clienteNombreActual,
         saldoRestante: 0,
         medidorPasoAActivo: true,
       });
-      setMensajeExito(
-        `Medidor N° ${medidorActual.medidor.numero_medidor} regularizado y reconectado exitosamente. Pasa a estado ACTIVO. Total cobrado: ${formatGs(facturaRegularizacion.total)}.`
-      );
-      setSelectedMedidorId(medidorActual.medidor.id);
+
+      const msg = `Medidor N° ${medidorNumActual} regularizado y reconectado exitosamente. Pasa a estado ACTIVO. Total cobrado: ${formatGs(facturaRegularizacion.total)}.`;
+      setMensajeExito(msg);
+      setToast({
+        type: 'success',
+        message: `Factura de regularización pagada completamente (${formatGs(facturaRegularizacion.total)}).`,
+      });
+      setSelectedMedidorId(medidorIdActual);
     } catch (e: any) {
-      alert(`Error en reconexión: ${e.message}`);
+      const errMsg = `Error en reconexión: ${e?.message || 'Error inesperado'}`;
+      setErrorCobro(errMsg);
+      setToast({ type: 'error', message: errMsg });
+    } finally {
+      setProcesandoReconexion(false);
     }
   };
 
   return (
     <div className="space-y-6">
+      {/* Toast flotante */}
+      {toast && (
+        <div
+          role={toast.type === 'error' ? 'alert' : 'status'}
+          className={`fixed bottom-5 right-5 z-50 max-w-sm px-4 py-3 rounded-xl shadow-lg border text-xs font-semibold flex items-center gap-2.5 ${
+            toast.type === 'error'
+              ? 'bg-red-950 text-red-50 border-red-700'
+              : 'bg-stone-900 text-white border-stone-700'
+          }`}
+        >
+          {toast.type === 'error' ? (
+            <AlertTriangle className="w-4 h-4 text-red-400 shrink-0" />
+          ) : (
+            <CheckCircle2 className="w-4 h-4 text-emerald-400 shrink-0" />
+          )}
+          <span className="flex-1">{toast.message}</span>
+          <button
+            type="button"
+            onClick={() => setToast(null)}
+            className="opacity-70 hover:opacity-100 cursor-pointer"
+            aria-label="Cerrar notificación"
+          >
+            <X className="w-3.5 h-3.5" />
+          </button>
+        </div>
+      )}
+
       {/* Header */}
       <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2 border-b border-stone-200 pb-4">
         <div>
@@ -223,6 +337,25 @@ export const CajaCobranzasView: React.FC = () => {
             type="button"
             onClick={() => setMensajeExito(null)}
             className="text-xs text-emerald-800 hover:underline cursor-pointer ml-3 shrink-0"
+          >
+            Cerrar
+          </button>
+        </div>
+      )}
+
+      {!modalCobroFactura && errorCobro && (
+        <div
+          role="alert"
+          className="p-4 bg-red-50 border border-red-300 rounded-xl text-red-900 text-sm font-semibold flex items-center justify-between"
+        >
+          <div className="flex items-center gap-2">
+            <AlertTriangle className="w-5 h-5 text-red-600 shrink-0" />
+            <span>{errorCobro}</span>
+          </div>
+          <button
+            type="button"
+            onClick={() => setErrorCobro(null)}
+            className="text-xs text-red-800 hover:underline cursor-pointer ml-3 shrink-0"
           >
             Cerrar
           </button>
@@ -355,7 +488,11 @@ export const CajaCobranzasView: React.FC = () => {
               <div className="flex justify-between text-xs text-stone-600">
                 <span>Boletas pendientes:</span>
                 <span className="font-bold text-stone-900">
-                  {medidorActual.facturas.filter((f) => f.estado !== 'pagada').length}
+                  {
+                    medidorActual.facturas.filter(
+                      (f) => f.estado !== 'pagada' && f.estado !== 'anulada' && f.estado !== 'refinanciada'
+                    ).length
+                  }
                 </span>
               </div>
 
@@ -388,11 +525,12 @@ export const CajaCobranzasView: React.FC = () => {
                 </div>
                 <button
                   type="button"
+                  disabled={procesandoReconexion || guardandoCobro}
                   onClick={() => setModalReconexionOpen(true)}
-                  className="w-full py-2 bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-bold rounded-lg shadow-xs cursor-pointer transition-colors flex items-center justify-center gap-1.5"
+                  className="w-full py-2 bg-emerald-600 hover:bg-emerald-700 disabled:opacity-40 disabled:cursor-not-allowed text-white text-xs font-bold rounded-lg shadow-xs cursor-pointer transition-colors flex items-center justify-center gap-1.5"
                 >
                   <CheckCircle2 className="w-3.5 h-3.5" />
-                  <span>Registrar reconexión</span>
+                  <span>{procesandoReconexion ? 'Procesando...' : 'Registrar reconexión'}</span>
                 </button>
               </div>
             )}
@@ -427,7 +565,7 @@ export const CajaCobranzasView: React.FC = () => {
               ) : (
                 <div className="divide-y divide-stone-100">
                   {medidorActual.facturas.map((f) => {
-                    const saldo = f.saldo !== undefined ? f.saldo : (f.estado === 'pagada' ? 0 : f.total);
+                    const saldo = obtenerSaldoFactura(f);
                     const montoPagado = f.monto_pagado || (f.estado === 'pagada' ? f.total : 0);
                     const esParcial = saldo > 0 && montoPagado > 0;
 
@@ -442,16 +580,24 @@ export const CajaCobranzasView: React.FC = () => {
                               className={`text-[10px] px-2 py-0.5 rounded-full font-bold uppercase ${
                                 f.estado === 'pagada'
                                   ? 'bg-emerald-100 text-emerald-800'
-                                  : esParcial
-                                  ? 'bg-amber-100 text-amber-800'
-                                  : f.estado === 'vencida'
-                                  ? 'bg-red-100 text-red-800'
-                                  : 'bg-stone-100 text-stone-800'
+                                  : f.estado === 'refinanciada'
+                                    ? 'bg-indigo-100 text-indigo-800'
+                                    : esParcial
+                                      ? 'bg-amber-100 text-amber-800'
+                                      : f.estado === 'vencida'
+                                        ? 'bg-red-100 text-red-800'
+                                        : 'bg-stone-100 text-stone-800'
                               }`}
                             >
-                              {f.estado === 'pagada' ? 'PAGADA' : esParcial ? 'PAGO PARCIAL' : f.estado}
+                              {f.estado === 'pagada'
+                                ? 'PAGADA'
+                                : f.estado === 'refinanciada'
+                                  ? 'REFINANCIADA'
+                                  : esParcial
+                                    ? 'PAGO PARCIAL'
+                                    : f.estado}
                             </span>
-                            {f.es_tercera_boleta && (
+                            {f.es_tercera_boleta && f.estado !== 'refinanciada' && (
                               <span className="text-[10px] px-2 py-0.5 rounded-sm bg-red-600 text-white font-bold">
                                 3ra Boleta (Corte día 11)
                               </span>
@@ -468,6 +614,11 @@ export const CajaCobranzasView: React.FC = () => {
                             <span className="font-semibold text-stone-700">Vencimiento: {f.fecha_vencimiento}</span>
                             {f.consumo_m3 !== undefined && <span>Consumo: {f.consumo_m3} m³</span>}
                           </div>
+                          {f.estado === 'refinanciada' && f.motivo && (
+                            <div className="text-[11px] font-semibold text-indigo-700">
+                              {f.motivo}
+                            </div>
+                          )}
                         </div>
 
                         <div className="flex items-center gap-4">
@@ -476,7 +627,18 @@ export const CajaCobranzasView: React.FC = () => {
                               Total: <span className="font-bold text-stone-800">{formatGs(f.total)}</span>
                             </div>
                             <div className="text-sm font-black text-stone-900">
-                              Saldo: <span className={saldo > 0 ? 'text-red-700' : 'text-emerald-700'}>{formatGs(saldo)}</span>
+                              Saldo:{' '}
+                              <span
+                                className={
+                                  f.estado === 'refinanciada' || f.estado === 'anulada'
+                                    ? 'text-stone-500'
+                                    : saldo > 0
+                                      ? 'text-red-700'
+                                      : 'text-emerald-700'
+                                }
+                              >
+                                {formatGs(saldo)}
+                              </span>
                             </div>
                             {f.estado === 'pagada' && f.fecha_pago && (
                               <div className="text-[10px] text-emerald-600 font-medium">
@@ -497,11 +659,12 @@ export const CajaCobranzasView: React.FC = () => {
                             </button>
 
                             {/* Botón Cobrar en Caja (Total o Parcial) */}
-                            {f.estado !== 'pagada' && (
+                            {f.estado !== 'pagada' && f.estado !== 'anulada' && f.estado !== 'refinanciada' && (
                               <button
                                 type="button"
+                                disabled={guardandoCobro || procesandoReconexion}
                                 onClick={() => abrirModalCobro(f)}
-                                className="px-3.5 py-2 bg-emerald-600 hover:bg-emerald-700 active:bg-emerald-800 text-white font-bold text-xs rounded-lg shadow-xs flex items-center gap-1 cursor-pointer transition-colors"
+                                className="px-3.5 py-2 bg-emerald-600 hover:bg-emerald-700 active:bg-emerald-800 disabled:opacity-40 disabled:cursor-not-allowed text-white font-bold text-xs rounded-lg shadow-xs flex items-center gap-1 cursor-pointer transition-colors"
                               >
                                 <DollarSign className="w-4 h-4" />
                                 <span>Cobrar</span>
@@ -525,7 +688,11 @@ export const CajaCobranzasView: React.FC = () => {
 
       {/* Modal de Registro de Cobro (Total o Parcial) */}
       {modalCobroFactura && (
-        <div className="fixed inset-0 z-50 bg-stone-900/60 backdrop-blur-xs flex items-center justify-center p-4">
+        <div
+          role="dialog"
+          aria-modal="true"
+          className="fixed inset-0 z-50 bg-stone-900/60 backdrop-blur-xs flex items-center justify-center p-4"
+        >
           <div className="bg-white rounded-2xl max-w-md w-full border border-stone-200 shadow-xl overflow-hidden">
             <div className="p-4 bg-stone-900 text-white flex items-center justify-between">
               <div>
@@ -536,8 +703,10 @@ export const CajaCobranzasView: React.FC = () => {
               </div>
               <button
                 type="button"
+                disabled={guardandoCobro}
                 onClick={() => setModalCobroFactura(null)}
-                className="text-stone-400 hover:text-white p-1 rounded-lg cursor-pointer"
+                className="text-stone-400 hover:text-white disabled:opacity-40 p-1 rounded-lg cursor-pointer"
+                aria-label="Cerrar modal"
               >
                 <X className="w-5 h-5" />
               </button>
@@ -545,8 +714,12 @@ export const CajaCobranzasView: React.FC = () => {
 
             <div className="p-6 space-y-4 text-xs text-stone-800">
               {errorCobro && (
-                <div className="p-3 bg-red-50 border border-red-200 text-red-700 rounded-xl font-medium">
-                  {errorCobro}
+                <div
+                  role="alert"
+                  className="p-3 bg-red-50 border border-red-300 text-red-800 rounded-xl font-semibold flex items-start gap-2"
+                >
+                  <AlertTriangle className="w-4 h-4 text-red-600 shrink-0 mt-0.5" />
+                  <span>{errorCobro}</span>
                 </div>
               )}
 
@@ -565,7 +738,7 @@ export const CajaCobranzasView: React.FC = () => {
                 <div className="flex justify-between pt-1 border-t border-stone-200 text-sm font-black">
                   <span>Saldo adeudado:</span>
                   <span className="text-red-700">
-                    {formatGs(modalCobroFactura.saldo !== undefined ? modalCobroFactura.saldo : modalCobroFactura.total)}
+                    {formatGs(obtenerSaldoFactura(modalCobroFactura))}
                   </span>
                 </div>
               </div>
@@ -578,30 +751,33 @@ export const CajaCobranzasView: React.FC = () => {
                 <div className="flex gap-2 mb-2">
                   <button
                     type="button"
+                    disabled={guardandoCobro}
                     onClick={() => {
-                      const saldo = modalCobroFactura.saldo !== undefined ? modalCobroFactura.saldo : modalCobroFactura.total;
+                      const saldo = obtenerSaldoFactura(modalCobroFactura);
                       setMontoACobrarInput(String(saldo));
                     }}
-                    className="flex-1 py-1.5 bg-emerald-100 hover:bg-emerald-200 text-emerald-900 text-xs font-bold rounded-lg border border-emerald-300 cursor-pointer"
+                    className="flex-1 py-1.5 bg-emerald-100 hover:bg-emerald-200 disabled:opacity-40 text-emerald-900 text-xs font-bold rounded-lg border border-emerald-300 cursor-pointer"
                   >
                     Pago Total
                   </button>
                   <button
                     type="button"
+                    disabled={guardandoCobro}
                     onClick={() => {
-                      const saldo = modalCobroFactura.saldo !== undefined ? modalCobroFactura.saldo : modalCobroFactura.total;
+                      const saldo = obtenerSaldoFactura(modalCobroFactura);
                       setMontoACobrarInput(String(Math.round(saldo / 2)));
                     }}
-                    className="flex-1 py-1.5 bg-stone-100 hover:bg-stone-200 text-stone-800 text-xs font-semibold rounded-lg border border-stone-300 cursor-pointer"
+                    className="flex-1 py-1.5 bg-stone-100 hover:bg-stone-200 disabled:opacity-40 text-stone-800 text-xs font-semibold rounded-lg border border-stone-300 cursor-pointer"
                   >
                     50% Parcial
                   </button>
                 </div>
                 <input
                   type="number"
+                  disabled={guardandoCobro}
                   value={montoACobrarInput}
                   onChange={(e) => setMontoACobrarInput(e.target.value)}
-                  className="w-full px-3 py-2.5 bg-stone-50 border border-stone-300 rounded-lg text-base font-bold text-stone-900 focus:bg-white focus:border-blue-600 focus:outline-hidden"
+                  className="w-full px-3 py-2.5 bg-stone-50 border border-stone-300 rounded-lg text-base font-bold text-stone-900 focus:bg-white focus:border-blue-600 focus:outline-hidden disabled:opacity-60"
                   placeholder="Ingrese monto a cobrar..."
                 />
               </div>
@@ -612,32 +788,47 @@ export const CajaCobranzasView: React.FC = () => {
                   Forma de Cobro:
                 </label>
                 <select
+                  disabled={guardandoCobro}
                   value={metodoPago}
                   onChange={(e) => setMetodoPago(e.target.value as MetodoPago)}
-                  className="w-full p-2.5 bg-stone-50 border border-stone-300 rounded-lg font-bold text-stone-900 focus:bg-white"
+                  className="w-full p-2.5 bg-stone-50 border border-stone-300 rounded-lg font-bold text-stone-900 focus:bg-white disabled:opacity-60"
                 >
                   <option value="efectivo">Efectivo en Ventanilla</option>
                   <option value="transferencia">Transferencia Bancaria (SIPAP)</option>
                   <option value="cheque">Cheque al Día</option>
                 </select>
               </div>
+
+              {/* Opción de imprimir recibo al confirmar */}
+              <label className="flex items-center gap-2 pt-1 text-xs font-medium text-stone-700 cursor-pointer select-none">
+                <input
+                  type="checkbox"
+                  disabled={guardandoCobro}
+                  checked={imprimirReciboAlConfirmar}
+                  onChange={(e) => setImprimirReciboAlConfirmar(e.target.checked)}
+                  className="w-4 h-4 rounded-sm border-stone-300 text-emerald-600 focus:ring-emerald-500"
+                />
+                <span>Imprimir recibo automáticamente al confirmar</span>
+              </label>
             </div>
 
             <div className="p-4 bg-stone-50 border-t border-stone-200 flex justify-end gap-2">
               <button
                 type="button"
+                disabled={guardandoCobro}
                 onClick={() => setModalCobroFactura(null)}
-                className="px-4 py-2 bg-stone-200 hover:bg-stone-300 text-stone-800 text-xs font-bold rounded-lg cursor-pointer"
+                className="px-4 py-2 bg-stone-200 hover:bg-stone-300 disabled:opacity-40 disabled:cursor-not-allowed text-stone-800 text-xs font-bold rounded-lg cursor-pointer"
               >
                 Cancelar
               </button>
               <button
                 type="button"
+                disabled={guardandoCobro}
                 onClick={handleConfirmarCobro}
-                className="px-5 py-2 bg-emerald-600 hover:bg-emerald-700 active:bg-emerald-800 text-white text-xs font-bold rounded-lg shadow-xs flex items-center gap-1.5 cursor-pointer"
+                className="px-5 py-2 bg-emerald-600 hover:bg-emerald-700 active:bg-emerald-800 disabled:opacity-40 disabled:cursor-not-allowed text-white text-xs font-bold rounded-lg shadow-xs flex items-center gap-1.5 cursor-pointer"
               >
                 <DollarSign className="w-4 h-4" />
-                <span>Confirmar Cobro</span>
+                <span>{guardandoCobro ? 'Procesando cobro...' : 'Confirmar Cobro'}</span>
               </button>
             </div>
           </div>
@@ -649,10 +840,16 @@ export const CajaCobranzasView: React.FC = () => {
           medidorId={medidorActual.medidor.id}
           isOpen={modalReconexionOpen}
           onClose={() => setModalReconexionOpen(false)}
-          onSuccess={(res) => {
-            setMensajeExito(
-              `Medidor N° ${res.medidor.numero_medidor} regularizado y reconectado exitosamente. Pasa a estado ACTIVO.`
-            );
+          onSuccess={async (res) => {
+            if (isSupabaseConfigured) {
+              await db.loadFromSupabase({ force: true });
+            }
+            const msg = `Medidor N° ${res.medidor.numero_medidor} regularizado y reconectado exitosamente. Pasa a estado ACTIVO.`;
+            setMensajeExito(msg);
+            setToast({
+              type: 'success',
+              message: `Reconexión registrada (${formatGs(res.facturaRegularizacion.total)}).`,
+            });
             setModalReconexionOpen(false);
             setSelectedMedidorId(res.medidor.id);
           }}

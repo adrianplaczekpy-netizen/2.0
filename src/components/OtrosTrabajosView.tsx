@@ -3,8 +3,10 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import React, { useState, useMemo } from 'react';
+import React, { useState, useMemo, useEffect } from 'react';
 import { db } from '../services/database';
+import { isSupabaseConfigured } from '../services/supabaseClient';
+import { useAuth } from '../context/AuthContext';
 import { formatGs } from '../services/billingRules';
 import { CargoPendiente, EstadoCargo } from '../types';
 import { exportarCargosCSV } from '../utils/exportCsv';
@@ -30,33 +32,47 @@ import {
   AlertTriangle,
 } from 'lucide-react';
 
+type CargoEnriquecido = CargoPendiente & {
+  numeroMedidor: number;
+  medidorDireccion: string;
+  clienteNombre: string;
+  clienteDoc: string;
+  registradoPorNombre: string;
+};
+
 export const OtrosTrabajosView: React.FC = () => {
+  const { user } = useAuth();
+  const periodoActualDefault = useMemo(() => new Date().toISOString().slice(0, 7), []);
+
   // Paginación y filtros en servidor (máximo 50 por página)
   const [currentPage, setCurrentPage] = useState<number>(1);
   const [filtroEstado, setFiltroEstado] = useState<EstadoCargo | 'todos'>('todos');
   const [filtroPeriodo, setFiltroPeriodo] = useState<string>('todos');
   const [busqueda, setBusqueda] = useState<string>('');
   const [mensaje, setMensaje] = useState<string | null>(null);
+  const [errorBanner, setErrorBanner] = useState<string | null>(null);
+  const [toast, setToast] = useState<{ type: 'success' | 'error'; message: string } | null>(null);
+
+  useEffect(() => {
+    if (!toast) return;
+    const timer = setTimeout(() => setToast(null), 4500);
+    return () => clearTimeout(timer);
+  }, [toast]);
 
   // Modales
   const [showModalCrear, setShowModalCrear] = useState(false);
-  const [cargoParaEditar, setCargoParaEditar] = useState<
-    (CargoPendiente & { numeroMedidor: number; clienteNombre: string; medidorDireccion: string }) | null
-  >(null);
-  const [cargoParaAnular, setCargoParaAnular] = useState<
-    (CargoPendiente & { numeroMedidor: number; clienteNombre: string }) | null
-  >(null);
-  const [cargoParaAuditoria, setCargoParaAuditoria] = useState<
-    (CargoPendiente & { numeroMedidor: number; clienteNombre: string; medidorDireccion: string }) | null
-  >(null);
+  const [cargoParaEditar, setCargoParaEditar] = useState<CargoEnriquecido | null>(null);
+  const [cargoParaAnular, setCargoParaAnular] = useState<CargoEnriquecido | null>(null);
+  const [cargoParaAuditoria, setCargoParaAuditoria] = useState<CargoEnriquecido | null>(null);
 
   // Formulario Crear Cargo
   const [crearNumMedidor, setCrearNumMedidor] = useState('');
   const [crearDescripcion, setCrearDescripcion] = useState('');
   const [crearMonto, setCrearMonto] = useState('');
-  const [crearPeriodo, setCrearPeriodo] = useState('2025-04');
+  const [crearPeriodo, setCrearPeriodo] = useState(periodoActualDefault);
   const [crearFechaTrabajo, setCrearFechaTrabajo] = useState(new Date().toISOString().split('T')[0]);
   const [errorCrear, setErrorCrear] = useState<string | null>(null);
+  const [guardandoCrear, setGuardandoCrear] = useState(false);
 
   // Formulario Editar Cargo
   const [editDescripcion, setEditDescripcion] = useState('');
@@ -64,16 +80,18 @@ export const OtrosTrabajosView: React.FC = () => {
   const [editPeriodo, setEditPeriodo] = useState('');
   const [editFechaTrabajo, setEditFechaTrabajo] = useState('');
   const [errorEditar, setErrorEditar] = useState<string | null>(null);
+  const [guardandoEditar, setGuardandoEditar] = useState(false);
 
   // Formulario Anular Cargo
   const [motivoAnulacion, setMotivoAnulacion] = useState('');
   const [errorAnular, setErrorAnular] = useState<string | null>(null);
+  const [guardandoAnular, setGuardandoAnular] = useState(false);
 
   // Helper de búsqueda reactiva del medidor en el formulario de creación
   const medidorEncontradoCrear = useMemo(() => {
     const num = parseInt(crearNumMedidor, 10);
     if (isNaN(num) || num < 1) return null;
-    const res = db.getMedidores({ search: String(num), limit: 1 });
+    const res = db.getMedidores({ search: String(num), limit: 50 });
     return res.medidores.find((m) => m.numero_medidor === num) || null;
   }, [crearNumMedidor]);
 
@@ -81,7 +99,11 @@ export const OtrosTrabajosView: React.FC = () => {
   const conflictoFacturaCrear = useMemo(() => {
     if (!medidorEncontradoCrear || !crearPeriodo) return null;
     const resFacturas = db.getFacturas({ periodo: crearPeriodo, limit: 50 });
-    return resFacturas.facturas.find((f) => f.medidor_id === medidorEncontradoCrear.id) || null;
+    return (
+      resFacturas.facturas.find(
+        (f) => f.medidor_id === medidorEncontradoCrear.id && f.estado !== 'anulada'
+      ) || null
+    );
   }, [medidorEncontradoCrear, crearPeriodo]);
 
   // Consulta paginada (máx 50 registros por página según principios de rendimiento)
@@ -93,9 +115,35 @@ export const OtrosTrabajosView: React.FC = () => {
     search: busqueda,
   });
 
-  const handleCrearCargo = (e: React.FormEvent) => {
+  // Lista dinámica de períodos disponibles para el filtro
+  const periodosDisponibles = useMemo(() => {
+    const todosLosCargos = db.getCargos({ limit: 50 }).cargos;
+    const set = new Set<string>([periodoActualDefault]);
+    for (const c of todosLosCargos) {
+      if (c.periodo_facturacion) set.add(c.periodo_facturacion);
+    }
+    if (filtroPeriodo !== 'todos') {
+      set.add(filtroPeriodo);
+    }
+    return Array.from(set).sort((a, b) => b.localeCompare(a));
+  }, [cargos, filtroPeriodo, periodoActualDefault]);
+
+  const mostrarExito = (texto: string) => {
+    setErrorBanner(null);
+    setMensaje(texto);
+    setToast({ type: 'success', message: texto });
+  };
+
+  const mostrarError = (texto: string) => {
+    setErrorBanner(texto);
+    setToast({ type: 'error', message: texto });
+  };
+
+  const handleCrearCargo = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (guardandoCrear) return;
     setErrorCrear(null);
+    setErrorBanner(null);
 
     const num = parseInt(crearNumMedidor, 10);
     const m = parseInt(crearMonto, 10);
@@ -122,18 +170,26 @@ export const OtrosTrabajosView: React.FC = () => {
       return;
     }
 
+    setGuardandoCrear(true);
     try {
-      db.agregarCargoPendiente({
+      await db.agregarCargoPendienteAsync({
         medidor_id: medidorEncontradoCrear.id,
         cliente_id: medidorEncontradoCrear.cliente_id,
         fecha_trabajo: crearFechaTrabajo,
         descripcion: crearDescripcion.trim(),
         monto: m,
         periodo_facturacion: crearPeriodo,
-        registrado_por: 'Administración Técnica',
+        registrado_por: user?.id || 'admin',
       });
 
-      setMensaje(
+      if (isSupabaseConfigured) {
+        const resSync = await db.loadFromSupabase({ force: true });
+        if (!resSync.ok && resSync.error) {
+          throw new Error(resSync.error);
+        }
+      }
+
+      mostrarExito(
         `Cargo de ${formatGs(m)} para el Medidor N° ${num} registrado como pendiente para ${crearPeriodo}.`
       );
       setShowModalCrear(false);
@@ -142,24 +198,27 @@ export const OtrosTrabajosView: React.FC = () => {
       setCrearMonto('');
       setErrorCrear(null);
     } catch (err: any) {
-      setErrorCrear(err.message || 'Error al registrar el cargo.');
+      const msg = err?.message || 'Error al registrar el cargo en Supabase.';
+      setErrorCrear(msg);
+      mostrarError(msg);
+    } finally {
+      setGuardandoCrear(false);
     }
   };
 
-  const handleAbrirEditar = (
-    c: CargoPendiente & { numeroMedidor: number; clienteNombre: string; medidorDireccion: string }
-  ) => {
+  const handleAbrirEditar = (c: CargoEnriquecido) => {
     if (c.estado === 'facturado') {
-      alert(
+      mostrarError(
         'Un cargo facturado NO se puede editar ni borrar. Solo el administrador puede anular la factura completa con justificación.'
       );
       return;
     }
     if (c.estado === 'anulado') {
-      alert('No se puede editar un cargo anulado.');
+      mostrarError('No se puede editar un cargo anulado.');
       return;
     }
 
+    setErrorBanner(null);
     setCargoParaEditar(c);
     setEditDescripcion(c.descripcion);
     setEditMonto(String(c.monto));
@@ -168,10 +227,11 @@ export const OtrosTrabajosView: React.FC = () => {
     setErrorEditar(null);
   };
 
-  const handleGuardarEdicion = (e: React.FormEvent) => {
+  const handleGuardarEdicion = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!cargoParaEditar) return;
+    if (!cargoParaEditar || guardandoEditar) return;
     setErrorEditar(null);
+    setErrorBanner(null);
 
     const m = parseInt(editMonto, 10);
     if (isNaN(m) || m <= 0) {
@@ -179,8 +239,10 @@ export const OtrosTrabajosView: React.FC = () => {
       return;
     }
 
+    setGuardandoEditar(true);
     try {
-      db.actualizarCargoPendiente(
+      const actor = user?.nombre || user?.email || 'admin';
+      await db.actualizarCargoPendienteAsync(
         cargoParaEditar.id,
         {
           descripcion: editDescripcion.trim(),
@@ -188,35 +250,61 @@ export const OtrosTrabajosView: React.FC = () => {
           periodo_facturacion: editPeriodo,
           fecha_trabajo: editFechaTrabajo,
         },
-        'admin-tecnica'
+        actor
       );
 
-      setMensaje(
+      if (isSupabaseConfigured) {
+        const resSync = await db.loadFromSupabase({ force: true });
+        if (!resSync.ok && resSync.error) {
+          throw new Error(resSync.error);
+        }
+      }
+
+      mostrarExito(
         `Cargo del Medidor N° ${cargoParaEditar.numeroMedidor} actualizado correctamente (Período: ${editPeriodo}).`
       );
       setCargoParaEditar(null);
     } catch (err: any) {
-      setErrorEditar(err.message || 'Error al actualizar el cargo.');
+      const msg = err?.message || 'Error al actualizar el cargo en Supabase.';
+      setErrorEditar(msg);
+      mostrarError(msg);
+    } finally {
+      setGuardandoEditar(false);
     }
   };
 
-  const handleConfirmarAnulacion = (e: React.FormEvent) => {
+  const handleConfirmarAnulacion = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!cargoParaAnular) return;
+    if (!cargoParaAnular || guardandoAnular) return;
     setErrorAnular(null);
+    setErrorBanner(null);
 
     if (!motivoAnulacion || motivoAnulacion.trim().length < 5) {
       setErrorAnular('Debe especificar un motivo de anulación obligatorio (mínimo 5 caracteres para auditoría).');
       return;
     }
 
+    setGuardandoAnular(true);
     try {
-      db.anularCargo(cargoParaAnular.id, motivoAnulacion.trim(), 'admin-general');
-      setMensaje(`Cargo anulado correctamente y registrado en la bitácora de auditoría.`);
+      const actor = user?.nombre || user?.email || 'admin';
+      await db.anularCargoPendienteAsync(cargoParaAnular.id, motivoAnulacion.trim(), actor);
+
+      if (isSupabaseConfigured) {
+        const resSync = await db.loadFromSupabase({ force: true });
+        if (!resSync.ok && resSync.error) {
+          throw new Error(resSync.error);
+        }
+      }
+
+      mostrarExito('Cargo anulado correctamente y registrado en la bitácora de auditoría.');
       setCargoParaAnular(null);
       setMotivoAnulacion('');
     } catch (err: any) {
-      setErrorAnular(err.message || 'Error al anular cargo.');
+      const msg = err?.message || 'Error al anular cargo en Supabase.';
+      setErrorAnular(msg);
+      mostrarError(msg);
+    } finally {
+      setGuardandoAnular(false);
     }
   };
 
@@ -226,6 +314,33 @@ export const OtrosTrabajosView: React.FC = () => {
 
   return (
     <div className="space-y-6">
+      {/* Toast flotante */}
+      {toast && (
+        <div
+          role={toast.type === 'error' ? 'alert' : 'status'}
+          className={`fixed bottom-5 right-5 z-50 max-w-sm px-4 py-3 rounded-xl shadow-lg border text-xs font-semibold flex items-center gap-2.5 ${
+            toast.type === 'error'
+              ? 'bg-red-950 text-red-50 border-red-700'
+              : 'bg-stone-900 text-white border-stone-700'
+          }`}
+        >
+          {toast.type === 'error' ? (
+            <AlertCircle className="w-4 h-4 text-red-400 shrink-0" />
+          ) : (
+            <CheckCircle2 className="w-4 h-4 text-emerald-400 shrink-0" />
+          )}
+          <span className="flex-1">{toast.message}</span>
+          <button
+            type="button"
+            onClick={() => setToast(null)}
+            className="opacity-70 hover:opacity-100"
+            aria-label="Cerrar notificación"
+          >
+            <X className="w-3.5 h-3.5" />
+          </button>
+        </div>
+      )}
+
       {/* Encabezado Principal */}
       <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3 border-b border-stone-200 pb-4">
         <div>
@@ -252,6 +367,7 @@ export const OtrosTrabajosView: React.FC = () => {
             type="button"
             onClick={() => {
               setErrorCrear(null);
+              setErrorBanner(null);
               setShowModalCrear(true);
             }}
             className="px-4 py-2 bg-stone-900 hover:bg-stone-800 text-white font-bold text-xs rounded-lg shadow-xs flex items-center gap-1.5 transition-colors"
@@ -261,6 +377,26 @@ export const OtrosTrabajosView: React.FC = () => {
           </button>
         </div>
       </div>
+
+      {/* Banner de error inline */}
+      {errorBanner && (
+        <div
+          role="alert"
+          className="p-4 bg-red-50 border border-red-300 rounded-xl text-red-900 text-sm font-semibold flex items-center justify-between gap-3"
+        >
+          <div className="flex items-center gap-2">
+            <AlertCircle className="w-5 h-5 text-red-600 shrink-0" />
+            <span>{errorBanner}</span>
+          </div>
+          <button
+            type="button"
+            onClick={() => setErrorBanner(null)}
+            className="text-xs text-red-800 hover:underline shrink-0"
+          >
+            Cerrar
+          </button>
+        </div>
+      )}
 
       {/* Alerta de notificación temporal */}
       {mensaje && (
@@ -374,12 +510,11 @@ export const OtrosTrabajosView: React.FC = () => {
                 className="p-1 bg-stone-50 border border-stone-300 rounded-md text-xs font-semibold text-stone-800"
               >
                 <option value="todos">Todos los períodos</option>
-                <option value="2025-04">2025-04</option>
-                <option value="2025-05">2025-05</option>
-                <option value="2025-06">2025-06</option>
-                <option value="2025-03">2025-03</option>
-                <option value="2025-02">2025-02</option>
-                <option value="2025-01">2025-01</option>
+                {periodosDisponibles.map((p) => (
+                  <option key={p} value={p}>
+                    {p}
+                  </option>
+                ))}
               </select>
             </div>
           </div>
@@ -452,7 +587,7 @@ export const OtrosTrabajosView: React.FC = () => {
                     <span>•</span>
                     <span><b>Fecha de trabajo:</b> {c.fecha_trabajo}</span>
                     <span>•</span>
-                    <span><b>Registrado por:</b> {c.registrado_por}</span>
+                    <span><b>Registrado por:</b> {c.registradoPorNombre}</span>
                     {c.fecha_edicion && (
                       <>
                         <span>•</span>
@@ -733,10 +868,10 @@ export const OtrosTrabajosView: React.FC = () => {
               </button>
               <button
                 type="submit"
-                disabled={!medidorEncontradoCrear || !!conflictoFacturaCrear}
+                disabled={!medidorEncontradoCrear || !!conflictoFacturaCrear || guardandoCrear}
                 className="px-4 py-2 bg-stone-900 hover:bg-stone-800 text-white rounded-lg font-bold text-xs disabled:opacity-40 disabled:cursor-not-allowed"
               >
-                Registrar Cargo
+                {guardandoCrear ? 'Guardando...' : 'Registrar Cargo'}
               </button>
             </div>
           </form>
@@ -840,9 +975,10 @@ export const OtrosTrabajosView: React.FC = () => {
               </button>
               <button
                 type="submit"
-                className="px-4 py-2 bg-stone-900 hover:bg-stone-800 text-white rounded-lg font-bold text-xs"
+                disabled={guardandoEditar}
+                className="px-4 py-2 bg-stone-900 hover:bg-stone-800 text-white rounded-lg font-bold text-xs disabled:opacity-40 disabled:cursor-not-allowed"
               >
-                Guardar Modificaciones
+                {guardandoEditar ? 'Guardando...' : 'Guardar Modificaciones'}
               </button>
             </div>
           </form>
@@ -911,9 +1047,10 @@ export const OtrosTrabajosView: React.FC = () => {
               </button>
               <button
                 type="submit"
-                className="px-4 py-2 bg-red-600 hover:bg-red-700 text-white rounded-lg font-bold text-xs"
+                disabled={guardandoAnular}
+                className="px-4 py-2 bg-red-600 hover:bg-red-700 text-white rounded-lg font-bold text-xs disabled:opacity-40 disabled:cursor-not-allowed"
               >
-                Confirmar Anulación
+                {guardandoAnular ? 'Anulando...' : 'Confirmar Anulación'}
               </button>
             </div>
           </form>
@@ -988,7 +1125,7 @@ export const OtrosTrabajosView: React.FC = () => {
               )}
 
               <div className="text-[11px] text-stone-400 space-y-0.5">
-                <div>Registrado por: {cargoParaAuditoria.registrado_por} el {cargoParaAuditoria.fecha_registro}</div>
+                <div>Registrado por: {cargoParaAuditoria.registradoPorNombre} el {cargoParaAuditoria.fecha_registro}</div>
                 {cargoParaAuditoria.editado_por && (
                   <div>Última edición por: {cargoParaAuditoria.editado_por} el {cargoParaAuditoria.fecha_edicion}</div>
                 )}

@@ -9,7 +9,7 @@ export type EstadoMedidor = 'activo' | 'moroso' | 'pendiente_corte' | 'cortado' 
 
 export type EstadoLectura = 'borrador' | 'confirmada';
 
-export type EstadoFactura = 'pendiente' | 'pagada' | 'vencida' | 'anulada';
+export type EstadoFactura = 'pendiente' | 'pagada' | 'vencida' | 'anulada' | 'refinanciada';
 
 export type EstadoCargo = 'pendiente' | 'facturado' | 'anulado';
 
@@ -115,6 +115,7 @@ export interface TarifaConfig {
   max_numero_medidor: number; // Ej: 1000
   vigente_desde: string; // YYYY-MM-DD
   creado_por: string;
+  creado_por_nombre?: string;
   fecha_creacion: string;
   motivo_cambio?: string;
   auditoria?: RegistroAuditoriaTarifa;
@@ -163,6 +164,7 @@ export interface Factura {
   consumo_m3?: number;
   fecha_pago?: string | null;
   motivo_anulacion?: string | null;
+  motivo?: string | null;
 }
 
 export interface ConsumoZonaReport {

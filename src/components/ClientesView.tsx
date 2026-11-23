@@ -3,8 +3,9 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import { db } from '../services/database';
+import { isSupabaseConfigured } from '../services/supabaseClient';
 import { Cliente, EstadoMedidor } from '../types';
 import { formatGs } from '../services/billingRules';
 import {
@@ -49,6 +50,7 @@ export const ClientesView: React.FC<ClientesViewProps> = ({
   const [page, setPage] = useState(1);
   const [search, setSearch] = useState('');
   const [selectedClienteId, setSelectedClienteId] = useState<string | null>(null);
+  const [, setRefreshKey] = useState(0);
 
   // Modales
   const [showAddModal, setShowAddModal] = useState(false);
@@ -67,7 +69,30 @@ export const ClientesView: React.FC<ClientesViewProps> = ({
   const [email, setEmail] = useState('');
 
   const [errorModal, setErrorModal] = useState<string | null>(null);
+  const [errorEliminarModal, setErrorEliminarModal] = useState<string | null>(null);
   const [mensajeExito, setMensajeExito] = useState<string | null>(null);
+  const [guardando, setGuardando] = useState(false);
+  const [eliminando, setEliminando] = useState(false);
+  const [toast, setToast] = useState<{ tipo: 'success' | 'error'; texto: string } | null>(null);
+
+  useEffect(() => {
+    const unsubscribe = db.subscribe(() => {
+      setRefreshKey((k) => k + 1);
+    });
+    return () => {
+      unsubscribe();
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!toast) return;
+    const t = setTimeout(() => setToast(null), 4500);
+    return () => clearTimeout(t);
+  }, [toast]);
+
+  const mostrarToast = (tipo: 'success' | 'error', texto: string) => {
+    setToast({ tipo, texto });
+  };
 
   const handleDescargarContrato = async (clienteId: string, clienteDoc?: string) => {
     setGeneratingContratoId(clienteId);
@@ -113,17 +138,27 @@ export const ClientesView: React.FC<ClientesViewProps> = ({
     setErrorModal(null);
   };
 
-  const handleGuardarNuevoCliente = (e: React.FormEvent) => {
+  const handleGuardarNuevoCliente = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (guardando) return;
     setErrorModal(null);
 
-    if (!nombre.trim() || !documento.trim() || !direccion.trim()) {
-      setErrorModal('Nombre, Documento (C.I./RUC) y Dirección son obligatorios.');
+    if (!nombre.trim()) {
+      setErrorModal('El nombre es obligatorio');
+      return;
+    }
+    if (!documento.trim()) {
+      setErrorModal('El documento (C.I./RUC) es obligatorio');
+      return;
+    }
+    if (!direccion.trim()) {
+      setErrorModal('La dirección es obligatoria');
       return;
     }
 
+    setGuardando(true);
     try {
-      const nuevo = db.agregarCliente({
+      const nuevo = await db.agregarClienteAsync({
         nombre_completo: nombre.trim(),
         documento: documento.trim(),
         direccion: direccion.trim(),
@@ -131,20 +166,42 @@ export const ClientesView: React.FC<ClientesViewProps> = ({
         email: email.trim() || `${documento.trim()}@aguateria.py`,
       });
 
-      setMensajeExito(`Cliente ${nuevo.nombre_completo} (CI: ${nuevo.documento}) registrado correctamente.`);
+      if (isSupabaseConfigured) {
+        await db.loadFromSupabase({ force: true });
+      }
+
+      const okMsg = `Cliente ${nuevo.nombre_completo} (CI: ${nuevo.documento}) registrado correctamente.`;
+      setMensajeExito(okMsg);
+      mostrarToast('success', okMsg);
       setShowAddModal(false);
     } catch (err: any) {
-      setErrorModal(err.message || 'Error al crear el cliente.');
+      setErrorModal(err?.message || 'Error al crear el cliente.');
+    } finally {
+      setGuardando(false);
     }
   };
 
-  const handleGuardarEdicionCliente = (e: React.FormEvent) => {
+  const handleGuardarEdicionCliente = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!clienteParaEditar) return;
+    if (!clienteParaEditar || guardando) return;
     setErrorModal(null);
 
+    if (!nombre.trim()) {
+      setErrorModal('El nombre es obligatorio');
+      return;
+    }
+    if (!documento.trim()) {
+      setErrorModal('El documento (C.I./RUC) es obligatorio');
+      return;
+    }
+    if (!direccion.trim()) {
+      setErrorModal('La dirección es obligatoria');
+      return;
+    }
+
+    setGuardando(true);
     try {
-      db.actualizarCliente(clienteParaEditar.id, {
+      await db.actualizarClienteAsync(clienteParaEditar.id, {
         nombre_completo: nombre.trim(),
         documento: documento.trim(),
         direccion: direccion.trim(),
@@ -152,30 +209,75 @@ export const ClientesView: React.FC<ClientesViewProps> = ({
         email: email.trim(),
       });
 
-      setMensajeExito(`Datos del cliente ${nombre.trim()} actualizados.`);
+      if (isSupabaseConfigured) {
+        await db.loadFromSupabase({ force: true });
+      }
+
+      const okMsg = `Datos del cliente ${nombre.trim()} actualizados.`;
+      setMensajeExito(okMsg);
+      mostrarToast('success', okMsg);
       setClienteParaEditar(null);
     } catch (err: any) {
-      setErrorModal(err.message || 'Error al actualizar el cliente.');
+      setErrorModal(err?.message || 'Error al actualizar el cliente.');
+    } finally {
+      setGuardando(false);
     }
   };
 
-  const handleConfirmarEliminar = () => {
-    if (!clienteParaEliminar) return;
+  const handleConfirmarEliminar = async () => {
+    if (!clienteParaEliminar || eliminando) return;
+    setErrorEliminarModal(null);
+    setEliminando(true);
 
     try {
-      db.eliminarCliente(clienteParaEliminar.id);
-      setMensajeExito(`Cliente ${clienteParaEliminar.nombre_completo} eliminado del sistema.`);
-      setClienteParaEliminar(null);
+      await db.eliminarClienteAsync(clienteParaEliminar.id);
+
+      if (isSupabaseConfigured) {
+        await db.loadFromSupabase({ force: true });
+      }
+
+      const okMsg = `Cliente ${clienteParaEliminar.nombre_completo} eliminado del sistema.`;
+      setMensajeExito(okMsg);
+      mostrarToast('success', okMsg);
       if (selectedClienteId === clienteParaEliminar.id) {
         setSelectedClienteId(null);
       }
+      setClienteParaEliminar(null);
     } catch (err: any) {
-      alert(err.message);
+      setErrorEliminarModal(err?.message || 'No se pudo eliminar el cliente.');
+    } finally {
+      setEliminando(false);
     }
   };
 
   return (
     <div className="space-y-6">
+      {toast && (
+        <div
+          role="status"
+          className={`fixed bottom-5 right-5 z-50 max-w-sm px-4 py-3 rounded-xl shadow-lg border text-xs font-bold flex items-center gap-2.5 ${
+            toast.tipo === 'success'
+              ? 'bg-emerald-900 text-white border-emerald-700'
+              : 'bg-red-900 text-white border-red-700'
+          }`}
+        >
+          {toast.tipo === 'success' ? (
+            <CheckCircle2 className="w-4 h-4 text-emerald-300 shrink-0" />
+          ) : (
+            <AlertCircle className="w-4 h-4 text-red-300 shrink-0" />
+          )}
+          <span className="flex-1">{toast.texto}</span>
+          <button
+            type="button"
+            onClick={() => setToast(null)}
+            aria-label="Cerrar notificación"
+            className="opacity-75 hover:opacity-100"
+          >
+            <X className="w-4 h-4" />
+          </button>
+        </div>
+      )}
+
       {/* Header */}
       <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3 border-b border-stone-200 pb-4">
         <div>
@@ -371,7 +473,10 @@ export const ClientesView: React.FC<ClientesViewProps> = ({
 
                         <button
                           type="button"
-                          onClick={() => setClienteParaEliminar(c)}
+                          onClick={() => {
+                            setErrorEliminarModal(null);
+                            setClienteParaEliminar(c);
+                          }}
                           disabled={c.medidoresCount > 0}
                           className="p-1 bg-stone-100 hover:bg-red-50 text-stone-500 hover:text-red-700 rounded-md disabled:opacity-30 disabled:hover:bg-stone-100 disabled:hover:text-stone-500"
                           title={
@@ -610,6 +715,7 @@ export const ClientesView: React.FC<ClientesViewProps> = ({
       {showAddModal && (
         <div className="fixed inset-0 bg-black/50 z-50 flex items-center justify-center p-4">
           <form
+            noValidate
             onSubmit={handleGuardarNuevoCliente}
             className="bg-white rounded-2xl max-w-md w-full p-6 shadow-xl space-y-4"
           >
@@ -617,8 +723,9 @@ export const ClientesView: React.FC<ClientesViewProps> = ({
               <h3 className="font-bold text-stone-900 text-base">Registrar Nuevo Cliente</h3>
               <button
                 type="button"
+                disabled={guardando}
                 onClick={() => setShowAddModal(false)}
-                className="text-stone-400 hover:text-stone-700"
+                className="text-stone-400 hover:text-stone-700 disabled:opacity-40"
               >
                 <X className="w-5 h-5" />
               </button>
@@ -694,16 +801,19 @@ export const ClientesView: React.FC<ClientesViewProps> = ({
             <div className="pt-2 border-t border-stone-200 flex justify-end gap-2">
               <button
                 type="button"
+                disabled={guardando}
                 onClick={() => setShowAddModal(false)}
-                className="px-3 py-2 bg-stone-100 hover:bg-stone-200 text-stone-800 rounded-lg font-semibold text-xs"
+                className="px-3 py-2 bg-stone-100 hover:bg-stone-200 text-stone-800 rounded-lg font-semibold text-xs disabled:opacity-40"
               >
                 Cancelar
               </button>
               <button
                 type="submit"
-                className="px-4 py-2 bg-stone-900 hover:bg-stone-800 text-white rounded-lg font-bold text-xs"
+                disabled={guardando}
+                className="px-4 py-2 bg-stone-900 hover:bg-stone-800 text-white rounded-lg font-bold text-xs inline-flex items-center gap-1.5 disabled:opacity-50"
               >
-                Guardar Cliente
+                {guardando && <Loader2 className="w-3.5 h-3.5 animate-spin" />}
+                <span>{guardando ? 'Guardando...' : 'Guardar Cliente'}</span>
               </button>
             </div>
           </form>
@@ -714,6 +824,7 @@ export const ClientesView: React.FC<ClientesViewProps> = ({
       {clienteParaEditar && (
         <div className="fixed inset-0 bg-black/50 z-50 flex items-center justify-center p-4">
           <form
+            noValidate
             onSubmit={handleGuardarEdicionCliente}
             className="bg-white rounded-2xl max-w-md w-full p-6 shadow-xl space-y-4"
           >
@@ -721,8 +832,9 @@ export const ClientesView: React.FC<ClientesViewProps> = ({
               <h3 className="font-bold text-stone-900 text-base">Editar Cliente</h3>
               <button
                 type="button"
+                disabled={guardando}
                 onClick={() => setClienteParaEditar(null)}
-                className="text-stone-400 hover:text-stone-700"
+                className="text-stone-400 hover:text-stone-700 disabled:opacity-40"
               >
                 <X className="w-5 h-5" />
               </button>
@@ -793,16 +905,19 @@ export const ClientesView: React.FC<ClientesViewProps> = ({
             <div className="pt-2 border-t border-stone-200 flex justify-end gap-2">
               <button
                 type="button"
+                disabled={guardando}
                 onClick={() => setClienteParaEditar(null)}
-                className="px-3 py-2 bg-stone-100 hover:bg-stone-200 text-stone-800 rounded-lg font-semibold text-xs"
+                className="px-3 py-2 bg-stone-100 hover:bg-stone-200 text-stone-800 rounded-lg font-semibold text-xs disabled:opacity-40"
               >
                 Cancelar
               </button>
               <button
                 type="submit"
-                className="px-4 py-2 bg-stone-900 hover:bg-stone-800 text-white rounded-lg font-bold text-xs"
+                disabled={guardando}
+                className="px-4 py-2 bg-stone-900 hover:bg-stone-800 text-white rounded-lg font-bold text-xs inline-flex items-center gap-1.5 disabled:opacity-50"
               >
-                Guardar Cambios
+                {guardando && <Loader2 className="w-3.5 h-3.5 animate-spin" />}
+                <span>{guardando ? 'Guardando...' : 'Guardar Cambios'}</span>
               </button>
             </div>
           </form>
@@ -823,20 +938,33 @@ export const ClientesView: React.FC<ClientesViewProps> = ({
               Esta acción no se puede deshacer.
             </p>
 
+            {errorEliminarModal && (
+              <div className="p-3 bg-red-50 border border-red-300 rounded-xl text-red-800 text-xs font-semibold flex items-start gap-2">
+                <AlertCircle className="w-4 h-4 text-red-600 shrink-0 mt-0.5" />
+                <span>{errorEliminarModal}</span>
+              </div>
+            )}
+
             <div className="flex justify-end gap-2 pt-2 border-t border-stone-200">
               <button
                 type="button"
-                onClick={() => setClienteParaEliminar(null)}
-                className="px-3 py-2 bg-stone-100 hover:bg-stone-200 text-stone-800 rounded-lg font-semibold text-xs"
+                disabled={eliminando}
+                onClick={() => {
+                  setErrorEliminarModal(null);
+                  setClienteParaEliminar(null);
+                }}
+                className="px-3 py-2 bg-stone-100 hover:bg-stone-200 text-stone-800 rounded-lg font-semibold text-xs disabled:opacity-40"
               >
                 Cancelar
               </button>
               <button
                 type="button"
+                disabled={eliminando}
                 onClick={handleConfirmarEliminar}
-                className="px-4 py-2 bg-red-600 hover:bg-red-700 text-white rounded-lg font-bold text-xs"
+                className="px-4 py-2 bg-red-600 hover:bg-red-700 text-white rounded-lg font-bold text-xs inline-flex items-center gap-1.5 disabled:opacity-50"
               >
-                Eliminar Cliente
+                {eliminando && <Loader2 className="w-3.5 h-3.5 animate-spin" />}
+                <span>{eliminando ? 'Eliminando...' : 'Eliminar Cliente'}</span>
               </button>
             </div>
           </div>

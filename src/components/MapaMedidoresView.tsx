@@ -12,20 +12,49 @@ import 'leaflet/dist/leaflet.css';
 import 'leaflet.markercluster/dist/MarkerCluster.css';
 import 'leaflet.markercluster/dist/MarkerCluster.Default.css';
 
+import {
+  tileLayerOffline,
+  downloadTile,
+  saveTile,
+  hasTile,
+  getStorageLength,
+  truncate,
+  type TileLayerOffline,
+} from 'leaflet.offline';
+
 import { db } from '../services/database';
+import { isSupabaseConfigured } from '../services/supabaseClient';
 import { validarNumeroMedidor } from '../services/billingRules';
+import {
+  GEO_ERR_PERMISSION_DENIED,
+  isGeolocationPermissionDeniedInSession,
+  solicitarUbicacionActual,
+} from '../utils/geolocationHelper';
+import { getMapTileLayersConfig } from '../utils/mapLayersHelper';
+import {
+  calcularBoundsZonaDescarga,
+  calcularZoomsDescargaOffline,
+  ejecutarDescargaTilesOffline,
+  type OfflineTileDescriptor,
+} from '../utils/mapOfflineHelper';
+import {
+  AGUATERIA_UBICACION,
+  ZONAS_AGUATERIA_SECTOR,
+  ZONA_AGUATERIA_DEFAULT,
+} from '../config/aguateriaConfig';
 import { EstadoMedidor } from '../types';
 import {
   MapPin,
   Search,
-  Filter,
   Plus,
   X,
   CheckCircle2,
   AlertCircle,
   Crosshair,
-  User,
-  Navigation,
+  LocateFixed,
+  Loader2,
+  Download,
+  Trash2,
 } from 'lucide-react';
 
 interface MapaMedidoresViewProps {
@@ -55,6 +84,8 @@ export const MapaMedidoresView: React.FC<MapaMedidoresViewProps> = ({
   const clusterGroupRef = useRef<L.MarkerClusterGroup | null>(null);
   const markersMapRef = useRef<Map<number, L.Marker>>(new Map());
   const tempMarkerRef = useRef<L.Marker | null>(null);
+  const userLocationMarkerRef = useRef<L.CircleMarker | null>(null);
+  const offlineLayersRef = useRef<TileLayerOffline[]>([]);
 
   // Estados de filtros
   const [estadoFiltro, setEstadoFiltro] = useState<EstadoMedidor | 'todos'>('todos');
@@ -73,28 +104,60 @@ export const MapaMedidoresView: React.FC<MapaMedidoresViewProps> = ({
   const [nuevoClienteId, setNuevoClienteId] = useState<string>('');
   const [clienteSearchQuery, setClienteSearchQuery] = useState<string>('');
   const [nuevaDireccion, setNuevaDireccion] = useState<string>('');
-  const [nuevaZona, setNuevaZona] = useState<string>('San José');
+  const [nuevaZona, setNuevaZona] = useState<string>(ZONA_AGUATERIA_DEFAULT);
   const [errorModal, setErrorModal] = useState<string | null>(null);
   const [mensajeExito, setMensajeExito] = useState<string | null>(null);
+  const [guardando, setGuardando] = useState<boolean>(false);
+  const [toast, setToast] = useState<{ tipo: 'success' | 'error'; texto: string } | null>(null);
+  const [locatingUser, setLocatingUser] = useState<boolean>(false);
+  const [geoError, setGeoError] = useState<string | null>(null);
+  const [gpsPermisoDenegado, setGpsPermisoDenegado] = useState<boolean>(() =>
+    isGeolocationPermissionDeniedInSession()
+  );
+
+  // Descarga y caché offline de tiles
+  const [descargandoOffline, setDescargandoOffline] = useState<boolean>(false);
+  const [progresoOffline, setProgresoOffline] = useState<{ loaded: number; total: number } | null>(null);
+  const [tilesOfflineGuardados, setTilesOfflineGuardados] = useState<number>(0);
+  const [limpiandoCache, setLimpiandoCache] = useState<boolean>(false);
 
   // Recarga de datos
   const [refreshKey, setRefreshKey] = useState<number>(0);
   const [mapLoaded, setMapLoaded] = useState<boolean>(false);
   const [totalVisible, setTotalVisible] = useState<number>(0);
 
+  useEffect(() => {
+    const unsubscribe = db.subscribe(() => {
+      setRefreshKey((k) => k + 1);
+    });
+    return () => {
+      unsubscribe();
+    };
+  }, []);
+
+  useEffect(() => {
+    getStorageLength()
+      .then((count) => setTilesOfflineGuardados(count))
+      .catch(() => {});
+  }, []);
+
+  useEffect(() => {
+    if (!toast) return;
+    const t = setTimeout(() => setToast(null), 4500);
+    return () => clearTimeout(t);
+  }, [toast]);
+
+  const mostrarToast = (tipo: 'success' | 'error', texto: string) => {
+    setToast({ tipo, texto });
+  };
+
   // Lista completa de medidores para mapa
   const medidores = useMemo(() => {
     return db.getMedidoresParaMapa();
   }, [refreshKey]);
 
-  // Lista de zonas únicas para el filtro combinado
-  const zonasDisponibles = useMemo(() => {
-    const setZonas = new Set<string>();
-    medidores.forEach((m) => {
-      if (m.zona) setZonas.add(m.zona);
-    });
-    return Array.from(setZonas).sort();
-  }, [medidores]);
+  // Lista oficial de zonas del sector para el filtro combinado
+  const zonasDisponibles = ZONAS_AGUATERIA_SECTOR;
 
   // Lista de clientes existentes (necesarios para asignar nuevo medidor)
   const clientesExistentes = useMemo(() => {
@@ -167,20 +230,75 @@ export const MapaMedidoresView: React.FC<MapaMedidoresViewProps> = ({
   useEffect(() => {
     if (!mapContainerRef.current || mapInstanceRef.current) return;
 
-    // Coordenadas centrales por defecto: San Lorenzo, Central, Paraguay
+    // Coordenadas centrales de la aguatería
     const map = L.map(mapContainerRef.current, {
-      center: [-25.3405, -57.5105],
-      zoom: 13,
+      center: [AGUATERIA_UBICACION.lat, AGUATERIA_UBICACION.lng],
+      zoom: AGUATERIA_UBICACION.zoom,
       zoomControl: true,
-      maxZoom: 18,
+      maxZoom: 19,
       minZoom: 10,
     });
 
-    // Tile layer limpio OpenStreetMap
-    L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
-      attribution: '&copy; OpenStreetMap contributors | AguateríaPY',
-      maxZoom: 19,
-    }).addTo(map);
+    // Capas base con soporte offline (IndexedDB vía leaflet.offline):
+    // Calles (OpenStreetMap estándar) siempre por defecto, Satelital via Mapbox (o fallback Esri sin token)
+    const layersCfg = getMapTileLayersConfig();
+
+    const capaCalles = tileLayerOffline(layersCfg.calles.url, {
+      attribution: layersCfg.calles.attribution,
+      maxZoom: layersCfg.calles.maxZoom,
+      subdomains: 'abc',
+    });
+
+    const capaSatelital = tileLayerOffline(layersCfg.satelital.url, {
+      attribution: layersCfg.satelital.attribution,
+      maxZoom: layersCfg.satelital.maxZoom,
+      subdomains: 'abc',
+    });
+
+    let capaSatelitalConEtiquetas: L.Layer;
+    if (!layersCfg.satelitalConEtiquetas.isCompositeEsri) {
+      const capaSatelitalEtiquetasTile = tileLayerOffline(layersCfg.satelitalConEtiquetas.url, {
+        attribution: layersCfg.satelitalConEtiquetas.attribution,
+        maxZoom: layersCfg.satelitalConEtiquetas.maxZoom,
+        subdomains: 'abc',
+      });
+      capaSatelitalConEtiquetas = capaSatelitalEtiquetasTile;
+      offlineLayersRef.current = [capaCalles, capaSatelital, capaSatelitalEtiquetasTile];
+    } else {
+      const capaSatelitalBase = tileLayerOffline(layersCfg.satelital.url, {
+        attribution: layersCfg.satelital.attribution,
+        maxZoom: layersCfg.satelital.maxZoom,
+        subdomains: 'abc',
+        zIndex: 1,
+      });
+
+      const capaEtiquetas = tileLayerOffline(
+        layersCfg.satelitalConEtiquetas.overlayUrl || layersCfg.satelital.url,
+        {
+          attribution: layersCfg.satelitalConEtiquetas.attribution,
+          maxZoom: layersCfg.satelitalConEtiquetas.maxZoom,
+          subdomains: 'abc',
+          zIndex: 2,
+        }
+      );
+
+      capaSatelitalConEtiquetas = L.layerGroup([capaSatelitalBase, capaEtiquetas]);
+      offlineLayersRef.current = [capaCalles, capaSatelital, capaEtiquetas];
+    }
+
+    capaCalles.addTo(map);
+
+    L.control
+      .layers(
+        {
+          [layersCfg.calles.label]: capaCalles,
+          [layersCfg.satelital.label]: capaSatelital,
+          [layersCfg.satelitalConEtiquetas.label]: capaSatelitalConEtiquetas,
+        },
+        {},
+        { position: 'topright', collapsed: false }
+      )
+      .addTo(map);
 
     // MarkerClusterGroup con chunked loading para rendimiento fluido con 1.000+ marcadores
     const cluster = L.markerClusterGroup({
@@ -229,6 +347,7 @@ export const MapaMedidoresView: React.FC<MapaMedidoresViewProps> = ({
 
         // Abrir formulario
         setNuevaDireccion('');
+        setNuevaZona(ZONA_AGUATERIA_DEFAULT);
         setNuevoNumero('');
         setErrorModal(null);
         setShowAddModal(true);
@@ -240,6 +359,8 @@ export const MapaMedidoresView: React.FC<MapaMedidoresViewProps> = ({
       delete (window as any).__aguateriaMap;
       mapInstanceRef.current = null;
       clusterGroupRef.current = null;
+      userLocationMarkerRef.current = null;
+      offlineLayersRef.current = [];
       markersMapRef.current.clear();
     };
   }, []);
@@ -378,9 +499,10 @@ export const MapaMedidoresView: React.FC<MapaMedidoresViewProps> = ({
     }
   };
 
-  // 4. Guardar nuevo medidor creado desde el mapa
-  const handleGuardarNuevoMedidor = (e: React.FormEvent) => {
+  // 4. Guardar nuevo medidor creado desde el mapa (espera confirmación Supabase antes de mostrar pin/cerrar modal)
+  const handleGuardarNuevoMedidor = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (guardando) return;
     setErrorModal(null);
 
     if (!clickedLatLng) {
@@ -416,8 +538,9 @@ export const MapaMedidoresView: React.FC<MapaMedidoresViewProps> = ({
       return;
     }
 
+    setGuardando(true);
     try {
-      const nuevoMed = db.agregarMedidor({
+      await db.agregarMedidorAsync({
         cliente_id: nuevoClienteId,
         numero_medidor: validacion.numero,
         fecha_instalacion: new Date().toISOString().split('T')[0],
@@ -428,18 +551,24 @@ export const MapaMedidoresView: React.FC<MapaMedidoresViewProps> = ({
         estado: 'activo',
       });
 
-      // Limpiar estado y temporales
+      if (isSupabaseConfigured) {
+        await db.loadFromSupabase({ force: true });
+      }
+
+      // Solo tras confirmar persistencia: limpiar marcador temporal, cerrar modal y mostrar pin confirmado
       if (tempMarkerRef.current && mapInstanceRef.current) {
         mapInstanceRef.current.removeLayer(tempMarkerRef.current);
         tempMarkerRef.current = null;
       }
 
+      const okMsg = `Medidor N° ${validacion.numero} creado y ubicado con éxito en el mapa.`;
       setShowAddModal(false);
       setIsPlacementMode(false);
-      setMensajeExito(`Medidor N° ${validacion.numero} creado y ubicado con éxito en el mapa.`);
+      setMensajeExito(okMsg);
+      mostrarToast('success', okMsg);
       setRefreshKey((k) => k + 1);
 
-      // Centrar mapa en el nuevo medidor recién creado
+      // Centrar mapa en el nuevo medidor recién persistido
       setTimeout(() => {
         const nuevoEnLista = db.getMedidoresParaMapa().find((m) => m.numero_medidor === validacion.numero);
         if (nuevoEnLista) {
@@ -447,21 +576,181 @@ export const MapaMedidoresView: React.FC<MapaMedidoresViewProps> = ({
         }
       }, 200);
     } catch (err: any) {
-      setErrorModal(err.message || 'Error al guardar el medidor.');
+      // Fallo de persistencia: mantener modal ABIERTO con error inline, NO mostrar pin ni cerrar mapa
+      setErrorModal(err?.message || 'Error al guardar el medidor.');
+    } finally {
+      setGuardando(false);
     }
   };
 
   const handleCancelarModoUbicacion = () => {
+    if (guardando) return;
     setIsPlacementMode(false);
     setShowAddModal(false);
+    setErrorModal(null);
     if (tempMarkerRef.current && mapInstanceRef.current) {
       mapInstanceRef.current.removeLayer(tempMarkerRef.current);
       tempMarkerRef.current = null;
     }
   };
 
+  const handleCentrarEnMiUbicacion = async () => {
+    if (locatingUser) return;
+    if (gpsPermisoDenegado) {
+      setGeoError(GEO_ERR_PERMISSION_DENIED);
+      return;
+    }
+
+    setGeoError(null);
+    setLocatingUser(true);
+
+    try {
+      const coords = await solicitarUbicacionActual();
+      const map = mapInstanceRef.current;
+      if (map) {
+        map.setView([coords.lat, coords.lng], 16, { animate: true });
+        if (userLocationMarkerRef.current) {
+          map.removeLayer(userLocationMarkerRef.current);
+        }
+        const marker = L.circleMarker([coords.lat, coords.lng], {
+          radius: 9,
+          color: '#ffffff',
+          weight: 3,
+          fillColor: '#2563eb',
+          fillOpacity: 1,
+        })
+          .bindPopup('<b>Tu ubicación actual</b>')
+          .addTo(map);
+        userLocationMarkerRef.current = marker;
+      }
+      mostrarToast('success', 'Mapa centrado en tu ubicación actual.');
+    } catch (err: any) {
+      const msg = err?.message || GEO_ERR_PERMISSION_DENIED;
+      if (err?.code === 1) {
+        setGpsPermisoDenegado(true);
+      }
+      setGeoError(msg);
+      mostrarToast('error', msg);
+    } finally {
+      setLocatingUser(false);
+    }
+  };
+
+  const handleDescargarMapaOffline = async () => {
+    const map = mapInstanceRef.current;
+    const layers = offlineLayersRef.current;
+    if (!map || layers.length === 0 || descargandoOffline) return;
+
+    setDescargandoOffline(true);
+    setProgresoOffline({ loaded: 0, total: 0 });
+
+    try {
+      const currentZoom = map.getZoom();
+      const b = map.getBounds();
+      const center = map.getCenter();
+      const zooms = calcularZoomsDescargaOffline(currentZoom);
+      const zona = calcularBoundsZonaDescarga({
+        viewportBounds: {
+          north: b.getNorth(),
+          south: b.getSouth(),
+          east: b.getEast(),
+          west: b.getWest(),
+        },
+        center: { lat: center.lat, lng: center.lng },
+        currentZoom,
+      });
+
+      const latLngBounds = L.latLngBounds([zona.south, zona.west], [zona.north, zona.east]);
+      const tiles: OfflineTileDescriptor[] = [];
+
+      for (const z of zooms) {
+        const area = L.bounds(
+          map.project(latLngBounds.getNorthWest(), z),
+          map.project(latLngBounds.getSouthEast(), z)
+        );
+        for (const layer of layers) {
+          const layerTiles = layer.getTileUrls(area, z);
+          for (const tile of layerTiles) {
+            tiles.push(tile);
+          }
+        }
+      }
+
+      const resultado = await ejecutarDescargaTilesOffline({
+        tiles,
+        storageOps: {
+          hasTile,
+          downloadTile,
+          saveTile,
+          getStorageLength,
+        },
+        onProgress: (p) => {
+          setProgresoOffline({ loaded: p.loaded, total: p.total });
+        },
+      });
+
+      setTilesOfflineGuardados(resultado.storagesize);
+
+      if (resultado.saved === 0 && resultado.skipped === 0 && resultado.failed > 0) {
+        mostrarToast(
+          'error',
+          'No se pudieron descargar los tiles del mapa. Verificá tu conexión a internet.'
+        );
+      } else {
+        const msg = `Mapa de tu zona guardado offline: ${resultado.saved} tiles nuevos (${resultado.storagesize} en caché, Calles y Satelital).`;
+        setMensajeExito(msg);
+        mostrarToast('success', msg);
+      }
+    } catch (err: any) {
+      mostrarToast('error', err?.message || 'Error al descargar el mapa offline.');
+    } finally {
+      setDescargandoOffline(false);
+      setProgresoOffline(null);
+    }
+  };
+
+  const handleLimpiarCacheOffline = async () => {
+    if (descargandoOffline || limpiandoCache) return;
+    setLimpiandoCache(true);
+    try {
+      await truncate();
+      setTilesOfflineGuardados(0);
+      mostrarToast('success', 'Caché offline del mapa limpiada.');
+    } catch (err: any) {
+      mostrarToast('error', err?.message || 'No se pudo limpiar la caché del mapa.');
+    } finally {
+      setLimpiandoCache(false);
+    }
+  };
+
   return (
     <div className="space-y-4">
+      {toast && (
+        <div
+          role="status"
+          className={`fixed bottom-5 right-5 z-50 max-w-sm px-4 py-3 rounded-xl shadow-lg border text-xs font-bold flex items-center gap-2.5 ${
+            toast.tipo === 'success'
+              ? 'bg-emerald-900 text-white border-emerald-700'
+              : 'bg-red-900 text-white border-red-700'
+          }`}
+        >
+          {toast.tipo === 'success' ? (
+            <CheckCircle2 className="w-4 h-4 text-emerald-300 shrink-0" />
+          ) : (
+            <AlertCircle className="w-4 h-4 text-red-300 shrink-0" />
+          )}
+          <span className="flex-1">{toast.texto}</span>
+          <button
+            type="button"
+            onClick={() => setToast(null)}
+            aria-label="Cerrar notificación"
+            className="opacity-75 hover:opacity-100"
+          >
+            <X className="w-4 h-4" />
+          </button>
+        </div>
+      )}
+
       {/* Mensaje de confirmación temporal */}
       {mensajeExito && (
         <div className="p-3 bg-emerald-50 border border-emerald-300 rounded-xl flex items-center justify-between text-xs text-emerald-800 animate-fadeIn">
@@ -499,6 +788,27 @@ export const MapaMedidoresView: React.FC<MapaMedidoresViewProps> = ({
         </div>
       )}
 
+      {/* Error de geolocalización inline */}
+      {geoError && (
+        <div
+          role="alert"
+          className="p-3 bg-red-50 border border-red-300 rounded-xl flex items-center justify-between text-xs text-red-800 font-semibold"
+        >
+          <div className="flex items-center gap-2">
+            <AlertCircle className="w-4 h-4 text-red-600 shrink-0" />
+            <span>{geoError}</span>
+          </div>
+          <button
+            type="button"
+            onClick={() => setGeoError(null)}
+            aria-label="Cerrar error de ubicación"
+            className="text-red-700 hover:text-red-900"
+          >
+            <X className="w-4 h-4" />
+          </button>
+        </div>
+      )}
+
       {/* Header Principal */}
       <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3 border-b border-stone-200 pb-3">
         <div>
@@ -511,7 +821,56 @@ export const MapaMedidoresView: React.FC<MapaMedidoresViewProps> = ({
           </p>
         </div>
 
-        <div className="flex items-center gap-2">
+        <div className="flex flex-wrap items-center gap-2">
+          <button
+            type="button"
+            onClick={handleDescargarMapaOffline}
+            disabled={descargandoOffline || !mapLoaded}
+            className="px-3 py-2 rounded-xl text-xs font-bold flex items-center gap-1.5 transition-all shadow-xs bg-emerald-700 text-white hover:bg-emerald-800 disabled:opacity-60"
+            title="Precargar tiles de Calles y Satelital de esta zona para usar el mapa sin conexión"
+          >
+            {descargandoOffline ? (
+              <Loader2 className="w-4 h-4 animate-spin text-emerald-100" />
+            ) : (
+              <Download className="w-4 h-4 text-emerald-100" />
+            )}
+            <span>
+              {descargandoOffline
+                ? progresoOffline && progresoOffline.total > 0
+                  ? `Descargando ${progresoOffline.loaded}/${progresoOffline.total}...`
+                  : 'Preparando descarga...'
+                : 'Descargar mapa de mi zona'}
+            </span>
+          </button>
+
+          {tilesOfflineGuardados > 0 && (
+            <button
+              type="button"
+              onClick={handleLimpiarCacheOffline}
+              disabled={descargandoOffline || limpiandoCache}
+              className="px-2.5 py-2 rounded-xl text-xs font-semibold flex items-center gap-1.5 transition-all shadow-xs bg-white border border-stone-300 text-stone-700 hover:bg-stone-50 disabled:opacity-50"
+              title="Vaciar tiles cacheados del mapa offline"
+            >
+              <Trash2 className="w-3.5 h-3.5 text-stone-500" />
+              <span>Caché ({tilesOfflineGuardados})</span>
+            </button>
+          )}
+
+          <button
+            type="button"
+            onClick={handleCentrarEnMiUbicacion}
+            disabled={locatingUser}
+            className="px-3 py-2 rounded-xl text-xs font-bold flex items-center gap-1.5 transition-all shadow-xs bg-white border border-stone-300 text-stone-800 hover:bg-stone-50 disabled:opacity-50"
+            title="Centrar mapa en mi ubicación GPS actual"
+          >
+            {locatingUser ? (
+              <Loader2 className="w-4 h-4 animate-spin text-blue-600" />
+            ) : (
+              <LocateFixed className="w-4 h-4 text-blue-600" />
+            )}
+            <span>{locatingUser ? 'Ubicando...' : 'Centrar en mi ubicación'}</span>
+          </button>
+
           <button
             type="button"
             onClick={() => setIsPlacementMode(!isPlacementMode)}
@@ -700,21 +1059,22 @@ export const MapaMedidoresView: React.FC<MapaMedidoresViewProps> = ({
               </div>
               <button
                 type="button"
+                disabled={guardando}
                 onClick={handleCancelarModoUbicacion}
-                className="text-stone-400 hover:text-stone-600"
+                className="text-stone-400 hover:text-stone-600 disabled:opacity-40"
               >
                 <X className="w-5 h-5" />
               </button>
             </div>
 
             {errorModal && (
-              <div className="p-3 bg-red-50 border border-red-300 rounded-xl text-xs text-red-800 flex items-start gap-2">
+              <div className="p-3 bg-red-50 border border-red-300 rounded-xl text-xs text-red-800 font-semibold flex items-start gap-2">
                 <AlertCircle className="w-4 h-4 text-red-600 shrink-0 mt-0.5" />
                 <span>{errorModal}</span>
               </div>
             )}
 
-            <form onSubmit={handleGuardarNuevoMedidor} className="space-y-4">
+            <form noValidate onSubmit={handleGuardarNuevoMedidor} className="space-y-4">
               {/* Coordenadas GPS fijadas desde el mapa */}
               <div className="p-2.5 bg-stone-50 border border-stone-200 rounded-xl text-xs grid grid-cols-2 gap-2 text-stone-600">
                 <div>
@@ -765,10 +1125,8 @@ export const MapaMedidoresView: React.FC<MapaMedidoresViewProps> = ({
                   Número de Medidor (1..1000) *
                 </label>
                 <input
-                  type="number"
-                  min="1"
-                  max="1000"
-                  step="1"
+                  type="text"
+                  inputMode="numeric"
                   value={nuevoNumero}
                   onChange={(e) => setNuevoNumero(e.target.value)}
                   placeholder="Ej: 85"
@@ -803,32 +1161,34 @@ export const MapaMedidoresView: React.FC<MapaMedidoresViewProps> = ({
                   onChange={(e) => setNuevaZona(e.target.value)}
                   className="w-full p-2 bg-stone-50 border border-stone-300 rounded-lg text-xs focus:bg-white"
                 >
-                  <option value="San José">San José</option>
-                  <option value="San Lorenzo Centro">San Lorenzo Centro</option>
-                  <option value="Barcequillo">Barcequillo</option>
-                  <option value="Reducto">Reducto</option>
-                  <option value="Luque">Luque</option>
-                  <option value="Capiatá">Capiatá</option>
-                  <option value="Ruta 2">Ruta 2</option>
-                  <option value="Patiño">Patiño</option>
+                  {ZONAS_AGUATERIA_SECTOR.map((z) => (
+                    <option key={z} value={z}>
+                      {z}
+                    </option>
+                  ))}
                 </select>
               </div>
 
               <div className="flex items-center justify-end gap-2 pt-3 border-t border-stone-200">
                 <button
                   type="button"
+                  disabled={guardando}
                   onClick={handleCancelarModoUbicacion}
-                  className="px-4 py-2 border border-stone-300 text-stone-700 font-bold text-xs rounded-xl hover:bg-stone-50"
+                  className="px-4 py-2 border border-stone-300 text-stone-700 font-bold text-xs rounded-xl hover:bg-stone-50 disabled:opacity-40"
                 >
                   Cancelar
                 </button>
                 <button
                   type="submit"
-                  disabled={!nuevoClienteId || !nuevoNumero}
+                  disabled={guardando || !nuevoClienteId || !nuevoNumero}
                   className="px-4 py-2 bg-blue-600 text-white font-bold text-xs rounded-xl hover:bg-blue-700 disabled:opacity-50 transition-all shadow-xs flex items-center gap-1.5"
                 >
-                  <MapPin className="w-4 h-4" />
-                  Guardar y Ubicar Medidor
+                  {guardando ? (
+                    <Loader2 className="w-4 h-4 animate-spin" />
+                  ) : (
+                    <MapPin className="w-4 h-4" />
+                  )}
+                  <span>{guardando ? 'Guardando...' : 'Guardar y Ubicar Medidor'}</span>
                 </button>
               </div>
             </form>

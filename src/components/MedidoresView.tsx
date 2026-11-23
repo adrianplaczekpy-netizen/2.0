@@ -3,10 +3,16 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import { db } from '../services/database';
+import { isSupabaseConfigured } from '../services/supabaseClient';
 import { EstadoMedidor, Medidor } from '../types';
 import { formatGs, validarNumeroMedidor } from '../services/billingRules';
+import {
+  ZONAS_AGUATERIA_SECTOR,
+  ZONA_AGUATERIA_DEFAULT,
+  resolverZonaParaEdicion,
+} from '../config/aguateriaConfig';
 import {
   Droplets,
   Search,
@@ -26,7 +32,10 @@ import {
   AlertCircle,
   MapPin,
   User,
+  RotateCcw,
+  Loader2,
 } from 'lucide-react';
+import { ModalRegistrarReconexion } from './ModalRegistrarReconexion';
 
 interface MedidoresViewProps {
   onGoToLectura?: (medidorNum: number) => void;
@@ -57,7 +66,7 @@ export const MedidoresView: React.FC<MedidoresViewProps> = ({
   const [nuevoNumero, setNuevoNumero] = useState('');
   const [nuevoClienteId, setNuevoClienteId] = useState('');
   const [nuevaDireccion, setNuevaDireccion] = useState('');
-  const [nuevaZona, setNuevaZona] = useState('San José');
+  const [nuevaZona, setNuevaZona] = useState<string>(ZONA_AGUATERIA_DEFAULT);
   const [nuevaLat, setNuevaLat] = useState('-25.3400');
   const [nuevaLng, setNuevaLng] = useState('-57.5100');
   const [nuevaFechaInst, setNuevaFechaInst] = useState(new Date().toISOString().split('T')[0]);
@@ -70,7 +79,35 @@ export const MedidoresView: React.FC<MedidoresViewProps> = ({
   const [editEstado, setEditEstado] = useState<EstadoMedidor>('activo');
 
   const [errorModal, setErrorModal] = useState<string | null>(null);
+  const [errorEliminarModal, setErrorEliminarModal] = useState<string | null>(null);
+  const [errorVista, setErrorVista] = useState<string | null>(null);
   const [mensajeExito, setMensajeExito] = useState<string | null>(null);
+  const [guardando, setGuardando] = useState<boolean>(false);
+  const [eliminando, setEliminando] = useState<boolean>(false);
+  const [toast, setToast] = useState<{ tipo: 'success' | 'error'; texto: string } | null>(null);
+  const [, setRefreshTrigger] = useState<number>(0);
+  const [confirmandoRetiroDetalle, setConfirmandoRetiroDetalle] = useState(false);
+  const [procesandoRetiroDetalle, setProcesandoRetiroDetalle] = useState(false);
+  const [medidorReconexionId, setMedidorReconexionId] = useState<string | null>(null);
+
+  useEffect(() => {
+    const unsubscribe = db.subscribe(() => {
+      setRefreshTrigger((k) => k + 1);
+    });
+    return () => {
+      unsubscribe();
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!toast) return;
+    const t = setTimeout(() => setToast(null), 4500);
+    return () => clearTimeout(t);
+  }, [toast]);
+
+  const mostrarToast = (tipo: 'success' | 'error', texto: string) => {
+    setToast({ tipo, texto });
+  };
 
   // 50 registros por página
   const limit = 50;
@@ -104,7 +141,7 @@ export const MedidoresView: React.FC<MedidoresViewProps> = ({
   const handleAbrirCrear = () => {
     setNuevoNumero('');
     setNuevaDireccion('');
-    setNuevaZona('San José');
+    setNuevaZona(ZONA_AGUATERIA_DEFAULT);
     setNuevaLat('-25.3400');
     setNuevaLng('-57.5100');
     setNuevaFechaInst(new Date().toISOString().split('T')[0]);
@@ -118,15 +155,16 @@ export const MedidoresView: React.FC<MedidoresViewProps> = ({
   const handleAbrirEditar = (m: Medidor) => {
     setMedidorParaEditar(m);
     setEditDireccion(m.direccion);
-    setEditZona(m.zona);
+    setEditZona(resolverZonaParaEdicion(m.zona));
     setEditLat(String(m.latitud));
     setEditLng(String(m.longitud));
     setEditEstado(m.estado);
     setErrorModal(null);
   };
 
-  const handleCrearMedidor = (e: React.FormEvent) => {
+  const handleCrearMedidor = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (guardando) return;
     setErrorModal(null);
 
     const tarifa = db.getTarifasVigentes();
@@ -156,8 +194,9 @@ export const MedidoresView: React.FC<MedidoresViewProps> = ({
       return;
     }
 
+    setGuardando(true);
     try {
-      db.agregarMedidor({
+      await db.agregarMedidorAsync({
         cliente_id: nuevoClienteId,
         numero_medidor: validacion.numero,
         fecha_instalacion: nuevaFechaInst || new Date().toISOString().split('T')[0],
@@ -168,20 +207,34 @@ export const MedidoresView: React.FC<MedidoresViewProps> = ({
         estado: 'activo',
       });
 
-      setMensajeExito(`Medidor N° ${validacion.numero} asignado y registrado correctamente.`);
+      if (isSupabaseConfigured) {
+        await db.loadFromSupabase({ force: true });
+      }
+
+      const okMsg = `Medidor N° ${validacion.numero} asignado y registrado correctamente.`;
+      setMensajeExito(okMsg);
+      mostrarToast('success', okMsg);
       setShowAddModal(false);
     } catch (err: any) {
-      setErrorModal(err.message || 'Error al guardar el medidor.');
+      setErrorModal(err?.message || 'Error al guardar el medidor.');
+    } finally {
+      setGuardando(false);
     }
   };
 
-  const handleGuardarEdicion = (e: React.FormEvent) => {
+  const handleGuardarEdicion = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!medidorParaEditar) return;
+    if (!medidorParaEditar || guardando) return;
     setErrorModal(null);
 
+    if (!editDireccion.trim()) {
+      setErrorModal('Debe ingresar la dirección del terreno.');
+      return;
+    }
+
+    setGuardando(true);
     try {
-      db.actualizarMedidor(medidorParaEditar.id, {
+      await db.actualizarMedidorAsync(medidorParaEditar.id, {
         direccion: editDireccion.trim(),
         zona: editZona,
         latitud: parseFloat(editLat) || medidorParaEditar.latitud,
@@ -189,30 +242,90 @@ export const MedidoresView: React.FC<MedidoresViewProps> = ({
         estado: editEstado,
       });
 
-      setMensajeExito(`Medidor N° ${medidorParaEditar.numero_medidor} actualizado.`);
+      if (isSupabaseConfigured) {
+        await db.loadFromSupabase({ force: true });
+      }
+
+      const okMsg = `Medidor N° ${medidorParaEditar.numero_medidor} actualizado correctamente.`;
+      setMensajeExito(okMsg);
+      mostrarToast('success', okMsg);
       setMedidorParaEditar(null);
     } catch (err: any) {
-      setErrorModal(err.message || 'Error al actualizar el medidor.');
+      setErrorModal(err?.message || 'Error al actualizar el medidor.');
+    } finally {
+      setGuardando(false);
     }
   };
 
-  const handleConfirmarEliminar = () => {
-    if (!medidorParaEliminar) return;
+  const handleConfirmarEliminar = async () => {
+    if (!medidorParaEliminar || eliminando) return;
+    setErrorEliminarModal(null);
+    setErrorVista(null);
+    setEliminando(true);
 
     try {
-      db.eliminarMedidor(medidorParaEliminar.id);
-      setMensajeExito(`Medidor N° ${medidorParaEliminar.numero_medidor} eliminado del padrón.`);
-      setMedidorParaEliminar(null);
+      await db.eliminarMedidorAsync(medidorParaEliminar.id);
+
+      if (isSupabaseConfigured) {
+        await db.loadFromSupabase({ force: true });
+      }
+
+      const numEliminado = medidorParaEliminar.numero_medidor;
       if (selectedMedidorId === medidorParaEliminar.id) {
         setSelectedMedidorId(null);
       }
+      setMedidorParaEliminar(null);
+      const okMsg = `Medidor N° ${numEliminado} eliminado del padrón.`;
+      setMensajeExito(okMsg);
+      mostrarToast('success', okMsg);
     } catch (err: any) {
-      alert(err.message);
+      setErrorEliminarModal(err?.message || 'Error al eliminar el medidor.');
+    } finally {
+      setEliminando(false);
+    }
+  };
+
+  const handleConfirmarRetiroDetalle = async (medidor: Medidor) => {
+    setErrorVista(null);
+    setProcesandoRetiroDetalle(true);
+    try {
+      await db.confirmarCorteFisicoAsync(medidor.id);
+      setConfirmandoRetiroDetalle(false);
+      setMensajeExito(`Retiro físico registrado para Medidor N° ${medidor.numero_medidor}. Estado actualizado a CORTADO.`);
+    } catch (err: any) {
+      setErrorVista(err?.message || 'Error al registrar retiro físico del medidor.');
+    } finally {
+      setProcesandoRetiroDetalle(false);
     }
   };
 
   return (
     <div className="space-y-6">
+      {toast && (
+        <div
+          role="status"
+          className={`fixed bottom-5 right-5 z-50 max-w-sm px-4 py-3 rounded-xl shadow-lg border text-xs font-bold flex items-center gap-2.5 ${
+            toast.tipo === 'success'
+              ? 'bg-emerald-900 text-white border-emerald-700'
+              : 'bg-red-900 text-white border-red-700'
+          }`}
+        >
+          {toast.tipo === 'success' ? (
+            <CheckCircle2 className="w-4 h-4 text-emerald-300 shrink-0" />
+          ) : (
+            <AlertTriangle className="w-4 h-4 text-red-300 shrink-0" />
+          )}
+          <span className="flex-1">{toast.texto}</span>
+          <button
+            type="button"
+            onClick={() => setToast(null)}
+            aria-label="Cerrar notificación"
+            className="opacity-75 hover:opacity-100"
+          >
+            <X className="w-4 h-4" />
+          </button>
+        </div>
+      )}
       {/* Header */}
       <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3 border-b border-stone-200 pb-4">
         <div>
@@ -241,6 +354,22 @@ export const MedidoresView: React.FC<MedidoresViewProps> = ({
             type="button"
             onClick={() => setMensajeExito(null)}
             className="text-xs text-emerald-800 hover:underline"
+          >
+            Cerrar
+          </button>
+        </div>
+      )}
+
+      {errorVista && (
+        <div className="p-4 bg-red-50 border border-red-300 rounded-xl text-red-900 text-sm font-semibold flex items-center justify-between">
+          <div className="flex items-center gap-2">
+            <AlertTriangle className="w-5 h-5 text-red-600 shrink-0" />
+            <span>{errorVista}</span>
+          </div>
+          <button
+            type="button"
+            onClick={() => setErrorVista(null)}
+            className="text-xs text-red-800 hover:underline"
           >
             Cerrar
           </button>
@@ -296,12 +425,11 @@ export const MedidoresView: React.FC<MedidoresViewProps> = ({
                 className="p-1.5 bg-stone-50 border border-stone-300 rounded-md text-xs font-semibold"
               >
                 <option value="todas">Todas las zonas</option>
-                <option value="San José">San José</option>
-                <option value="Lucerito">Lucerito</option>
-                <option value="Reducto">Reducto</option>
-                <option value="Barcequillo">Barcequillo</option>
-                <option value="Laurelty">Laurelty</option>
-                <option value="Centro">Centro</option>
+                {ZONAS_AGUATERIA_SECTOR.map((z) => (
+                  <option key={z} value={z}>
+                    {z}
+                  </option>
+                ))}
               </select>
             </div>
           </div>
@@ -445,7 +573,10 @@ export const MedidoresView: React.FC<MedidoresViewProps> = ({
 
                       <button
                         type="button"
-                        onClick={() => setMedidorParaEliminar(m)}
+                        onClick={() => {
+                          setErrorEliminarModal(null);
+                          setMedidorParaEliminar(m);
+                        }}
                         className="p-1.5 bg-stone-100 hover:bg-red-50 text-stone-500 hover:text-red-700 rounded-md"
                         title="Dar de baja / eliminar medidor"
                       >
@@ -486,6 +617,7 @@ export const MedidoresView: React.FC<MedidoresViewProps> = ({
       {showAddModal && (
         <div className="fixed inset-0 bg-black/50 z-50 flex items-center justify-center p-4">
           <form
+            noValidate
             onSubmit={handleCrearMedidor}
             className="bg-white rounded-2xl max-w-md w-full p-6 shadow-xl space-y-4"
           >
@@ -496,8 +628,9 @@ export const MedidoresView: React.FC<MedidoresViewProps> = ({
               </div>
               <button
                 type="button"
+                disabled={guardando}
                 onClick={() => setShowAddModal(false)}
-                className="text-stone-400 hover:text-stone-700"
+                className="text-stone-400 hover:text-stone-700 disabled:opacity-40"
               >
                 <X className="w-5 h-5" />
               </button>
@@ -552,7 +685,7 @@ export const MedidoresView: React.FC<MedidoresViewProps> = ({
                   required
                   value={nuevaDireccion}
                   onChange={(e) => setNuevaDireccion(e.target.value)}
-                  placeholder="Ej: Barrio San José, Calle Los Laureles c/ 14 de Mayo"
+                  placeholder="Ej: SAN GABRIEL, Calle Principal - Lote 14"
                   className="w-full p-2.5 bg-stone-50 border border-stone-300 rounded-lg text-xs"
                 />
               </div>
@@ -565,12 +698,11 @@ export const MedidoresView: React.FC<MedidoresViewProps> = ({
                     onChange={(e) => setNuevaZona(e.target.value)}
                     className="w-full p-2 bg-stone-50 border border-stone-300 rounded-lg text-xs"
                   >
-                    <option value="San José">San José</option>
-                    <option value="Lucerito">Lucerito</option>
-                    <option value="Reducto">Reducto</option>
-                    <option value="Barcequillo">Barcequillo</option>
-                    <option value="Laurelty">Laurelty</option>
-                    <option value="Centro">Centro</option>
+                    {ZONAS_AGUATERIA_SECTOR.map((z) => (
+                      <option key={z} value={z}>
+                        {z}
+                      </option>
+                    ))}
                   </select>
                 </div>
                 <div>
@@ -607,16 +739,19 @@ export const MedidoresView: React.FC<MedidoresViewProps> = ({
             <div className="pt-2 border-t border-stone-200 flex justify-end gap-2">
               <button
                 type="button"
+                disabled={guardando}
                 onClick={() => setShowAddModal(false)}
-                className="px-3 py-2 bg-stone-100 hover:bg-stone-200 text-stone-800 rounded-lg font-semibold text-xs"
+                className="px-3 py-2 bg-stone-100 hover:bg-stone-200 disabled:opacity-40 text-stone-800 rounded-lg font-semibold text-xs"
               >
                 Cancelar
               </button>
               <button
                 type="submit"
-                className="px-4 py-2 bg-stone-900 hover:bg-stone-800 text-white rounded-lg font-bold text-xs"
+                disabled={guardando}
+                className="px-4 py-2 bg-stone-900 hover:bg-stone-800 disabled:opacity-40 text-white rounded-lg font-bold text-xs inline-flex items-center gap-1.5"
               >
-                Guardar Medidor
+                {guardando && <Loader2 className="w-3.5 h-3.5 animate-spin" />}
+                <span>{guardando ? 'Guardando...' : 'Guardar Medidor'}</span>
               </button>
             </div>
           </form>
@@ -627,6 +762,7 @@ export const MedidoresView: React.FC<MedidoresViewProps> = ({
       {medidorParaEditar && (
         <div className="fixed inset-0 bg-black/50 z-50 flex items-center justify-center p-4">
           <form
+            noValidate
             onSubmit={handleGuardarEdicion}
             className="bg-white rounded-2xl max-w-md w-full p-6 shadow-xl space-y-4"
           >
@@ -639,8 +775,9 @@ export const MedidoresView: React.FC<MedidoresViewProps> = ({
               </div>
               <button
                 type="button"
+                disabled={guardando}
                 onClick={() => setMedidorParaEditar(null)}
-                className="text-stone-400 hover:text-stone-700"
+                className="text-stone-400 hover:text-stone-700 disabled:opacity-40"
               >
                 <X className="w-5 h-5" />
               </button>
@@ -673,12 +810,11 @@ export const MedidoresView: React.FC<MedidoresViewProps> = ({
                     onChange={(e) => setEditZona(e.target.value)}
                     className="w-full p-2 bg-stone-50 border border-stone-300 rounded-lg text-xs"
                   >
-                    <option value="San José">San José</option>
-                    <option value="Lucerito">Lucerito</option>
-                    <option value="Reducto">Reducto</option>
-                    <option value="Barcequillo">Barcequillo</option>
-                    <option value="Laurelty">Laurelty</option>
-                    <option value="Centro">Centro</option>
+                    {ZONAS_AGUATERIA_SECTOR.map((z) => (
+                      <option key={z} value={z}>
+                        {z}
+                      </option>
+                    ))}
                   </select>
                 </div>
 
@@ -723,16 +859,19 @@ export const MedidoresView: React.FC<MedidoresViewProps> = ({
             <div className="pt-2 border-t border-stone-200 flex justify-end gap-2">
               <button
                 type="button"
+                disabled={guardando}
                 onClick={() => setMedidorParaEditar(null)}
-                className="px-3 py-2 bg-stone-100 hover:bg-stone-200 text-stone-800 rounded-lg font-semibold text-xs"
+                className="px-3 py-2 bg-stone-100 hover:bg-stone-200 disabled:opacity-40 text-stone-800 rounded-lg font-semibold text-xs"
               >
                 Cancelar
               </button>
               <button
                 type="submit"
-                className="px-4 py-2 bg-stone-900 hover:bg-stone-800 text-white rounded-lg font-bold text-xs"
+                disabled={guardando}
+                className="px-4 py-2 bg-stone-900 hover:bg-stone-800 disabled:opacity-40 text-white rounded-lg font-bold text-xs inline-flex items-center gap-1.5"
               >
-                Guardar Cambios
+                {guardando && <Loader2 className="w-3.5 h-3.5 animate-spin" />}
+                <span>{guardando ? 'Guardando...' : 'Guardar Cambios'}</span>
               </button>
             </div>
           </form>
@@ -753,20 +892,33 @@ export const MedidoresView: React.FC<MedidoresViewProps> = ({
               Esta unidad pertenece a <b>{medidorParaEliminar.clienteNombre}</b>.
             </p>
 
+            {errorEliminarModal && (
+              <div className="p-3 bg-red-50 border border-red-300 rounded-xl text-red-900 text-xs font-semibold flex items-start gap-2">
+                <AlertTriangle className="w-4 h-4 text-red-600 shrink-0 mt-0.5" />
+                <span>{errorEliminarModal}</span>
+              </div>
+            )}
+
             <div className="flex justify-end gap-2 pt-2 border-t border-stone-200">
               <button
                 type="button"
-                onClick={() => setMedidorParaEliminar(null)}
-                className="px-3 py-2 bg-stone-100 hover:bg-stone-200 text-stone-800 rounded-lg font-semibold text-xs"
+                disabled={eliminando}
+                onClick={() => {
+                  setErrorEliminarModal(null);
+                  setMedidorParaEliminar(null);
+                }}
+                className="px-3 py-2 bg-stone-100 hover:bg-stone-200 disabled:opacity-40 text-stone-800 rounded-lg font-semibold text-xs"
               >
                 Cancelar
               </button>
               <button
                 type="button"
-                onClick={handleConfirmarEliminar}
-                className="px-4 py-2 bg-red-600 hover:bg-red-700 text-white rounded-lg font-bold text-xs"
+                disabled={eliminando}
+                onClick={() => void handleConfirmarEliminar()}
+                className="px-4 py-2 bg-red-600 hover:bg-red-700 disabled:opacity-40 text-white rounded-lg font-bold text-xs inline-flex items-center gap-1.5"
               >
-                Confirmar Baja
+                {eliminando && <Loader2 className="w-3.5 h-3.5 animate-spin" />}
+                <span>{eliminando ? 'Eliminando...' : 'Confirmar Baja'}</span>
               </button>
             </div>
           </div>
@@ -780,21 +932,116 @@ export const MedidoresView: React.FC<MedidoresViewProps> = ({
             <div className="flex items-start justify-between border-b border-stone-200 pb-3">
               <div>
                 <span className="text-xs uppercase font-bold text-stone-500">Detalle de Unidad</span>
-                <h2 className="text-xl font-black text-stone-900">
-                  Medidor N° {medidorDetalle.medidor.numero_medidor}
-                </h2>
-                <p className="text-xs text-stone-600">
+                <div className="flex flex-wrap items-center gap-2">
+                  <h2 className="text-xl font-black text-stone-900">
+                    Medidor N° {medidorDetalle.medidor.numero_medidor}
+                  </h2>
+                  <span
+                    className={`px-2.5 py-0.5 rounded-sm text-xs font-bold uppercase ${
+                      medidorDetalle.medidor.estado === 'pendiente_corte' ||
+                      medidorDetalle.medidor.estado === 'cortado'
+                        ? 'bg-red-100 text-red-800 border border-red-300'
+                        : medidorDetalle.medidor.estado === 'moroso'
+                        ? 'bg-amber-100 text-amber-800 border border-amber-300'
+                        : medidorDetalle.medidor.estado === 'activo'
+                        ? 'bg-emerald-100 text-emerald-800 border border-emerald-300'
+                        : 'bg-stone-200 text-stone-700 border border-stone-300'
+                    }`}
+                  >
+                    {medidorDetalle.medidor.estado === 'pendiente_corte'
+                      ? 'Pendiente de corte'
+                      : medidorDetalle.medidor.estado === 'cortado'
+                      ? 'Cortado'
+                      : medidorDetalle.medidor.estado === 'moroso'
+                      ? 'Moroso'
+                      : medidorDetalle.medidor.estado === 'activo'
+                      ? 'Activo'
+                      : 'Retirado'}
+                  </span>
+                </div>
+                <p className="text-xs text-stone-600 mt-1">
                   Titular: <b>{medidorDetalle.cliente?.nombre_completo}</b> | C.I.: {medidorDetalle.cliente?.documento}
                 </p>
               </div>
               <button
                 type="button"
-                onClick={() => setSelectedMedidorId(null)}
+                onClick={() => {
+                  setSelectedMedidorId(null);
+                  setConfirmandoRetiroDetalle(false);
+                }}
                 className="p-1.5 text-stone-400 hover:text-stone-700 rounded-lg"
               >
                 <X className="w-5 h-5" />
               </button>
             </div>
+
+            {(medidorDetalle.medidor.estado === 'pendiente_corte' ||
+              medidorDetalle.medidor.estado === 'cortado') && (
+              <div className="p-3.5 bg-red-50 border border-red-200 rounded-xl space-y-2.5">
+                <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
+                  <div className="text-xs text-red-900">
+                    <span className="font-bold block">
+                      {medidorDetalle.medidor.estado === 'pendiente_corte'
+                        ? 'Unidad con orden de corte pendiente'
+                        : 'Unidad actualmente cortada / retirada físicamente'}
+                    </span>
+                    <span>
+                      {medidorDetalle.medidor.estado === 'pendiente_corte'
+                        ? 'Debe registrarse el retiro físico del medidor para congelar la mora.'
+                        : `Corte registrado el ${medidorDetalle.medidor.fecha_corte || 'N/D'} • Mora congelada: ${formatGs(medidorDetalle.medidor.mora_congelada || 0)}`}
+                    </span>
+                  </div>
+
+                  {medidorDetalle.medidor.estado === 'pendiente_corte' && !confirmandoRetiroDetalle && (
+                    <button
+                      type="button"
+                      onClick={() => setConfirmandoRetiroDetalle(true)}
+                      className="px-3.5 py-2 bg-red-600 hover:bg-red-700 text-white font-bold text-xs rounded-lg flex items-center gap-1.5 shrink-0 cursor-pointer"
+                    >
+                      <Scissors className="w-4 h-4" />
+                      <span>Registrar retiro</span>
+                    </button>
+                  )}
+
+                  {medidorDetalle.medidor.estado === 'cortado' && (
+                    <button
+                      type="button"
+                      onClick={() => setMedidorReconexionId(medidorDetalle.medidor!.id)}
+                      className="px-3.5 py-2 bg-emerald-600 hover:bg-emerald-700 text-white font-bold text-xs rounded-lg flex items-center gap-1.5 shrink-0 cursor-pointer"
+                    >
+                      <RotateCcw className="w-4 h-4" />
+                      <span>Registrar reconexión</span>
+                    </button>
+                  )}
+                </div>
+
+                {medidorDetalle.medidor.estado === 'pendiente_corte' && confirmandoRetiroDetalle && (
+                  <div className="pt-2 border-t border-red-200 flex flex-col sm:flex-row sm:items-center justify-between gap-2 text-xs">
+                    <span className="text-red-900 font-semibold">
+                      ¿Confirmar retiro físico del Medidor N° {medidorDetalle.medidor.numero_medidor}?
+                    </span>
+                    <div className="flex items-center gap-2 shrink-0">
+                      <button
+                        type="button"
+                        onClick={() => setConfirmandoRetiroDetalle(false)}
+                        disabled={procesandoRetiroDetalle}
+                        className="px-3 py-1.5 bg-white hover:bg-stone-100 text-stone-700 border border-stone-300 rounded-md font-semibold cursor-pointer"
+                      >
+                        Cancelar
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => handleConfirmarRetiroDetalle(medidorDetalle.medidor!)}
+                        disabled={procesandoRetiroDetalle}
+                        className="px-3 py-1.5 bg-red-600 hover:bg-red-700 text-white rounded-md font-bold cursor-pointer disabled:opacity-60"
+                      >
+                        {procesandoRetiroDetalle ? 'Registrando...' : 'Confirmar retiro'}
+                      </button>
+                    </div>
+                  </div>
+                )}
+              </div>
+            )}
 
             {/* Ficha técnica */}
             <div className="grid grid-cols-2 gap-3 text-xs bg-stone-50 p-3.5 rounded-xl border border-stone-200">
@@ -883,7 +1130,11 @@ export const MedidoresView: React.FC<MedidoresViewProps> = ({
                             className={`px-1.5 py-0.5 rounded-sm font-bold uppercase text-[9px] ${
                               f.estado === 'pagada'
                                 ? 'bg-emerald-100 text-emerald-800'
-                                : 'bg-red-100 text-red-800'
+                                : f.estado === 'refinanciada'
+                                  ? 'bg-indigo-100 text-indigo-800'
+                                  : f.estado === 'anulada'
+                                    ? 'bg-stone-200 text-stone-700'
+                                    : 'bg-red-100 text-red-800'
                             }`}
                           >
                             {f.estado}
@@ -908,6 +1159,18 @@ export const MedidoresView: React.FC<MedidoresViewProps> = ({
             </div>
           </div>
         </div>
+      )}
+      {medidorReconexionId && (
+        <ModalRegistrarReconexion
+          medidorId={medidorReconexionId}
+          isOpen={Boolean(medidorReconexionId)}
+          onClose={() => setMedidorReconexionId(null)}
+          onSuccess={(resultado) => {
+            setMensajeExito(
+              `Medidor N° ${resultado.medidor.numero_medidor} reconectado y restituido a ACTIVO.`
+            );
+          }}
+        />
       )}
     </div>
   );

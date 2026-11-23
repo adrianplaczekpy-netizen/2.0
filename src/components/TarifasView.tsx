@@ -3,19 +3,23 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { db } from '../services/database';
-import { TarifaConfig, AuditoriaCambioParametro } from '../types';
+import { isSupabaseConfigured, supabase } from '../services/supabaseClient';
+import { TarifaConfig } from '../types';
 import { useAuth } from '../context/AuthContext';
 import {
-  Settings,
+  construirMensajeResumenErroresTarifa,
+  seleccionarPrimerCampoConError,
+} from '../utils/tarifaValidationHelper';
+import {
   CheckCircle2,
   AlertTriangle,
   History,
-  Save,
-  Download,
-  RotateCcw,
   ShieldAlert,
+  AlertCircle,
+  Loader2,
+  X,
 } from 'lucide-react';
 
 export const TarifasView: React.FC = () => {
@@ -54,7 +58,20 @@ export const TarifasView: React.FC = () => {
   const [errores, setErrores] = useState<Record<string, string>>({});
   const [mensajeExito, setMensajeExito] = useState<string | null>(null);
   const [mensajeErrorGlobal, setMensajeErrorGlobal] = useState<string | null>(null);
-  const [isSaving, setIsSaving] = useState<boolean>(false);
+  const [guardando, setGuardando] = useState<boolean>(false);
+  const [showConfirmModal, setShowConfirmModal] = useState<boolean>(false);
+  const [errorModal, setErrorModal] = useState<string | null>(null);
+  const [toast, setToast] = useState<{ tipo: 'success' | 'error'; texto: string } | null>(null);
+  const [usuariosNombresMap, setUsuariosNombresMap] = useState<Record<string, string>>({});
+
+  const errorBannerRef = useRef<HTMLDivElement | null>(null);
+  const fieldRefs = useRef<Record<string, HTMLInputElement | HTMLTextAreaElement | null>>({});
+  const setFieldRef = (campo: string) => (el: HTMLInputElement | HTMLTextAreaElement | null) => {
+    fieldRefs.current[campo] = el;
+  };
+
+  const modalOpenOrSavingRef = useRef(false);
+  modalOpenOrSavingRef.current = showConfirmModal || guardando;
 
   const sincronizarDesdeTarifa = (tarifa: TarifaConfig) => {
     setTarifasVigentes(tarifa);
@@ -80,10 +97,43 @@ export const TarifasView: React.FC = () => {
 
   useEffect(() => {
     const unsub = db.subscribe(() => {
+      if (modalOpenOrSavingRef.current) return;
       sincronizarDesdeTarifa(db.getTarifasVigentes());
     });
     return unsub;
   }, []);
+
+  useEffect(() => {
+    if (!isSupabaseConfigured || !supabase) return;
+    let cancelado = false;
+    supabase
+      .from('usuarios')
+      .select('id, nombre_completo, email')
+      .limit(500)
+      .then(({ data, error }) => {
+        if (cancelado || error || !Array.isArray(data)) return;
+        const map: Record<string, string> = {};
+        for (const u of data) {
+          if (u?.id) {
+            map[u.id] = u.nombre_completo || u.email || u.id;
+          }
+        }
+        setUsuariosNombresMap(map);
+      });
+    return () => {
+      cancelado = true;
+    };
+  }, [historial.length]);
+
+  useEffect(() => {
+    if (!toast) return;
+    const t = setTimeout(() => setToast(null), 4500);
+    return () => clearTimeout(t);
+  }, [toast]);
+
+  const mostrarToast = (tipo: 'success' | 'error', texto: string) => {
+    setToast({ tipo, texto });
+  };
 
   // Si un no-admin intenta acceder, mostrar "Acceso denegado"
   if (user?.rol !== 'admin') {
@@ -102,22 +152,26 @@ export const TarifasView: React.FC = () => {
 
   // Carga de valores iniciales cuando la tabla está vacía
   const handleCargarValoresIniciales = async () => {
+    if (guardando) return;
     setMensajeErrorGlobal(null);
     setMensajeExito(null);
-    setIsSaving(true);
+    setGuardando(true);
     try {
       const tarifaCargada = await db.cargarValoresIniciales(
         user?.nombre || user?.email || 'admin',
         new Date().toISOString().split('T')[0]
       );
-      sincronizarDesdeTarifa(tarifaCargada);
-      setMensajeExito(
-        'Valores iniciales regulados cargados exitosamente con fecha de vigencia de hoy.'
-      );
+      if (isSupabaseConfigured) {
+        await db.loadFromSupabase({ force: true });
+      }
+      sincronizarDesdeTarifa(db.getTarifasVigentes() || tarifaCargada);
+      const okMsg = 'Valores iniciales regulados cargados exitosamente con fecha de vigencia de hoy.';
+      setMensajeExito(okMsg);
+      mostrarToast('success', okMsg);
     } catch (err: any) {
-      setMensajeErrorGlobal(err.message || 'Error al cargar valores iniciales');
+      setMensajeErrorGlobal(err?.message || 'Error al cargar valores iniciales');
     } finally {
-      setIsSaving(false);
+      setGuardando(false);
     }
   };
 
@@ -203,51 +257,121 @@ export const TarifasView: React.FC = () => {
     };
   };
 
+  const construirPayloadTarifa = () => {
+    const diaNormalFinal: 'ultimo_dia_mes' | number =
+      tipoDiaNormal === 'ultimo_dia_mes' ? 'ultimo_dia_mes' : Math.round(Number(diaNormalNumero));
+
+    return {
+      precio_m3: Math.round(Number(precioM3)),
+      consumo_minimo_m3: Math.round(Number(consumoMinimoM3)),
+      monto_minimo_consumo: Math.round(Number(montoMinimoConsumo)),
+      monto_mora_fijo: Math.round(Number(montoMoraFijo)),
+      monto_reconexion: Math.round(Number(montoReconexion)),
+      erssan_porcentaje: Number(erssanPorcentaje),
+      dia_vencimiento_boletas_normales: diaNormalFinal,
+      dia_vencimiento_tercera_boleta: Math.round(Number(diaVenc3ra)),
+      umbral_alerta_consumo: Number(umbralAlerta),
+      texto_alerta_consumo: textoAlerta.trim(),
+      max_numero_medidor: Math.round(Number(maxNumeroMedidor)),
+    };
+  };
+
+  const enfocarPrimerError = (errs: Record<string, string>) => {
+    const primerCampo = seleccionarPrimerCampoConError(errs);
+    setTimeout(() => {
+      const targetEl = primerCampo ? fieldRefs.current[primerCampo] : null;
+      if (targetEl && typeof targetEl.scrollIntoView === 'function') {
+        targetEl.scrollIntoView({ behavior: 'smooth', block: 'center' });
+        if (typeof targetEl.focus === 'function') {
+          targetEl.focus({ preventScroll: true });
+        }
+      } else if (errorBannerRef.current && typeof errorBannerRef.current.scrollIntoView === 'function') {
+        errorBannerRef.current.scrollIntoView({ behavior: 'smooth', block: 'center' });
+      }
+    }, 0);
+  };
+
   const handleGuardar = (e: React.FormEvent) => {
     e.preventDefault();
+    if (guardando) return;
     setMensajeErrorGlobal(null);
     setMensajeExito(null);
+    setErrorModal(null);
 
     const check = validarCampos();
     setErrores(check.errores);
 
     if (!check.valido) {
-      setMensajeErrorGlobal('Por favor corrija los campos con errores antes de guardar.');
+      const msgResumen = construirMensajeResumenErroresTarifa(check.errores);
+      setMensajeErrorGlobal(msgResumen);
+      mostrarToast('error', msgResumen);
+      enfocarPrimerError(check.errores);
       return;
     }
 
-    setIsSaving(true);
-    try {
-      const diaNormalFinal = tipoDiaNormal === 'ultimo_dia_mes' ? 'ultimo_dia_mes' : Number(diaNormalNumero);
+    const payload = construirPayloadTarifa();
+    const hayCambios = (Object.keys(payload) as Array<keyof typeof payload>).some(
+      (k) => String(payload[k]) !== String(tarifasVigentes[k])
+    );
+    if (!hayCambios) {
+      const msgSinCambios = 'No se detectaron cambios en los parámetros respecto a la versión actual.';
+      setMensajeErrorGlobal(msgSinCambios);
+      mostrarToast('error', msgSinCambios);
+      setTimeout(() => {
+        errorBannerRef.current?.scrollIntoView({ behavior: 'smooth', block: 'center' });
+      }, 0);
+      return;
+    }
 
-      const res = db.actualizarTarifas(
-        {
-          precio_m3: Math.round(Number(precioM3)),
-          consumo_minimo_m3: Math.round(Number(consumoMinimoM3)),
-          monto_minimo_consumo: Math.round(Number(montoMinimoConsumo)),
-          monto_mora_fijo: Math.round(Number(montoMoraFijo)),
-          monto_reconexion: Math.round(Number(montoReconexion)),
-          erssan_porcentaje: Number(erssanPorcentaje),
-          dia_vencimiento_boletas_normales: diaNormalFinal,
-          dia_vencimiento_tercera_boleta: Math.round(Number(diaVenc3ra)),
-          umbral_alerta_consumo: Number(umbralAlerta),
-          texto_alerta_consumo: textoAlerta.trim(),
-          max_numero_medidor: Math.round(Number(maxNumeroMedidor)),
-        },
+    setShowConfirmModal(true);
+  };
+
+  const handleConfirmarGuardarTarifa = async () => {
+    if (guardando) return;
+    setErrorModal(null);
+    setMensajeErrorGlobal(null);
+    setGuardando(true);
+
+    try {
+      const payload = construirPayloadTarifa();
+      const res = await db.actualizarTarifasAsync(
+        payload,
         user?.nombre || user?.email || 'admin',
         motivoCambio.trim() || 'Ajuste de pliego tarifario regulado',
         vigenteDesde
       );
 
-      sincronizarDesdeTarifa(res);
-      setMensajeExito(
-        `Nueva versión registrada con éxito con vigencia desde ${res.vigente_desde}. Se registraron ${res.cambiosAuditados?.length || 0} cambios en el historial. Las facturas anteriores permanecen inmutables.`
-      );
+      if (isSupabaseConfigured) {
+        await db.loadFromSupabase({ force: true });
+      }
+
+      const tarifaActualizada = db.getTarifasVigentes() || res;
+      sincronizarDesdeTarifa(tarifaActualizada);
+      setShowConfirmModal(false);
+
+      const okMsg = `Nueva versión registrada con éxito con vigencia desde ${res.vigente_desde}. Se registraron ${res.cambiosAuditados?.length || 0} cambios en el historial. Las facturas anteriores permanecen inmutables.`;
+      setMensajeExito(okMsg);
+      mostrarToast('success', `Nueva versión tarifaria vigente desde ${res.vigente_desde}.`);
     } catch (err: any) {
-      setMensajeErrorGlobal(err.message || 'Error al guardar los cambios en la tarifa.');
+      // Fallo en Supabase: NO cerrar modal, mostrar error inline, NO actualizar estado local
+      setErrorModal(err?.message || 'Error al guardar los cambios en la tarifa.');
     } finally {
-      setIsSaving(false);
+      setGuardando(false);
     }
+  };
+
+  const resolverCreadorTarifa = (t: TarifaConfig): string => {
+    const rawId = t.creado_por;
+    if (rawId && usuariosNombresMap[rawId]) {
+      return usuariosNombresMap[rawId];
+    }
+    if (user?.id && rawId === user.id) {
+      return user.nombre || user.email || 'admin';
+    }
+    if (t.creado_por_nombre && !t.creado_por_nombre.startsWith('Usuario eliminado')) {
+      return t.creado_por_nombre;
+    }
+    return db.resolverNombreUsuario(rawId);
   };
 
   // Extraer todos los cambios históricos para la tabla al pie
@@ -262,13 +386,14 @@ export const TarifasView: React.FC = () => {
 
   for (const t of historial) {
     if (t.auditoria?.cambios && t.auditoria.cambios.length > 0) {
+      const usuarioResuelto = resolverCreadorTarifa(t);
       for (const c of t.auditoria.cambios) {
         filasHistorial.push({
           concepto: c.etiqueta || c.parametro,
           valor_anterior: c.valor_anterior,
           valor_nuevo: c.valor_nuevo,
           fecha: t.vigente_desde || t.fecha_creacion?.split('T')[0] || '-',
-          usuario: t.creado_por || 'admin',
+          usuario: usuarioResuelto,
           motivo: t.motivo_cambio || t.auditoria.motivo || 'Actualización de tarifa',
         });
       }
@@ -277,6 +402,32 @@ export const TarifasView: React.FC = () => {
 
   return (
     <div className="space-y-6 max-w-4xl mx-auto">
+      {toast && (
+        <div
+          role="status"
+          className={`fixed bottom-5 right-5 z-50 max-w-sm px-4 py-3 rounded-xl shadow-lg border text-xs font-bold flex items-center gap-2.5 ${
+            toast.tipo === 'success'
+              ? 'bg-emerald-900 text-white border-emerald-700'
+              : 'bg-red-900 text-white border-red-700'
+          }`}
+        >
+          {toast.tipo === 'success' ? (
+            <CheckCircle2 className="w-4 h-4 text-emerald-300 shrink-0" />
+          ) : (
+            <AlertCircle className="w-4 h-4 text-red-300 shrink-0" />
+          )}
+          <span className="flex-1">{toast.texto}</span>
+          <button
+            type="button"
+            onClick={() => setToast(null)}
+            aria-label="Cerrar notificación"
+            className="opacity-75 hover:opacity-100"
+          >
+            <X className="w-4 h-4" />
+          </button>
+        </div>
+      )}
+
       {/* Encabezado */}
       <div className="border-b border-stone-200 pb-4">
         <div className="flex items-center justify-between">
@@ -308,10 +459,11 @@ export const TarifasView: React.FC = () => {
           <button
             type="button"
             onClick={handleCargarValoresIniciales}
-            disabled={isSaving}
-            className="px-4 py-2 bg-amber-700 hover:bg-amber-800 text-white text-xs font-bold rounded-md transition-colors whitespace-nowrap cursor-pointer shadow-xs disabled:opacity-50"
+            disabled={guardando}
+            className="px-4 py-2 bg-amber-700 hover:bg-amber-800 text-white text-xs font-bold rounded-md transition-colors whitespace-nowrap cursor-pointer shadow-xs disabled:opacity-50 inline-flex items-center gap-1.5"
           >
-            Cargar valores iniciales
+            {guardando && <Loader2 className="w-3.5 h-3.5 animate-spin" />}
+            <span>{guardando ? 'Cargando...' : 'Cargar valores iniciales'}</span>
           </button>
         </div>
       )}
@@ -325,14 +477,18 @@ export const TarifasView: React.FC = () => {
       )}
 
       {mensajeErrorGlobal && (
-        <div className="p-3 bg-red-50 border border-red-300 text-red-900 rounded-lg text-xs flex items-center gap-2">
+        <div
+          ref={errorBannerRef}
+          role="alert"
+          className="p-3 bg-red-50 border border-red-300 text-red-900 rounded-lg text-xs font-semibold flex items-center gap-2"
+        >
           <AlertTriangle className="w-4 h-4 text-red-600 shrink-0" />
           <span>{mensajeErrorGlobal}</span>
         </div>
       )}
 
       {/* Formulario de parámetros */}
-      <form onSubmit={handleGuardar} className="bg-white border border-stone-200 rounded-xl p-5 sm:p-6 shadow-xs space-y-5">
+      <form noValidate onSubmit={handleGuardar} className="bg-white border border-stone-200 rounded-xl p-5 sm:p-6 shadow-xs space-y-5">
         <div className="border-b border-stone-100 pb-3">
           <h2 className="text-xs font-bold uppercase tracking-wider text-stone-500">
             Parámetros configurables del pliego
@@ -350,6 +506,7 @@ export const TarifasView: React.FC = () => {
             </p>
             <div className="relative">
               <input
+                ref={setFieldRef('precio_m3')}
                 type="number"
                 min="1"
                 step="1"
@@ -361,7 +518,7 @@ export const TarifasView: React.FC = () => {
               />
             </div>
             {errores.precio_m3 ? (
-              <p className="text-[11px] text-red-600 mt-1 font-semibold">{errores.precio_m3}</p>
+              <p role="alert" className="text-[11px] text-red-600 mt-1 font-semibold">{errores.precio_m3}</p>
             ) : (
               <p className="text-[10px] text-stone-400 mt-0.5">Por defecto: 4000</p>
             )}
@@ -376,6 +533,7 @@ export const TarifasView: React.FC = () => {
               Volumen mínimo básico mensual cubierto por la tarifa mínima.
             </p>
             <input
+              ref={setFieldRef('consumo_minimo_m3')}
               type="number"
               min="1"
               step="1"
@@ -386,7 +544,7 @@ export const TarifasView: React.FC = () => {
               }`}
             />
             {errores.consumo_minimo_m3 ? (
-              <p className="text-[11px] text-red-600 mt-1 font-semibold">{errores.consumo_minimo_m3}</p>
+              <p role="alert" className="text-[11px] text-red-600 mt-1 font-semibold">{errores.consumo_minimo_m3}</p>
             ) : (
               <p className="text-[10px] text-stone-400 mt-0.5">Por defecto: 9</p>
             )}
@@ -401,6 +559,7 @@ export const TarifasView: React.FC = () => {
               Importe mínimo facturado si el consumo del mes es menor o igual al mínimo.
             </p>
             <input
+              ref={setFieldRef('monto_minimo_consumo')}
               type="number"
               min="1"
               step="1"
@@ -411,7 +570,7 @@ export const TarifasView: React.FC = () => {
               }`}
             />
             {errores.monto_minimo_consumo ? (
-              <p className="text-[11px] text-red-600 mt-1 font-semibold">{errores.monto_minimo_consumo}</p>
+              <p role="alert" className="text-[11px] text-red-600 mt-1 font-semibold">{errores.monto_minimo_consumo}</p>
             ) : (
               <p className="text-[10px] text-stone-400 mt-0.5">Por defecto: 36000</p>
             )}
@@ -426,6 +585,7 @@ export const TarifasView: React.FC = () => {
               Recargo fijo por cada boleta vencida impaga perteneciente al medidor.
             </p>
             <input
+              ref={setFieldRef('monto_mora_fijo')}
               type="number"
               min="0"
               step="1"
@@ -436,7 +596,7 @@ export const TarifasView: React.FC = () => {
               }`}
             />
             {errores.monto_mora_fijo ? (
-              <p className="text-[11px] text-red-600 mt-1 font-semibold">{errores.monto_mora_fijo}</p>
+              <p role="alert" className="text-[11px] text-red-600 mt-1 font-semibold">{errores.monto_mora_fijo}</p>
             ) : (
               <p className="text-[10px] text-stone-400 mt-0.5">Por defecto: 3000</p>
             )}
@@ -451,6 +611,7 @@ export const TarifasView: React.FC = () => {
               Tasa administrativa por reactivación tras corte físico del medidor.
             </p>
             <input
+              ref={setFieldRef('monto_reconexion')}
               type="number"
               min="0"
               step="1"
@@ -461,7 +622,7 @@ export const TarifasView: React.FC = () => {
               }`}
             />
             {errores.monto_reconexion ? (
-              <p className="text-[11px] text-red-600 mt-1 font-semibold">{errores.monto_reconexion}</p>
+              <p role="alert" className="text-[11px] text-red-600 mt-1 font-semibold">{errores.monto_reconexion}</p>
             ) : (
               <p className="text-[10px] text-stone-400 mt-0.5">Por defecto: 60000</p>
             )}
@@ -476,6 +637,7 @@ export const TarifasView: React.FC = () => {
               Porcentaje regulatorio ERSSAN aplicado sobre la suma de conceptos 1 al 7.
             </p>
             <input
+              ref={setFieldRef('erssan_porcentaje')}
               type="number"
               min="0"
               max="100"
@@ -487,7 +649,7 @@ export const TarifasView: React.FC = () => {
               }`}
             />
             {errores.erssan_porcentaje ? (
-              <p className="text-[11px] text-red-600 mt-1 font-semibold">{errores.erssan_porcentaje}</p>
+              <p role="alert" className="text-[11px] text-red-600 mt-1 font-semibold">{errores.erssan_porcentaje}</p>
             ) : (
               <p className="text-[10px] text-stone-400 mt-0.5">Por defecto: 2</p>
             )}
@@ -525,6 +687,7 @@ export const TarifasView: React.FC = () => {
 
               {tipoDiaNormal === 'numero' && (
                 <input
+                  ref={setFieldRef('dia_vencimiento_boletas_normales')}
                   type="number"
                   min="1"
                   max="28"
@@ -538,7 +701,7 @@ export const TarifasView: React.FC = () => {
               )}
             </div>
             {errores.dia_vencimiento_boletas_normales ? (
-              <p className="text-[11px] text-red-600 mt-1 font-semibold">{errores.dia_vencimiento_boletas_normales}</p>
+              <p role="alert" className="text-[11px] text-red-600 mt-1 font-semibold">{errores.dia_vencimiento_boletas_normales}</p>
             ) : (
               <p className="text-[10px] text-stone-400 mt-0.5">Por defecto: &quot;ultimo_dia_mes&quot;</p>
             )}
@@ -553,6 +716,7 @@ export const TarifasView: React.FC = () => {
               Día del mes en que vence la 3ra boleta acumulada antes de pasar a corte.
             </p>
             <input
+              ref={setFieldRef('dia_vencimiento_tercera_boleta')}
               type="number"
               min="1"
               max="28"
@@ -564,7 +728,7 @@ export const TarifasView: React.FC = () => {
               }`}
             />
             {errores.dia_vencimiento_tercera_boleta ? (
-              <p className="text-[11px] text-red-600 mt-1 font-semibold">{errores.dia_vencimiento_tercera_boleta}</p>
+              <p role="alert" className="text-[11px] text-red-600 mt-1 font-semibold">{errores.dia_vencimiento_tercera_boleta}</p>
             ) : (
               <p className="text-[10px] text-stone-400 mt-0.5">Por defecto: 11</p>
             )}
@@ -579,6 +743,7 @@ export const TarifasView: React.FC = () => {
               Factor sobre el promedio de los últimos 3 meses para disparar aviso de pérdida.
             </p>
             <input
+              ref={setFieldRef('umbral_alerta_consumo')}
               type="number"
               min="1"
               step="0.1"
@@ -589,7 +754,7 @@ export const TarifasView: React.FC = () => {
               }`}
             />
             {errores.umbral_alerta_consumo ? (
-              <p className="text-[11px] text-red-600 mt-1 font-semibold">{errores.umbral_alerta_consumo}</p>
+              <p role="alert" className="text-[11px] text-red-600 mt-1 font-semibold">{errores.umbral_alerta_consumo}</p>
             ) : (
               <p className="text-[10px] text-stone-400 mt-0.5">Por defecto: 3</p>
             )}
@@ -604,6 +769,7 @@ export const TarifasView: React.FC = () => {
               Capacidad máxima numérica de medidores autorizados en el padrón.
             </p>
             <input
+              ref={setFieldRef('max_numero_medidor')}
               type="number"
               min="1"
               step="1"
@@ -614,7 +780,7 @@ export const TarifasView: React.FC = () => {
               }`}
             />
             {errores.max_numero_medidor ? (
-              <p className="text-[11px] text-red-600 mt-1 font-semibold">{errores.max_numero_medidor}</p>
+              <p role="alert" className="text-[11px] text-red-600 mt-1 font-semibold">{errores.max_numero_medidor}</p>
             ) : (
               <p className="text-[10px] text-stone-400 mt-0.5">Por defecto: 1000</p>
             )}
@@ -630,6 +796,7 @@ export const TarifasView: React.FC = () => {
             Mensaje preventivo impreso en la factura cuando el consumo supera el umbral.
           </p>
           <textarea
+            ref={setFieldRef('texto_alerta_consumo')}
             rows={2}
             value={textoAlerta}
             onChange={(e) => setTextoAlerta(e.target.value)}
@@ -638,7 +805,7 @@ export const TarifasView: React.FC = () => {
             }`}
           />
           {errores.texto_alerta_consumo ? (
-            <p className="text-[11px] text-red-600 mt-1 font-semibold">{errores.texto_alerta_consumo}</p>
+            <p role="alert" className="text-[11px] text-red-600 mt-1 font-semibold">{errores.texto_alerta_consumo}</p>
           ) : (
             <p className="text-[10px] text-stone-400 mt-0.5">
               Por defecto: &quot;CONSUMO ELEVADO — Su consumo de este mes es superior al habitual. Puede deberse a una pérdida en su propiedad. Por favor verifique.&quot;
@@ -656,6 +823,7 @@ export const TarifasView: React.FC = () => {
               Fecha a partir de la cual las nuevas facturas adoptarán este pliego.
             </p>
             <input
+              ref={setFieldRef('vigente_desde')}
               type="date"
               value={vigenteDesde}
               onChange={(e) => setVigenteDesde(e.target.value)}
@@ -664,7 +832,7 @@ export const TarifasView: React.FC = () => {
               }`}
             />
             {errores.vigente_desde && (
-              <p className="text-[11px] text-red-600 mt-1 font-semibold">{errores.vigente_desde}</p>
+              <p role="alert" className="text-[11px] text-red-600 mt-1 font-semibold">{errores.vigente_desde}</p>
             )}
           </div>
 
@@ -684,17 +852,91 @@ export const TarifasView: React.FC = () => {
           </div>
         </div>
 
+        {/* Aviso inline junto al botón si hay errores de validación */}
+        {Object.keys(errores).length > 0 && mensajeErrorGlobal && (
+          <div
+            role="alert"
+            className="p-3 bg-red-50 border border-red-300 text-red-900 rounded-lg text-xs font-semibold flex items-center gap-2"
+          >
+            <AlertTriangle className="w-4 h-4 text-red-600 shrink-0" />
+            <span>{mensajeErrorGlobal}</span>
+          </div>
+        )}
+
         {/* Botón de guardado grande */}
         <div className="pt-2">
           <button
             type="submit"
-            disabled={isSaving}
-            className="w-full py-3 px-4 bg-stone-900 hover:bg-stone-800 text-white font-bold text-xs uppercase tracking-wider rounded-lg transition-colors cursor-pointer shadow-xs disabled:opacity-50"
+            disabled={guardando}
+            className="w-full py-3 px-4 bg-stone-900 hover:bg-stone-800 text-white font-bold text-xs uppercase tracking-wider rounded-lg transition-colors cursor-pointer shadow-xs disabled:opacity-50 inline-flex items-center justify-center gap-2"
           >
-            {isSaving ? 'Guardando nueva versión...' : 'Guardar cambios'}
+            {guardando && <Loader2 className="w-4 h-4 animate-spin" />}
+            <span>{guardando ? 'Guardando nueva versión...' : 'Guardar cambios'}</span>
           </button>
         </div>
       </form>
+
+      {/* Modal de confirmación para registrar nueva versión tarifaria */}
+      {showConfirmModal && (
+        <div className="fixed inset-0 bg-black/50 z-50 flex items-center justify-center p-4">
+          <div className="bg-white rounded-2xl max-w-md w-full p-6 shadow-xl space-y-4">
+            <div className="flex items-center justify-between border-b border-stone-200 pb-3">
+              <h3 className="font-bold text-stone-900 text-base">Confirmar Nueva Versión Tarifaria</h3>
+              <button
+                type="button"
+                disabled={guardando}
+                onClick={() => {
+                  setErrorModal(null);
+                  setShowConfirmModal(false);
+                }}
+                className="text-stone-400 hover:text-stone-700 disabled:opacity-40"
+              >
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+
+            <div className="text-xs text-stone-600 space-y-2">
+              <p>
+                Se registrará una nueva versión en el historial con fecha de vigencia{' '}
+                <b className="text-stone-900">{vigenteDesde}</b>.
+              </p>
+              <p className="text-emerald-800 bg-emerald-50 border border-emerald-200 rounded-lg p-2.5 font-medium">
+                Las facturas ya emitidas conservarán sus montos históricos y no serán modificadas.
+              </p>
+            </div>
+
+            {errorModal && (
+              <div className="p-3 bg-red-50 border border-red-300 rounded-xl text-red-800 text-xs font-semibold flex items-start gap-2">
+                <AlertCircle className="w-4 h-4 text-red-600 shrink-0 mt-0.5" />
+                <span>{errorModal}</span>
+              </div>
+            )}
+
+            <div className="flex justify-end gap-2 pt-2 border-t border-stone-200">
+              <button
+                type="button"
+                disabled={guardando}
+                onClick={() => {
+                  setErrorModal(null);
+                  setShowConfirmModal(false);
+                }}
+                className="px-3 py-2 bg-stone-100 hover:bg-stone-200 text-stone-800 rounded-lg font-semibold text-xs disabled:opacity-40"
+              >
+                Cancelar
+              </button>
+              <button
+                type="button"
+                disabled={guardando}
+                onClick={handleConfirmarGuardarTarifa}
+                className="px-4 py-2 bg-stone-900 hover:bg-stone-800 text-white rounded-lg font-bold text-xs inline-flex items-center gap-1.5 disabled:opacity-50"
+              >
+                {guardando && <Loader2 className="w-3.5 h-3.5 animate-spin" />}
+                <span>{guardando ? 'Guardando...' : 'Confirmar y Guardar'}</span>
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* Historial de cambios al pie de pantalla */}
       <div className="bg-white border border-stone-200 rounded-xl p-5 sm:p-6 shadow-xs space-y-4">

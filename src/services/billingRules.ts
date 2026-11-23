@@ -74,17 +74,33 @@ export function calcularConsumoAgua(
  * - Si el cliente paga la 3ra antes del día 11, no se cobra la mora de esa 3ra.
  * - Mientras el medidor está cortado, la mora se congela en mora_congelada.
  */
+export function esFacturaVencida(
+  factura: Pick<Factura, 'estado' | 'fecha_vencimiento'>,
+  fechaReferencia: Date = new Date()
+): boolean {
+  if (
+    factura.estado === 'pagada' ||
+    factura.estado === 'anulada' ||
+    factura.estado === 'refinanciada'
+  ) {
+    return false;
+  }
+  if (factura.estado === 'vencida') return true;
+  if (!factura.fecha_vencimiento) return false;
+
+  const hoyIso = fechaReferencia.toISOString().slice(0, 10);
+  const vencIso = String(factura.fecha_vencimiento).slice(0, 10);
+  return vencIso < hoyIso;
+}
+
 export function calcularMoraMedidor(
   facturasImpagas: Factura[],
   moraFijaPorFactura: number = TARIFAS_DEFAULT.monto_mora_fijo,
   fechaReferencia: Date = new Date()
 ): { cantidadVencidas: number; moraTotal: number } {
-  const facturasVencidas = facturasImpagas.filter((f) => {
-    if (f.estado === 'pagada' || f.estado === 'anulada') return false;
-    if (f.estado === 'vencida') return true;
-    const fechaVenc = new Date(f.fecha_vencimiento);
-    return fechaReferencia > fechaVenc;
-  });
+  const facturasVencidas = facturasImpagas.filter((f) =>
+    esFacturaVencida(f, fechaReferencia)
+  );
 
   const cantidadVencidas = facturasVencidas.length;
   const moraTotal = cantidadVencidas * moraFijaPorFactura;
@@ -226,41 +242,98 @@ export function calcularErssanBaseCompleta(
  * - cortado: medidor retirado físicamente.
  * - retirado: retirado por otros motivos.
  */
-export function evaluarEstadoMedidor(
-  medidorActual: Medidor,
-  facturasImpagas: Factura[],
-  fechaHoy: Date = new Date()
+export function evaluarEstadoMedidorPorVencidas(
+  medidorActual: Pick<Medidor, 'estado'>,
+  facturasMedidor: Pick<
+    Factura,
+    'estado' | 'fecha_vencimiento' | 'detalles' | 'es_tercera_boleta' | 'periodo_facturado'
+  >[],
+  fechaHoy: Date = new Date(),
+  moraFijaPorFactura: number = TARIFAS_DEFAULT.monto_mora_fijo
 ): EstadoMedidor {
   if (medidorActual.estado === 'cortado') return 'cortado';
   if (medidorActual.estado === 'retirado') return 'retirado';
 
-  const facturasActivasImpagas = facturasImpagas.filter(
-    (f) => f.estado !== 'pagada' && f.estado !== 'anulada'
+  const activasImpagas = (facturasMedidor || []).filter(
+    (f) => f.estado !== 'pagada' && f.estado !== 'anulada' && f.estado !== 'refinanciada'
+  );
+  if (activasImpagas.length === 0) return 'activo';
+
+  const cantidadVencidas = activasImpagas.filter((f) => esFacturaVencida(f, fechaHoy)).length;
+  const maxMoraConsolidada = Math.max(0, ...activasImpagas.map((f) => obtenerMoraDeFactura(f)));
+  const periodosMoraConsolidada =
+    moraFijaPorFactura > 0 ? Math.floor(maxMoraConsolidada / moraFijaPorFactura) : 0;
+
+  const tieneTerceraBoletaActiva = activasImpagas.some((f) => Boolean(f.es_tercera_boleta));
+  const terceraBoletaVencida = activasImpagas.some(
+    (f) => Boolean(f.es_tercera_boleta) && esFacturaVencida(f, fechaHoy)
   );
 
-  const facturasVencidas = facturasActivasImpagas.filter((f) => {
-    if (f.estado === 'vencida') return true;
-    const fechaVenc = new Date(f.fecha_vencimiento);
-    return fechaHoy > fechaVenc;
-  });
+  if (
+    cantidadVencidas >= 3 ||
+    periodosMoraConsolidada >= 3 ||
+    (tieneTerceraBoletaActiva &&
+      (periodosMoraConsolidada >= 2 ||
+        cantidadVencidas >= 2 ||
+        terceraBoletaVencida ||
+        medidorActual.estado === 'pendiente_corte'))
+  ) {
+    return 'pendiente_corte';
+  }
 
-  if (facturasVencidas.length === 0) {
+  if (cantidadVencidas >= 1 || periodosMoraConsolidada >= 1) {
+    return 'moroso';
+  }
+
+  return 'activo';
+}
+
+export function evaluarEstadoMedidor(
+  medidorActual: Medidor,
+  facturasImpagas: Factura[],
+  fechaHoy: Date = new Date(),
+  moraFijaPorFactura: number = TARIFAS_DEFAULT.monto_mora_fijo
+): EstadoMedidor {
+  if (medidorActual.estado === 'cortado') return 'cortado';
+  if (medidorActual.estado === 'retirado') return 'retirado';
+
+  const facturasActivasImpagas = (facturasImpagas || []).filter(
+    (f) => f.estado !== 'pagada' && f.estado !== 'anulada' && f.estado !== 'refinanciada'
+  );
+
+  if (facturasActivasImpagas.length === 0) {
     return 'activo';
   }
 
-  // Si tiene 3 o más facturas vencidas impagas, o tiene 3ra boleta emitida junto con al menos 3 impagas
+  const facturasVencidas = facturasActivasImpagas.filter((f) =>
+    esFacturaVencida(f, fechaHoy)
+  );
+  const maxMoraConsolidada = Math.max(
+    0,
+    ...facturasActivasImpagas.map((f) => obtenerMoraDeFactura(f))
+  );
+  const periodosMoraConsolidada =
+    moraFijaPorFactura > 0 ? Math.floor(maxMoraConsolidada / moraFijaPorFactura) : 0;
+
+  if (facturasVencidas.length === 0 && periodosMoraConsolidada === 0) {
+    return 'activo';
+  }
+
   const tieneTerceraBoleta =
     facturasVencidas.length >= 3 ||
-    (facturasActivasImpagas.length >= 3 && facturasActivasImpagas.some((f) => f.es_tercera_boleta));
+    periodosMoraConsolidada >= 3 ||
+    facturasActivasImpagas.some((f) => Boolean(f.es_tercera_boleta));
 
   if (tieneTerceraBoleta) {
     const terceraBoleta =
       facturasActivasImpagas.find((f) => f.es_tercera_boleta) || facturasVencidas[2];
     if (terceraBoleta) {
-      const fechaVenc3ra = new Date(terceraBoleta.fecha_vencimiento);
+      const hoyIso = fechaHoy.toISOString().slice(0, 10);
+      const venc3raIso = String(terceraBoleta.fecha_vencimiento || '').slice(0, 10);
       if (
-        fechaHoy > fechaVenc3ra ||
+        (venc3raIso && venc3raIso < hoyIso) ||
         facturasVencidas.length >= 3 ||
+        periodosMoraConsolidada >= 2 ||
         medidorActual.estado === 'pendiente_corte'
       ) {
         return 'pendiente_corte';
@@ -292,11 +365,246 @@ export function formatFechaDesconexion(fechaIso: string): string {
 }
 
 /**
+ * Calcula el período inmediatamente anterior (N - 1 mes) en formato YYYY-MM.
+ */
+export function calcularPeriodoAnterior(periodo: string): string | null {
+  const match = /^(\d{4})-(0[1-9]|1[0-2])$/.exec((periodo || '').trim());
+  if (!match) return null;
+  let year = parseInt(match[1], 10);
+  let month = parseInt(match[2], 10) - 1;
+  if (month < 1) {
+    month = 12;
+    year -= 1;
+  }
+  return `${year}-${String(month).padStart(2, '0')}`;
+}
+
+/**
+ * Devuelve el monto de mora incluido en una factura a partir de sus detalles.
+ */
+export function obtenerMoraDeFactura(factura?: Pick<Factura, 'detalles'> | null): number {
+  if (!factura || !Array.isArray(factura.detalles)) return 0;
+  return Math.max(
+    0,
+    factura.detalles
+      .filter((d) => d.concepto === 'mora')
+      .reduce((acc, d) => acc + Math.max(0, Number(d.monto) || 0), 0)
+  );
+}
+
+/**
+ * Devuelve el saldo pendiente efectivo de una factura activa impaga.
+ * Las facturas pagadas, anuladas o refinanciadas tienen saldo 0.
+ */
+export function obtenerSaldoPendienteFactura(factura: Factura): number {
+  if (
+    !factura ||
+    factura.estado === 'pagada' ||
+    factura.estado === 'anulada' ||
+    factura.estado === 'refinanciada'
+  ) {
+    return 0;
+  }
+  const saldo =
+    typeof factura.saldo_pendiente === 'number'
+      ? factura.saldo_pendiente
+      : typeof factura.saldo === 'number'
+        ? factura.saldo
+        : factura.total || 0;
+  return Math.max(0, saldo);
+}
+
+export interface ResultadoDeudaYMoraConsolidada {
+  deudaAnteriorMonto: number;
+  montoMora: number;
+  moraAnterior: number;
+  moraNueva: number;
+  cantMorasAcumuladas: number;
+  saldoPendienteAnterior: number;
+  facturaAnterior: Factura | null;
+  periodoAnterior: string | null;
+  facturaAnteriorARefinanciar: {
+    id: string;
+    periodo_facturado: string;
+    motivo: string;
+  } | null;
+}
+
+/**
+ * Reglas exactas de Deuda Anterior y Mora Consolidada al facturar período N:
+ * 1. Deuda anterior = saldo_pendiente de N-1 MENOS la mora incluida en N-1.
+ *    Si N-1 no existe, está pagada, anulada o refinanciada -> deuda_anterior = 0.
+ * 2. Mora al facturar N = mora_de_N-1 + monto_mora_fijo (si N-1 está vencida).
+ *    Si N-1 no existe, está pagada, anulada o refinanciada -> mora_N = 0 (salvo mora_congelada).
+ * 3. N-1 queda marcada para pasar a estado = 'refinanciada', saldo_pendiente = 0, motivo = 'Consolidada en factura N'.
+ */
+export function calcularDeudaYMoraConsolidadaPeriodoN(params: {
+  facturas: Factura[];
+  periodoActual: string;
+  tarifa?: TarifaConfig;
+  fechaReferencia?: Date;
+  moraCongelada?: number | null;
+}): ResultadoDeudaYMoraConsolidada {
+  const tarifa = params.tarifa || TARIFAS_DEFAULT;
+  const fechaRef = params.fechaReferencia || new Date();
+  const periodoAnterior = calcularPeriodoAnterior(params.periodoActual);
+  const tieneMoraCongelada =
+    params.moraCongelada !== null && params.moraCongelada !== undefined;
+
+  if (!periodoAnterior) {
+    const moraBase = tieneMoraCongelada ? Number(params.moraCongelada) : 0;
+    return {
+      deudaAnteriorMonto: 0,
+      montoMora: moraBase,
+      moraAnterior: 0,
+      moraNueva: 0,
+      cantMorasAcumuladas:
+        tarifa.monto_mora_fijo > 0 ? Math.round(moraBase / tarifa.monto_mora_fijo) : 0,
+      saldoPendienteAnterior: 0,
+      facturaAnterior: null,
+      periodoAnterior: null,
+      facturaAnteriorARefinanciar: null,
+    };
+  }
+
+  const candidatas = (params.facturas || [])
+    .filter((f) => f.periodo_facturado === periodoAnterior && f.estado !== 'anulada')
+    .sort((a, b) => {
+      const numDiff = (Number(b.numero_boleta_medidor) || 0) - (Number(a.numero_boleta_medidor) || 0);
+      if (numDiff !== 0) return numDiff;
+      return (b.fecha_emision || '').localeCompare(a.fecha_emision || '');
+    });
+
+  const facturaAnterior = candidatas[0] || null;
+  if (
+    !facturaAnterior ||
+    facturaAnterior.estado === 'pagada' ||
+    facturaAnterior.estado === 'refinanciada'
+  ) {
+    const moraBase = tieneMoraCongelada ? Number(params.moraCongelada) : 0;
+    return {
+      deudaAnteriorMonto: 0,
+      montoMora: moraBase,
+      moraAnterior: 0,
+      moraNueva: 0,
+      cantMorasAcumuladas:
+        tarifa.monto_mora_fijo > 0 ? Math.round(moraBase / tarifa.monto_mora_fijo) : 0,
+      saldoPendienteAnterior: 0,
+      facturaAnterior: null,
+      periodoAnterior,
+      facturaAnteriorARefinanciar: null,
+    };
+  }
+
+  const saldoPendienteAnterior = obtenerSaldoPendienteFactura(facturaAnterior);
+  if (saldoPendienteAnterior <= 0) {
+    const moraBase = tieneMoraCongelada ? Number(params.moraCongelada) : 0;
+    return {
+      deudaAnteriorMonto: 0,
+      montoMora: moraBase,
+      moraAnterior: 0,
+      moraNueva: 0,
+      cantMorasAcumuladas:
+        tarifa.monto_mora_fijo > 0 ? Math.round(moraBase / tarifa.monto_mora_fijo) : 0,
+      saldoPendienteAnterior: 0,
+      facturaAnterior: null,
+      periodoAnterior,
+      facturaAnteriorARefinanciar: null,
+    };
+  }
+
+  const moraAnterior = obtenerMoraDeFactura(facturaAnterior);
+  const deudaAnteriorMonto = Math.max(0, saldoPendienteAnterior - moraAnterior);
+  const moraNueva = esFacturaVencida(facturaAnterior, fechaRef) ? tarifa.monto_mora_fijo : 0;
+  const montoMora = tieneMoraCongelada ? Number(params.moraCongelada) : moraAnterior + moraNueva;
+  const cantMorasAcumuladas =
+    tarifa.monto_mora_fijo > 0 ? Math.round(montoMora / tarifa.monto_mora_fijo) : 0;
+
+  return {
+    deudaAnteriorMonto,
+    montoMora,
+    moraAnterior,
+    moraNueva,
+    cantMorasAcumuladas,
+    saldoPendienteAnterior,
+    facturaAnterior,
+    periodoAnterior,
+    facturaAnteriorARefinanciar: {
+      id: facturaAnterior.id,
+      periodo_facturado: facturaAnterior.periodo_facturado,
+      motivo: `Consolidada en factura ${params.periodoActual}`,
+    },
+  };
+}
+
+/**
+ * Regla de Deuda Anterior al facturar el período N:
+ * - Busca la factura del medidor con periodo_facturado = (N - 1 mes) y estado != 'anulada'.
+ * - Si existe y saldo_pendiente > 0 (y no está pagada ni refinanciada):
+ *   deuda_anterior = max(0, saldo_pendiente - mora_de_N-1).
+ * - Si está pagada, anulada, refinanciada o no existe -> deuda_anterior = 0.
+ */
+export function obtenerDeudaAnteriorPeriodoNMenos1(
+  facturas: Factura[],
+  periodoActual: string
+): {
+  deudaAnteriorMonto: number;
+  facturaAnterior: Factura | null;
+  periodoAnterior: string | null;
+} {
+  const res = calcularDeudaYMoraConsolidadaPeriodoN({
+    facturas,
+    periodoActual,
+  });
+  return {
+    deudaAnteriorMonto: res.deudaAnteriorMonto,
+    facturaAnterior: res.facturaAnterior,
+    periodoAnterior: res.periodoAnterior,
+  };
+}
+
+/**
+ * Regla de Deuda en Regularización / Reconexión:
+ * Toma el saldo_pendiente de la última factura impaga (la más reciente no anulada ni refinanciada),
+ * evitando sumar facturas anteriores cuyo saldo ya fue arrastrado.
+ */
+export function obtenerDeudaUltimaFacturaImpaga(facturas: Factura[]): {
+  deudaAnteriorMonto: number;
+  facturaReciente: Factura | null;
+  cantidadImpagas: number;
+} {
+  const candidatas = (facturas || [])
+    .filter(
+      (f) =>
+        f.estado !== 'anulada' &&
+        f.estado !== 'pagada' &&
+        f.estado !== 'refinanciada' &&
+        obtenerSaldoPendienteFactura(f) > 0
+    )
+    .sort((a, b) => {
+      const cmpPeriodo = (b.periodo_facturado || '').localeCompare(a.periodo_facturado || '');
+      if (cmpPeriodo !== 0) return cmpPeriodo;
+      const numDiff = (Number(b.numero_boleta_medidor) || 0) - (Number(a.numero_boleta_medidor) || 0);
+      if (numDiff !== 0) return numDiff;
+      return (b.fecha_emision || '').localeCompare(a.fecha_emision || '');
+    });
+
+  const facturaReciente = candidatas[0] || null;
+  const deudaAnteriorMonto = facturaReciente ? obtenerSaldoPendienteFactura(facturaReciente) : 0;
+
+  return {
+    deudaAnteriorMonto,
+    facturaReciente,
+    cantidadImpagas: candidatas.length,
+  };
+}
+
+/**
  * 6. Generación de Factura mensual por medidor (dinámica, solo conceptos > 0):
  *
  * Orden estricto de conceptos:
  * 1. Consumo de agua del medidor (con mínimo aplicado).
- * 2. Deuda anterior del medidor (saldos de facturas previas impagas del medidor).
+ * 2. Deuda anterior del medidor (solo saldo_pendiente de la factura del período N-1 no anulada).
  * 3. Recargo por mora del medidor.
  * 4. Otros trabajos del medidor (cargos pendientes del período).
  * 5. Cuota de conexión (si aplica al medidor).
@@ -328,20 +636,23 @@ export function calcularFacturaMedidor(params: {
   // 1. Consumo de agua (con mínimo aplicado)
   const calculoAgua = calcularConsumoAgua(consumoM3, tarifa);
 
-  // 2. Deuda anterior del medidor
-  const deudaAnteriorMonto = params.facturasImpagasAnteriores.reduce(
-    (acc, f) => acc + (f.total || 0),
-    0
-  );
+  // 2 y 3. Deuda anterior (N-1 sin su mora) y Mora consolidada (mora_N-1 + mora nueva si N-1 vencida)
+  const {
+    deudaAnteriorMonto,
+    montoMora,
+    cantMorasAcumuladas,
+    facturaAnterior,
+  } = calcularDeudaYMoraConsolidadaPeriodoN({
+    facturas: params.facturasImpagasAnteriores,
+    periodoActual: params.periodo,
+    tarifa,
+    fechaReferencia: fechaRef,
+    moraCongelada: params.medidor.mora_congelada,
+  });
 
-  // 3. Recargo por mora del medidor
-  const cantVencidasImpagas = params.facturasImpagasAnteriores.length;
-  let montoMora = 0;
-  if (params.medidor.mora_congelada !== null && params.medidor.mora_congelada !== undefined) {
-    montoMora = params.medidor.mora_congelada;
-  } else {
-    montoMora = calcularMoraMedidor(params.facturasImpagasAnteriores, tarifa.monto_mora_fijo, fechaRef).moraTotal;
-  }
+  const cantVencidasDirectas = params.facturasImpagasAnteriores.filter((f) =>
+    esFacturaVencida(f, fechaRef)
+  ).length;
 
   // 4. Otros trabajos del medidor
   const montoOtrosTrabajos = params.cargosPendientes.reduce((acc, c) => acc + c.monto, 0);
@@ -375,8 +686,8 @@ export function calcularFacturaMedidor(params: {
     tarifa.umbral_alerta_consumo
   );
 
-  // Tercera boleta: cuando ya tiene 2 impagas anteriores
-  const esTerceraBoleta = cantVencidasImpagas >= 2;
+  // Tercera boleta: cuando ya tiene 2 vencidas/moras acumuladas anteriores
+  const esTerceraBoleta = Math.max(cantVencidasDirectas, cantMorasAcumuladas) >= 2;
 
   // Fechas de emisión y vencimiento
   const [yearStr, monthStr] = params.periodo.split('-');
@@ -433,25 +744,29 @@ export function calcularFacturaMedidor(params: {
     });
   }
 
-  // 2. Deuda anterior
-  if (deudaAnteriorMonto > 0) {
-    const cantBoletas = params.facturasImpagasAnteriores.length;
+  // 2. Deuda anterior (solo período N-1)
+  if (deudaAnteriorMonto > 0 && facturaAnterior) {
     detalles.push({
       id: nuevoDetalleId(),
       factura_id: facturaId,
       concepto: 'deuda_anterior',
-      descripcion: `Deuda anterior (${cantBoletas} boleta${cantBoletas > 1 ? 's' : ''})`,
+      descripcion: `Deuda anterior (período ${facturaAnterior.periodo_facturado})`,
       monto: deudaAnteriorMonto,
     });
   }
 
   // 3. Recargo por mora
   if (montoMora > 0) {
+    const boletasMora = Math.max(1, cantMorasAcumuladas);
+    const descripcionMora =
+      tarifa.monto_mora_fijo > 0 && montoMora % tarifa.monto_mora_fijo === 0
+        ? `Recargo por mora (${boletasMora} boleta${boletasMora > 1 ? 's' : ''} × ${tarifa.monto_mora_fijo.toLocaleString('es-PY')})`
+        : 'Recargo por mora acumulada';
     detalles.push({
       id: nuevoDetalleId(),
       factura_id: facturaId,
       concepto: 'mora',
-      descripcion: `Recargo por mora (${cantVencidasImpagas} boleta${cantVencidasImpagas > 1 ? 's' : ''} × ${tarifa.monto_mora_fijo.toLocaleString('es-PY')})`,
+      descripcion: descripcionMora,
       monto: montoMora,
     });
   }
@@ -543,8 +858,41 @@ export function calcularFacturaMedidor(params: {
 }
 
 /**
+ * Resuelve un período válido YYYY-MM (7 chars) para la factura de regularización
+ * sin colisionar con facturas no anuladas ya emitidas para el mismo medidor.
+ */
+export function resolverPeriodoRegularizacion(
+  fechaEmision: string,
+  periodosOcupados: Iterable<string> = []
+): string {
+  const fechaValida = /^\d{4}-\d{2}/.test(fechaEmision || '')
+    ? fechaEmision
+    : new Date().toISOString().slice(0, 10);
+  const base = fechaValida.slice(0, 7);
+  const ocupados = new Set(periodosOcupados);
+  if (!ocupados.has(base)) return base;
+
+  const [yearStr, monthStr] = base.split('-');
+  let year = parseInt(yearStr, 10);
+  let month = parseInt(monthStr, 10);
+
+  for (let i = 0; i < 240; i++) {
+    month -= 1;
+    if (month < 1) {
+      month = 12;
+      year -= 1;
+    }
+    const candidato = `${year}-${String(month).padStart(2, '0')}`;
+    if (!ocupados.has(candidato)) {
+      return candidato;
+    }
+  }
+  return base;
+}
+
+/**
  * 7. Generación de Factura de Regularización por Reconexión:
- * Deuda anterior + mora congelada + reconexión (60.000 Gs) + cargos pendientes + ERSSAN 2%
+ * Deuda anterior (usando saldo_pendiente) + mora congelada + reconexión (60.000 Gs) + cargos pendientes + ERSSAN 2%
  */
 export function generarFacturaRegularizacion(params: {
   medidor: Medidor;
@@ -553,19 +901,23 @@ export function generarFacturaRegularizacion(params: {
   cargosPendientes?: { id: string; descripcion: string; monto: number }[];
   tarifa?: TarifaConfig;
   fechaEmision?: string;
+  periodo?: string;
   correlativoPorMedidor: number;
 }): { factura: Factura; detalles: DetalleFactura[] } {
   const tarifa = params.tarifa || TARIFAS_DEFAULT;
-  const deudaAnteriorMonto = params.facturasImpagas.reduce((acc, f) => acc + f.total, 0);
+  const facturasPendientes = params.facturasImpagas.filter(
+    (f) => f.estado !== 'pagada' && f.estado !== 'anulada' && f.estado !== 'refinanciada'
+  );
+  const { deudaAnteriorMonto, facturaReciente } = obtenerDeudaUltimaFacturaImpaga(facturasPendientes);
 
   const moraCongelada =
     params.medidor.mora_congelada !== null && params.medidor.mora_congelada !== undefined
       ? params.medidor.mora_congelada
-      : params.facturasImpagas.length * tarifa.monto_mora_fijo;
+      : facturasPendientes.length * tarifa.monto_mora_fijo;
 
   const montoReconexion = tarifa.monto_reconexion;
   const cargos = params.cargosPendientes || [];
-  const montoCargos = cargos.reduce((acc, c) => acc + c.monto, 0);
+  const montoCargos = cargos.reduce((acc, c) => acc + Math.max(0, c.monto || 0), 0);
 
   const baseErssan = deudaAnteriorMonto + moraCongelada + montoReconexion + montoCargos;
   const montoErssan = calcularErssanBaseCompleta(baseErssan, tarifa.erssan_porcentaje);
@@ -590,7 +942,9 @@ export function generarFacturaRegularizacion(params: {
       id: nuevoDetalleId(),
       factura_id: facturaId,
       concepto: 'deuda_anterior',
-      descripcion: `Deuda acumulada anterior (${params.facturasImpagas.length} boletas impagas)`,
+      descripcion: facturaReciente
+        ? `Factura de regularización - Deuda anterior (período ${facturaReciente.periodo_facturado})`
+        : 'Factura de regularización - Deuda anterior',
       monto: deudaAnteriorMonto,
     });
   }
@@ -600,7 +954,7 @@ export function generarFacturaRegularizacion(params: {
       id: nuevoDetalleId(),
       factura_id: facturaId,
       concepto: 'mora',
-      descripcion: `Mora congelada del medidor cortado`,
+      descripcion: `Factura de regularización - Mora congelada del medidor cortado`,
       monto: moraCongelada,
     });
   }
@@ -618,31 +972,38 @@ export function generarFacturaRegularizacion(params: {
     }
   });
 
-  detalles.push({
-    id: nuevoDetalleId(),
-    factura_id: facturaId,
-    concepto: 'reconexion',
-    descripcion: `Tasa de reconexión y reinstalación de medidor`,
-    monto: montoReconexion,
-  });
+  if (montoReconexion > 0) {
+    detalles.push({
+      id: nuevoDetalleId(),
+      factura_id: facturaId,
+      concepto: 'reconexion',
+      descripcion: `Factura de regularización - Tasa de reconexión y reinstalación de medidor`,
+      monto: montoReconexion,
+    });
+  }
 
   if (montoErssan > 0) {
     detalles.push({
       id: nuevoDetalleId(),
       factura_id: facturaId,
       concepto: 'erssan',
-      descripcion: `Aporte Ley ERSSAN (2% sobre liquidación)`,
+      descripcion: `Aporte Ley ERSSAN (2% sobre liquidación de regularización)`,
       monto: montoErssan,
     });
   }
 
   const fechaEmisionReg = params.fechaEmision || ahora;
+  const periodoNormalizado =
+    params.periodo && /^\d{4}-(0[1-9]|1[0-2])$/.test(params.periodo)
+      ? params.periodo
+      : fechaEmisionReg.slice(0, 7);
+
   const factura: Factura = {
     id: facturaId,
     medidor_id: params.medidor.id,
     cliente_id: params.clienteId,
-    periodo_facturado: 'REGULARIZACION',
-    periodo_consumo: fechaEmisionReg.slice(0, 7),
+    periodo_facturado: periodoNormalizado,
+    periodo_consumo: periodoNormalizado,
     fecha_emision: fechaEmisionReg,
     fecha_vencimiento: fechaEmisionReg,
     estado: 'pendiente',
@@ -666,23 +1027,32 @@ export function generarFacturaRegularizacion(params: {
 export function liquidarReconexion(
   medidor: Medidor,
   facturasImpagas: Factura[],
-  tarifa: TarifaConfig = TARIFAS_DEFAULT
+  tarifa: TarifaConfig = TARIFAS_DEFAULT,
+  cargosPendientes: { monto: number }[] = []
 ): {
   totalPagar: number;
   subtotalFacturas: number;
   mora: number;
+  subtotalCargos: number;
   montoReconexion: number;
   montoErssan: number;
   habilitadoParaReconexion: boolean;
 } {
-  const subtotalFacturas = facturasImpagas.reduce((acc, f) => acc + f.total, 0);
+  const facturasPendientes = facturasImpagas.filter(
+    (f) => f.estado !== 'pagada' && f.estado !== 'anulada' && f.estado !== 'refinanciada'
+  );
+  const { deudaAnteriorMonto: subtotalFacturas } = obtenerDeudaUltimaFacturaImpaga(facturasPendientes);
+  const subtotalCargos = cargosPendientes.reduce(
+    (acc, c) => acc + Math.max(0, Number(c.monto) || 0),
+    0
+  );
   const mora =
     medidor.mora_congelada !== null && medidor.mora_congelada !== undefined
       ? medidor.mora_congelada
-      : facturasImpagas.length * tarifa.monto_mora_fijo;
+      : facturasPendientes.length * tarifa.monto_mora_fijo;
   const montoReconexion = tarifa.monto_reconexion;
 
-  const baseErssan = subtotalFacturas + mora + montoReconexion;
+  const baseErssan = subtotalFacturas + mora + subtotalCargos + montoReconexion;
   const montoErssan = calcularErssanBaseCompleta(baseErssan, tarifa.erssan_porcentaje);
   const totalPagar = baseErssan + montoErssan;
 
@@ -690,6 +1060,7 @@ export function liquidarReconexion(
     totalPagar,
     subtotalFacturas,
     mora,
+    subtotalCargos,
     montoReconexion,
     montoErssan,
     habilitadoParaReconexion: medidor.estado === 'cortado' || medidor.estado === 'pendiente_corte',

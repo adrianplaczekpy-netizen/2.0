@@ -48,7 +48,8 @@ const handleFacturaPdf = (req: express.Request, res: express.Response) => {
     const arrayBuffer = doc.output('arraybuffer');
     const buffer = Buffer.from(arrayBuffer);
 
-    const filename = `Boleta_${data.factura.numero_boleta_medidor || 1}_${data.factura.periodo_facturado}.pdf`;
+    const numTag = data.factura.numero_factura || `${data.factura.numero_boleta_medidor || 1}`;
+    const filename = `Factura_${numTag}_${data.factura.periodo_facturado}.pdf`;
 
     res.setHeader('Content-Type', 'application/pdf');
     res.setHeader('Content-Disposition', `inline; filename="${filename}"`);

@@ -9,7 +9,7 @@ import { db } from '../services/database';
 import { isSupabaseConfigured } from '../services/supabaseClient';
 import { formatGs } from '../services/billingRules';
 import { Factura, MetodoPago } from '../types';
-import { generarBoletaPDF } from '../services/pdfService';
+import { generarBoletaPDF, generarComprobantePagoPDF } from '../services/pdfService';
 import {
   CreditCard,
   Search,
@@ -60,6 +60,8 @@ export const CajaCobranzasView: React.FC = () => {
     medidorPasoAActivo: boolean;
     salioDePendienteCorte?: boolean;
     nuevoEstado?: string;
+    fechaPago?: string;
+    cobradorNombre?: string;
   } | null>(null);
 
   const [mensajeExito, setMensajeExito] = useState<string | null>(null);
@@ -137,6 +139,8 @@ export const CajaCobranzasView: React.FC = () => {
         medidorPasoAActivo: res.medidorPasoAActivo,
         salioDePendienteCorte: res.salioDePendienteCorte,
         nuevoEstado: res.estadoMedidorActualizado,
+        fechaPago: res.pago.fecha_pago,
+        cobradorNombre: user?.nombre || user?.email || 'Cobrador de Caja',
       });
 
       const esPagoTotal = res.saldoRestante === 0;
@@ -174,6 +178,27 @@ export const CajaCobranzasView: React.FC = () => {
 
   const handleDescargarBoleta = (factura: Factura) => {
     if (!medidorActual || !medidorActual.cliente || !medidorActual.medidor) return;
+    if (factura.estado === 'pagada') {
+      const pagosFactura = db
+        .getFullData()
+        .pagos.filter((p) => p.factura_id === factura.id)
+        .sort((a, b) => (b.fecha_pago || '').localeCompare(a.fecha_pago || ''));
+      const ultimoPago = pagosFactura[0];
+      const doc = generarComprobantePagoPDF({
+        factura,
+        cliente: medidorActual.cliente,
+        medidor: medidorActual.medidor,
+        pago: ultimoPago,
+        detalles: factura.detalles,
+        cobradorNombre:
+          user?.nombre || user?.email || ultimoPago?.cobrador_id || 'Caja Central',
+        saldoRestante: 0,
+      });
+      const recTag = ultimoPago?.numero_recibo || factura.periodo_facturado;
+      doc.save(`Recibo_${recTag}_Med_${medidorActual.medidor.numero_medidor}.pdf`);
+      return;
+    }
+
     const doc = generarBoletaPDF({
       factura,
       cliente: medidorActual.cliente,
@@ -181,6 +206,66 @@ export const CajaCobranzasView: React.FC = () => {
       detalles: factura.detalles,
     });
     doc.save(`Boleta_${factura.periodo_facturado}_Med_${medidorActual.medidor.numero_medidor}.pdf`);
+  };
+
+  const construirDocComprobanteActual = () => {
+    if (!comprobantePago) return null;
+    const facBundle = db.getFacturaPorId(comprobantePago.facturaId);
+    const cliente = facBundle?.cliente || medidorActual?.cliente;
+    const medidor = facBundle?.medidor || medidorActual?.medidor;
+    const factura =
+      facBundle?.factura ||
+      medidorActual?.facturas.find((f) => f.id === comprobantePago.facturaId);
+
+    if (!factura || !cliente || !medidor) return null;
+    return generarComprobantePagoPDF({
+      factura,
+      cliente,
+      medidor,
+      detalles: facBundle?.detalles || factura.detalles,
+      numeroRecibo: comprobantePago.recibo,
+      fechaPago: comprobantePago.fechaPago,
+      montoAbonado: comprobantePago.monto,
+      metodoPago: comprobantePago.metodo,
+      cobradorNombre:
+        comprobantePago.cobradorNombre || user?.nombre || user?.email || 'Caja Central',
+      saldoRestante: comprobantePago.saldoRestante,
+    });
+  };
+
+  const handleImprimirComprobante = () => {
+    const doc = construirDocComprobanteActual();
+    if (!doc) {
+      window.print();
+      return;
+    }
+    try {
+      const blob = doc.output('blob');
+      const blobUrl = window.URL.createObjectURL(blob);
+      const iframe = document.createElement('iframe');
+      iframe.style.position = 'fixed';
+      iframe.style.right = '0';
+      iframe.style.bottom = '0';
+      iframe.style.width = '0';
+      iframe.style.height = '0';
+      iframe.style.border = '0';
+      iframe.src = blobUrl;
+      document.body.appendChild(iframe);
+      iframe.onload = () => {
+        try {
+          iframe.contentWindow?.focus();
+          iframe.contentWindow?.print();
+        } catch {
+          window.print();
+        }
+        setTimeout(() => {
+          document.body.removeChild(iframe);
+          window.URL.revokeObjectURL(blobUrl);
+        }, 60000);
+      };
+    } catch {
+      window.print();
+    }
   };
 
   const handleCobrarReconexion = async () => {
@@ -223,6 +308,8 @@ export const CajaCobranzasView: React.FC = () => {
         clienteNombre: clienteNombreActual,
         saldoRestante: 0,
         medidorPasoAActivo: true,
+        fechaPago: pago.fecha_pago,
+        cobradorNombre: user?.nombre || user?.email || 'Caja Central',
       });
 
       const msg = `Medidor N° ${medidorNumActual} regularizado y reconectado exitosamente. Pasa a estado ACTIVO. Total cobrado: ${formatGs(facturaRegularizacion.total)}.`;
@@ -427,7 +514,7 @@ export const CajaCobranzasView: React.FC = () => {
           <div className="pt-2 flex justify-end gap-2 border-t border-stone-100">
             <button
               type="button"
-              onClick={() => window.print()}
+              onClick={handleImprimirComprobante}
               className="px-3 py-1.5 bg-stone-100 hover:bg-stone-200 text-stone-800 text-xs font-bold rounded-lg flex items-center gap-1.5 cursor-pointer"
             >
               <Printer className="w-4 h-4" />
@@ -648,11 +735,15 @@ export const CajaCobranzasView: React.FC = () => {
                           </div>
 
                           <div className="flex items-center gap-1.5">
-                            {/* Botón Descargar Boleta Oficial jsPDF */}
+                            {/* Botón Descargar Boleta / Recibo de Pago PDF */}
                             <button
                               type="button"
                               onClick={() => handleDescargarBoleta(f)}
-                              title="Descargar boleta oficial PDF (B&N con avisos rojos)"
+                              title={
+                                f.estado === 'pagada'
+                                  ? 'Descargar Recibo de Pago PDF'
+                                  : 'Descargar boleta oficial PDF'
+                              }
                               className="p-2 text-stone-600 hover:text-stone-900 hover:bg-stone-100 rounded-lg border border-stone-200 cursor-pointer"
                             >
                               <FileDown className="w-4 h-4" />

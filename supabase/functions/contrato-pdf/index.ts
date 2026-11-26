@@ -7,6 +7,7 @@
 import { serve } from "https://deno.land/std@0.168.0/http/server.ts";
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2.118.0";
 import { jsPDF } from "https://esm.sh/jspdf@4.2.1";
+import { LOGO_PNG_DATA_URL, LOGO_ASPECT_RATIO } from "./logoData.ts";
 
 const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
@@ -50,16 +51,22 @@ serve(async (req) => {
     const pageWidth = 210;
     const margin = 20;
     const contentWidth = pageWidth - margin * 2;
-    let y = 20;
+    let y = 14;
 
+    const logoW = 42;
+    const logoH = Number((logoW / LOGO_ASPECT_RATIO).toFixed(2));
+    doc.addImage(LOGO_PNG_DATA_URL, "PNG", margin, y, logoW, logoH);
+
+    const xLeg = margin + logoW + 4;
     doc.setFont("helvetica", "bold");
-    doc.setFontSize(13);
-    doc.text("AGUATERÍA POTABLE PARAGUAY S.A.", margin, y);
-    doc.setFont("helvetica", "normal");
     doc.setFontSize(8.5);
-    doc.text("RUC: 80045921-3 — Permisionario Regulado por ERSSAN (Ley N° 1614/2000)", margin, y + 4.5);
+    doc.text("RUC: 3950638-0 — TIMBRADO N°: 19148339", xLeg, y + 3.5);
+    doc.setFont("helvetica", "normal");
+    doc.setFontSize(8);
+    doc.text("Inicio Vigencia: 01/10/2026 • Fin Vigencia: 31/10/2027", xLeg, y + 7.8);
+    doc.text("Fracción San Gabriel • Mboi'y - Itauguá — Regulado por ERSSAN", xLeg, y + 12.1);
 
-    y += 12;
+    y += logoH + 4;
     doc.setLineWidth(0.4);
     doc.line(margin, y, pageWidth - margin, y);
     y += 7;
@@ -80,7 +87,7 @@ serve(async (req) => {
     y += 4.5;
     doc.setFont("helvetica", "normal");
     doc.setFontSize(8.5);
-    const line1 = doc.splitTextToSize("PRESTADOR: AGUATERÍA POTABLE PARAGUAY S.A., con RUC 80045921-3, domicilio legal en Calle 10 de Agosto N° 450, San Lorenzo, Paraguay.", contentWidth);
+    const line1 = doc.splitTextToSize("PRESTADOR: SERVICIO DE AGUA POTABLE - POZO ARTESIANO SAN GABRIEL (de LEO PLACZEK e HIJA), con RUC 3950638-0, ubicado en Fracción San Gabriel, Mboi'y - Itauguá, Paraguay.", contentWidth);
     doc.text(line1, margin, y);
     y += line1.length * 4.2 + 2;
 
@@ -120,7 +127,7 @@ serve(async (req) => {
     }
 
     y += 18;
-    doc.text(`Lugar y Fecha: San Lorenzo, Paraguay — ${fecha}`, margin, y);
+    doc.text(`Lugar y Fecha: Mboi'y, Itauguá, Paraguay — ${fecha}`, margin, y);
     y += 24;
 
     const anchoFirma = 65;

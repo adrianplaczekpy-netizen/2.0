@@ -37,6 +37,7 @@ import {
   liquidarReconexion,
   generarFacturaRegularizacion,
   resolverPeriodoRegularizacion,
+  calcularPeriodoSiguiente,
   validarLecturaIngreso,
   validarEdicionLectura,
   validarRegistroCargo,
@@ -52,7 +53,12 @@ import {
   MedidorOmitidoFacturacion,
   ErrorFacturacionMedidor,
 } from './billingEngine';
-import { validarSolicitudFacturaIndividual } from './facturacionHelpers';
+import {
+  validarSolicitudFacturaIndividual,
+  calcularSiguienteSecuencialFactura,
+  extraerSecuencialFacturaSET,
+  formatearNumeroFacturaSET,
+} from './facturacionHelpers';
 import { generarFotoPlaceholder } from '../utils/imageCompressor';
 import {
   enqueueLecturaOffline,
@@ -507,6 +513,7 @@ class DatabaseEngine {
           medidor_id: f.medidor_id,
           cliente_id: f.cliente_id,
           numero_boleta_medidor: Number(f.numero_boleta_medidor),
+          numero_factura: f.numero_factura || null,
           periodo_facturado: f.periodo_facturado,
           periodo_consumo: f.periodo_consumo || null,
           lectura_id: f.lectura_id || null,
@@ -2417,15 +2424,15 @@ class DatabaseEngine {
         const detConsumo = facturaAsociada.detalles.find((d) => d.concepto === 'consumo_agua');
         if (detConsumo) detConsumo.monto = nuevoMontoConsumo;
 
-        // Recalcular ERSSAN 2%
-        const otros = facturaAsociada.detalles
+        // Recalcular ERSSAN 2% sobre TODOS los conceptos de la factura
+        const baseErssan = facturaAsociada.detalles
           .filter((d) => d.concepto !== 'erssan')
           .reduce((acc, d) => acc + d.monto, 0);
-        const montoErssan = Math.round(otros * (tarifa.erssan_porcentaje / 100));
+        const montoErssan = Math.round(baseErssan * (tarifa.erssan_porcentaje / 100));
         const detErssan = facturaAsociada.detalles.find((d) => d.concepto === 'erssan');
         if (detErssan) detErssan.monto = montoErssan;
 
-        facturaAsociada.total = otros + montoErssan;
+        facturaAsociada.total = baseErssan + montoErssan;
       }
     }
 
@@ -2569,11 +2576,11 @@ class DatabaseEngine {
           : nextConsumoM3 * tarifa.precio_m3;
 
       if (facturaAsociada.detalles && facturaAsociada.detalles.length > 0) {
-        const otros = facturaAsociada.detalles
+        const baseErssan = facturaAsociada.detalles
           .filter((d) => d.concepto !== 'erssan')
           .reduce((acc, d) => acc + (d.concepto === 'consumo_agua' ? nuevoMontoConsumo : d.monto), 0);
-        const montoErssan = Math.round(otros * (tarifa.erssan_porcentaje / 100));
-        const nuevoTotal = otros + montoErssan;
+        const montoErssan = Math.round(baseErssan * (tarifa.erssan_porcentaje / 100));
+        const nuevoTotal = baseErssan + montoErssan;
         const nuevoSaldoPendiente = Math.max(0, nuevoTotal - (facturaAsociada.monto_pagado || 0));
         recalcFactura = {
           total: nuevoTotal,
@@ -2780,10 +2787,36 @@ class DatabaseEngine {
       alerta_consumo_elevado: Boolean(factura.alerta_consumo_elevado),
       texto_alerta_consumo: factura.texto_alerta_consumo ?? null,
       numero_boleta_medidor: factura.numero_boleta_medidor ?? 1,
+      numero_factura: factura.numero_factura ?? null,
       lectura_anterior: factura.lectura_anterior ?? null,
       lectura_actual: factura.lectura_actual ?? null,
       consumo_m3: factura.consumo_m3 ?? null,
     };
+  }
+
+  private async obtenerSiguienteSecuencialFacturaSETAsync(sb?: any): Promise<number> {
+    let seq = calcularSiguienteSecuencialFactura(this.data.facturas);
+    if (sb && typeof sb.from === 'function') {
+      try {
+        const tableQuery = sb.from('facturas');
+        if (tableQuery && typeof tableQuery.select === 'function') {
+          const sel = tableQuery.select('numero_factura');
+          if (sel && typeof sel.not === 'function') {
+            const { data } = await sel
+              .not('numero_factura', 'is', null)
+              .order('numero_factura', { ascending: false })
+              .limit(1);
+            if (Array.isArray(data) && data.length > 0 && data[0]?.numero_factura) {
+              const remoteSeq = extraerSecuencialFacturaSET(data[0].numero_factura) + 1;
+              if (remoteSeq > seq) seq = remoteSeq;
+            }
+          }
+        }
+      } catch {
+        // Ignorar si la columna aún no existe en BD remota o en mocks de test
+      }
+    }
+    return seq;
   }
 
   public async persistirFacturaGeneradaSupabase(params: {
@@ -2826,7 +2859,12 @@ class DatabaseEngine {
 
     // Solo columnas opcionales/transicionales pueden omitirse si NO existen en la tabla remota.
     // NUNCA quitar periodo_consumo porque falte lectura_id o monto_pagado.
-    const columnasTransicionalesOpcionales = new Set(['lectura_id', 'monto_pagado', 'periodo_consumo']);
+    const columnasTransicionalesOpcionales = new Set([
+      'lectura_id',
+      'monto_pagado',
+      'periodo_consumo',
+      'numero_factura',
+    ]);
     let facErr: { message?: string } | null = null;
 
     for (let intento = 0; intento < 4; intento++) {
@@ -3064,7 +3102,8 @@ class DatabaseEngine {
 
   private ejecutarFacturacionMensualInterno(
     periodo: string,
-    fechaEmision?: string
+    fechaEmision?: string,
+    secuencialInicialSET?: number
   ): {
     resumen: ResumenFacturacionMensual;
     persistPromises: Promise<string | null>[];
@@ -3078,6 +3117,10 @@ class DatabaseEngine {
     const fechaReferenciaFacturacion = fechaEmision
       ? new Date(`${fechaEmision.slice(0, 10)}T12:00:00Z`)
       : new Date();
+    let siguienteSecuencialSET = Math.max(
+      calcularSiguienteSecuencialFactura(this.data.facturas),
+      secuencialInicialSET || 1
+    );
     const hoyIsoFacturacion = fechaReferenciaFacturacion.toISOString().slice(0, 10);
     const facturasGeneradas: Factura[] = [];
     const medidoresOmitidos: MedidorOmitidoFacturacion[] = [];
@@ -3272,6 +3315,7 @@ class DatabaseEngine {
           ) + 1;
 
         // Cálculo estricto según pliego técnico
+        const numeroFacturaSET = formatearNumeroFacturaSET(siguienteSecuencialSET++);
         const resultado = calcularFacturaIndividual({
           medidor,
           clienteId: medidor.cliente_id,
@@ -3284,6 +3328,7 @@ class DatabaseEngine {
           tarifa,
           fechaEmision,
           correlativoPorMedidor: correlativo,
+          numeroFactura: numeroFacturaSET,
         });
 
         // Registrar factura en memoria y vincular lectura
@@ -3408,7 +3453,15 @@ class DatabaseEngine {
         await this.cargarDetallesFacturasDesdeSupabase(supabase, facturasSinDetalles);
       }
     }
-    const { resumen, persistPromises } = this.ejecutarFacturacionMensualInterno(periodo, fechaEmision);
+    let secuencialInicialSET: number | undefined;
+    if (supabase && isSupabaseConfigured) {
+      secuencialInicialSET = await this.obtenerSiguienteSecuencialFacturaSETAsync(supabase);
+    }
+    const { resumen, persistPromises } = this.ejecutarFacturacionMensualInterno(
+      periodo,
+      fechaEmision,
+      secuencialInicialSET
+    );
     if (persistPromises.length > 0) {
       const msgs = await Promise.all(persistPromises);
       const errs = msgs.filter((m): m is string => Boolean(m));
@@ -3478,7 +3531,19 @@ class DatabaseEngine {
       );
     }
 
-    const lecturaObjetivo = lecturasDelPeriodo.find((l) => l.estado === 'confirmada');
+    const lecturasConfirmadasPeriodo = lecturasDelPeriodo
+      .filter((l) => l.estado === 'confirmada')
+      .sort((a, b) => {
+        const aReinst = (a.observaciones || '').startsWith('Reinstalación') ? 1 : 0;
+        const bReinst = (b.observaciones || '').startsWith('Reinstalación') ? 1 : 0;
+        if (aReinst !== bReinst) return aReinst - bReinst;
+        const cmpFecha = (b.fecha_lectura || '').localeCompare(a.fecha_lectura || '');
+        if (cmpFecha !== 0) return cmpFecha;
+        return (b.fecha_registro || '').localeCompare(a.fecha_registro || '');
+      });
+    const lecturaObjetivo =
+      lecturasConfirmadasPeriodo.find((l) => !lecturaTieneFacturaActiva(l, this.data.facturas)) ||
+      lecturasConfirmadasPeriodo[0];
     if (!lecturaObjetivo) {
       throw new Error(
         `La lectura del Medidor N° ${numeroMedidor} (${periodoConsumo}) está en estado "borrador". Confirmala primero para poder facturarla.`
@@ -3548,6 +3613,10 @@ class DatabaseEngine {
           .map((f) => Number(f.numero_boleta_medidor) || 0)
       ) + 1;
 
+    const secuencialSET = sb
+      ? await this.obtenerSiguienteSecuencialFacturaSETAsync(sb)
+      : calcularSiguienteSecuencialFactura(this.data.facturas);
+
     const resultado = calcularFacturaIndividual({
       medidor,
       clienteId: medidor.cliente_id,
@@ -3561,6 +3630,7 @@ class DatabaseEngine {
       fechaEmision: fechaEmisionEfectiva,
       fechaReferencia,
       correlativoPorMedidor: correlativo,
+      numeroFactura: formatearNumeroFacturaSET(secuencialSET),
     });
 
     if (sb) {
@@ -4702,6 +4772,7 @@ class DatabaseEngine {
 
     const cobradorId = opts.cobradorId || 'caja';
     const metodoPago: MetodoPago = opts.metodoPago || 'efectivo';
+    const incluirReconexion = opts.incluirReconexion !== false;
     const tarifa = this.getTarifasVigentes();
     const ahora = opts.fechaReconexion || new Date().toISOString().split('T')[0];
     const tipoReinstalacion = opts.tipoReinstalacion || 'mismo_medidor';
@@ -4746,6 +4817,10 @@ class DatabaseEngine {
           .map((f) => Number(f.numero_boleta_medidor) || 0)
       ) + 1;
 
+    const numeroFacturaSET = formatearNumeroFacturaSET(
+      calcularSiguienteSecuencialFactura(this.data.facturas)
+    );
+
     const { factura: facReg } = generarFacturaRegularizacion({
       medidor,
       clienteId: medidor.cliente_id,
@@ -4759,7 +4834,30 @@ class DatabaseEngine {
       fechaEmision: ahora,
       periodo: periodoRegularizacion,
       correlativoPorMedidor: correlativo,
+      numeroFactura: numeroFacturaSET,
+      incluirReconexion,
     });
+
+    const periodoActual = ahora.slice(0, 7);
+    const periodoSiguiente = calcularPeriodoSiguiente(periodoActual);
+    const cargoReconexionDiferida: CargoPendiente | null =
+      !incluirReconexion && tarifa.monto_reconexion > 0
+        ? {
+            id: generarUUID(),
+            medidor_id: medidor.id,
+            cliente_id: medidor.cliente_id,
+            fecha_trabajo: ahora,
+            descripcion: 'RECONEXIÓN',
+            monto: Math.round(tarifa.monto_reconexion),
+            periodo_facturacion: periodoSiguiente,
+            estado: 'pendiente',
+            factura_id: null,
+            comprobante_url: null,
+            registrado_por: opts.registradoPor || opts.operario || cobradorId,
+            fecha_registro: new Date().toISOString(),
+            motivo_anulacion: null,
+          }
+        : null;
 
     const nuevoPago: Pago = {
       id: generarUUID(),
@@ -4773,7 +4871,6 @@ class DatabaseEngine {
 
     const lecturaInicial =
       opts.lecturaInicial !== undefined ? Math.max(0, Math.floor(opts.lecturaInicial)) : 0;
-    const periodoActual = ahora.slice(0, 7);
     const lecturaReinstalacion: Lectura = {
       id: generarUUID(),
       medidor_id: medidor.id,
@@ -4798,12 +4895,14 @@ class DatabaseEngine {
       opts,
       cobradorId,
       ahora,
+      incluirReconexion,
       tipoReinstalacion,
       numeroMedidorFinal,
       numeroMedidorAnterior,
       facturasImpagas,
       cargosPendientes,
       facReg,
+      cargoReconexionDiferida,
       nuevoPago,
       lecturaInicial,
       lecturaReinstalacion,
@@ -4821,6 +4920,7 @@ class DatabaseEngine {
       facturasImpagas,
       cargosPendientes,
       facReg,
+      cargoReconexionDiferida,
       nuevoPago,
       lecturaInicial,
       lecturaReinstalacion,
@@ -4847,10 +4947,15 @@ class DatabaseEngine {
       f.saldo = 0;
     }
 
-    // Marcar cargos como facturados
+    // Marcar cargos previos como facturados
     for (const c of cargosPendientes) {
       c.estado = 'facturado';
       c.factura_id = facReg.id;
+    }
+
+    // Si la reconexión fue diferida al próximo mes, agregar cargo pendiente
+    if (cargoReconexionDiferida) {
+      this.data.cargos_pendientes.push(cargoReconexionDiferida);
     }
 
     this.data.pagos.push(nuevoPago);
@@ -4868,7 +4973,12 @@ class DatabaseEngine {
     this.saveData(this.data);
     this.notify();
 
-    return { medidor, facturaRegularizacion: facReg, pago: nuevoPago };
+    return {
+      medidor,
+      facturaRegularizacion: facReg,
+      pago: nuevoPago,
+      cargoReconexionDiferida,
+    };
   }
 
   private async persistirReconexionSupabaseAsync(
@@ -4886,6 +4996,7 @@ class DatabaseEngine {
       facturasImpagas,
       cargosPendientes,
       facReg,
+      cargoReconexionDiferida,
       nuevoPago,
     } = prep;
 
@@ -4973,14 +5084,60 @@ class DatabaseEngine {
         `No se pudo registrar el pago de la factura de regularización (${facReg.id}): ${pagoErr.message}`
       );
     }
+
+    // 5. Si la reconexión fue diferida al próximo mes, insertar cargo_pendiente en Supabase
+    if (cargoReconexionDiferida) {
+      const registradoPorUuid = esUuidValido(cargoReconexionDiferida.registrado_por)
+        ? cargoReconexionDiferida.registrado_por
+        : cobradorUuid || sessionUserId || null;
+
+      const cargoPayload: Record<string, any> = {
+        id: cargoReconexionDiferida.id,
+        medidor_id: cargoReconexionDiferida.medidor_id,
+        cliente_id: cargoReconexionDiferida.cliente_id,
+        fecha_trabajo: cargoReconexionDiferida.fecha_trabajo,
+        descripcion: cargoReconexionDiferida.descripcion,
+        monto: cargoReconexionDiferida.monto,
+        periodo_facturacion: cargoReconexionDiferida.periodo_facturacion,
+        estado: 'pendiente',
+        factura_id: null,
+        comprobante_url: null,
+        fecha_registro: cargoReconexionDiferida.fecha_registro,
+        motivo_anulacion: null,
+      };
+      if (registradoPorUuid) {
+        cargoPayload.registrado_por = registradoPorUuid;
+      }
+
+      const { error: cargoErr } = await sb.from('cargos_pendientes').insert(cargoPayload);
+      if (cargoErr) {
+        throw new Error(
+          `No se pudo registrar el cargo diferido de reconexión en Supabase: ${cargoErr.message}`
+        );
+      }
+
+      if (registradoPorUuid) {
+        cargoReconexionDiferida.registrado_por = registradoPorUuid;
+      }
+    }
   }
 
   public async confirmarReconexionAsync(
     medidorId: string,
     cobradorOOpciones?: string | OpcionesReconexion,
     options?: { clientOverride?: any }
-  ): Promise<{ medidor: Medidor; facturaRegularizacion: Factura; pago: Pago }> {
+  ): Promise<{
+    medidor: Medidor;
+    facturaRegularizacion: Factura;
+    pago: Pago;
+    cargoReconexionDiferida?: CargoPendiente | null;
+  }> {
+    const sb = options?.clientOverride || (supabase && isSupabaseConfigured ? supabase : null);
     const prep = this.prepararReconexion(medidorId, cobradorOOpciones);
+    if (sb) {
+      const secuencialSET = await this.obtenerSiguienteSecuencialFacturaSETAsync(sb);
+      prep.facReg.numero_factura = formatearNumeroFacturaSET(secuencialSET);
+    }
     await this.persistirReconexionSupabaseAsync(prep, options?.clientOverride);
     return this.aplicarReconexionEnMemoria(prep);
   }
@@ -4988,7 +5145,12 @@ class DatabaseEngine {
   public confirmarReconexion(
     medidorId: string,
     cobradorOOpciones?: string | OpcionesReconexion
-  ): { medidor: Medidor; facturaRegularizacion: Factura; pago: Pago } {
+  ): {
+    medidor: Medidor;
+    facturaRegularizacion: Factura;
+    pago: Pago;
+    cargoReconexionDiferida?: CargoPendiente | null;
+  } {
     const prep = this.prepararReconexion(medidorId, cobradorOOpciones);
     const res = this.aplicarReconexionEnMemoria(prep);
 
@@ -6449,8 +6611,10 @@ class DatabaseEngine {
         const cli = clientesMap.get(f.cliente_id);
         const med = medidoresMap.get(f.medidor_id);
         const numBoleta = f.numero_boleta_medidor ? `${f.numero_boleta_medidor}-${f.periodo_facturado}` : '';
+        const numFacturaSET = f.numero_factura || '';
         if (cli && (cli.nombre_completo.toLowerCase().includes(search) || cli.documento.toLowerCase().includes(search))) return true;
         if (med && String(med.numero_medidor).includes(search)) return true;
+        if (numFacturaSET && numFacturaSET.toLowerCase().includes(search)) return true;
         if (numBoleta && numBoleta.toLowerCase().includes(search)) return true;
         return f.id.toLowerCase().includes(search);
       });

@@ -4,6 +4,7 @@
  */
 
 import { Factura, Lectura, Medidor, TarifaConfig, DetalleFactura, EstadoMedidor, CargoPendiente } from '../types';
+import { formatearNumeroFacturaSET } from './facturacionHelpers';
 
 export const TARIFAS_DEFAULT: TarifaConfig = {
   id: 'tarifa-v1-py',
@@ -223,8 +224,8 @@ export function validarNumeroMedidor(
 }
 
 /**
- * 4. ERSSAN 2% (sobre la suma de los conceptos 1 al 7 incluidos, solo si la base > 0):
- * Base = consumo_agua + deuda_anterior + mora + otros_trabajos + cuota_conexion + perdida_financiada + reconexion
+ * 4. ERSSAN 2% (sobre la suma de TODOS los conceptos incluidos en la factura):
+ * Base = deuda_anterior + consumo_agua + mora + otros_trabajos + cuota_conexion + perdida_financiada + reconexion
  */
 export function calcularErssanBaseCompleta(
   sumaConceptos1a7: number,
@@ -666,7 +667,7 @@ export function calcularFacturaMedidor(params: {
   // 7. Reconexión
   const montoReconexion = params.montoReconexion || 0;
 
-  // Base imponible ERSSAN: suma de conceptos 1 al 7
+  // Base imponible ERSSAN: incluye todos los conceptos de la factura (1 al 7, incluyendo deuda_anterior)
   const baseErssan =
     calculoAgua.montoAgua +
     deudaAnteriorMonto +
@@ -676,7 +677,7 @@ export function calcularFacturaMedidor(params: {
     perdidaFinanciada +
     montoReconexion;
 
-  // 8. ERSSAN 2% (sobre la suma de los conceptos 1 al 7 incluidos)
+  // 8. ERSSAN 2% (sobre baseErssan con todos los conceptos)
   const montoErssan = calcularErssanBaseCompleta(baseErssan, tarifa.erssan_porcentaje);
 
   // Alerta de consumo elevado (últimos 3 meses)
@@ -714,7 +715,7 @@ export function calcularFacturaMedidor(params: {
     fechaVencimiento = `${year}-${String(month).padStart(2, '0')}-${String(diaNormal).padStart(2, '0')}`;
   }
 
-  // Total
+  // Total (todos los conceptos + ERSSAN)
   const total = baseErssan + montoErssan;
 
   const facturaId = (params as any).facturaId || (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function' ? crypto.randomUUID() : 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, (c) => {
@@ -891,8 +892,24 @@ export function resolverPeriodoRegularizacion(
 }
 
 /**
+ * Calcula el período siguiente (YYYY-MM) a partir de un período YYYY-MM.
+ */
+export function calcularPeriodoSiguiente(periodo: string): string {
+  const match = /^(\d{4})-(0[1-9]|1[0-2])$/.exec((periodo || '').trim());
+  const ahora = new Date();
+  let year = match ? parseInt(match[1], 10) : ahora.getFullYear();
+  let month = match ? parseInt(match[2], 10) : ahora.getMonth() + 1;
+  month += 1;
+  if (month > 12) {
+    month = 1;
+    year += 1;
+  }
+  return `${year}-${String(month).padStart(2, '0')}`;
+}
+
+/**
  * 7. Generación de Factura de Regularización por Reconexión:
- * Deuda anterior (usando saldo_pendiente) + mora congelada + reconexión (60.000 Gs) + cargos pendientes + ERSSAN 2%
+ * Deuda anterior (usando saldo_pendiente) + mora congelada + reconexión (opcional, 60.000 Gs) + cargos pendientes + ERSSAN 2% sobre todos los conceptos
  */
 export function generarFacturaRegularizacion(params: {
   medidor: Medidor;
@@ -903,8 +920,11 @@ export function generarFacturaRegularizacion(params: {
   fechaEmision?: string;
   periodo?: string;
   correlativoPorMedidor: number;
+  numeroFactura?: string;
+  incluirReconexion?: boolean;
 }): { factura: Factura; detalles: DetalleFactura[] } {
   const tarifa = params.tarifa || TARIFAS_DEFAULT;
+  const incluirReconexion = params.incluirReconexion !== false;
   const facturasPendientes = params.facturasImpagas.filter(
     (f) => f.estado !== 'pagada' && f.estado !== 'anulada' && f.estado !== 'refinanciada'
   );
@@ -915,11 +935,12 @@ export function generarFacturaRegularizacion(params: {
       ? params.medidor.mora_congelada
       : facturasPendientes.length * tarifa.monto_mora_fijo;
 
-  const montoReconexion = tarifa.monto_reconexion;
+  const montoReconexion = incluirReconexion ? tarifa.monto_reconexion : 0;
   const cargos = params.cargosPendientes || [];
   const montoCargos = cargos.reduce((acc, c) => acc + Math.max(0, c.monto || 0), 0);
 
-  const baseErssan = deudaAnteriorMonto + moraCongelada + montoReconexion + montoCargos;
+  // Base ERSSAN = deuda_anterior + mora + otros_trabajos + reconexion (incluye todos los conceptos)
+  const baseErssan = deudaAnteriorMonto + moraCongelada + montoCargos + montoReconexion;
   const montoErssan = calcularErssanBaseCompleta(baseErssan, tarifa.erssan_porcentaje);
   const total = baseErssan + montoErssan;
 
@@ -972,7 +993,7 @@ export function generarFacturaRegularizacion(params: {
     }
   });
 
-  if (montoReconexion > 0) {
+  if (incluirReconexion && montoReconexion > 0) {
     detalles.push({
       id: nuevoDetalleId(),
       factura_id: facturaId,
@@ -1014,6 +1035,7 @@ export function generarFacturaRegularizacion(params: {
     es_tercera_boleta: false,
     alerta_consumo_elevado: false,
     numero_boleta_medidor: params.correlativoPorMedidor,
+    numero_factura: params.numeroFactura || formatearNumeroFacturaSET(params.correlativoPorMedidor),
     detalles,
     consumo_m3: 0,
   };
@@ -1028,7 +1050,8 @@ export function liquidarReconexion(
   medidor: Medidor,
   facturasImpagas: Factura[],
   tarifa: TarifaConfig = TARIFAS_DEFAULT,
-  cargosPendientes: { monto: number }[] = []
+  cargosPendientes: { monto: number }[] = [],
+  incluirReconexion: boolean = true
 ): {
   totalPagar: number;
   subtotalFacturas: number;
@@ -1050,8 +1073,9 @@ export function liquidarReconexion(
     medidor.mora_congelada !== null && medidor.mora_congelada !== undefined
       ? medidor.mora_congelada
       : facturasPendientes.length * tarifa.monto_mora_fijo;
-  const montoReconexion = tarifa.monto_reconexion;
+  const montoReconexion = incluirReconexion ? tarifa.monto_reconexion : 0;
 
+  // Base ERSSAN incluye todos los conceptos (deuda_anterior + mora + cargos + reconexión)
   const baseErssan = subtotalFacturas + mora + subtotalCargos + montoReconexion;
   const montoErssan = calcularErssanBaseCompleta(baseErssan, tarifa.erssan_porcentaje);
   const totalPagar = baseErssan + montoErssan;

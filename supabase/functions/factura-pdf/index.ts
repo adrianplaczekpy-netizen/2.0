@@ -7,6 +7,7 @@
 import { serve } from "https://deno.land/std@0.168.0/http/server.ts";
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2.118.0";
 import { jsPDF } from "https://esm.sh/jspdf@4.2.1";
+import { LOGO_PNG_DATA_URL, LOGO_ASPECT_RATIO } from "./logoData.ts";
 
 const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
@@ -53,38 +54,54 @@ serve(async (req) => {
     const pageWidth = 210;
     const margin = 18;
     const contentWidth = pageWidth - margin * 2;
-    let y = 18;
+    let y = 13;
 
-    if (factura.estado === "pagada") {
-      doc.setTextColor(225, 225, 225);
-      doc.setFont("helvetica", "bold");
-      doc.setFontSize(55);
-      doc.text("PAGADA", pageWidth / 2, 130, { align: "center", angle: 30 });
-      doc.setTextColor(0, 0, 0);
-    }
+    // Encabezado con Logo + datos legales reales de la empresa
+    const logoW = 44;
+    const logoH = Number((logoW / LOGO_ASPECT_RATIO).toFixed(2));
+    doc.addImage(LOGO_PNG_DATA_URL, "PNG", margin, y, logoW, logoH);
 
-    // Encabezado
+    const xDatosLegales = margin + logoW + 3.5;
+    doc.setTextColor(15, 23, 42);
     doc.setFont("helvetica", "bold");
-    doc.setFontSize(13);
-    doc.text("AGUATERÍA POTABLE PARAGUAY S.A.", margin, y);
+    doc.setFontSize(8);
+    doc.text("RUC: 3950638-0", xDatosLegales, y + 2.5);
     doc.setFont("helvetica", "normal");
-    doc.setFontSize(8.5);
-    doc.text("RUC: 80045921-3 — Ente Regulador: ERSSAN (Ley N° 1614/2000)", margin, y + 4.5);
-    doc.text("San Lorenzo - Gran Asunción, Paraguay — Tel: (021) 580-000", margin, y + 8.5);
+    doc.setFontSize(7.5);
+    doc.text("TIMBRADO N°: 19148339", xDatosLegales, y + 6.3);
+    doc.text("Inicio Vigencia: 01/10/2026", xDatosLegales, y + 10.1);
+    doc.text("Fin Vigencia: 31/10/2027", xDatosLegales, y + 13.9);
 
-    // Identificador
-    const identificador = `Boleta N° ${factura.numero_boleta_medidor || 1}-${factura.periodo_facturado}`;
-    doc.setLineWidth(0.3);
-    doc.rect(pageWidth - margin - 65, y - 4, 65, 17);
+    // Recuadro derecho: Número de Factura SET (001-002-XXXXXXX) + Emisión, Período Facturado y Vencimiento
+    const numeroFacturaSET =
+      (factura.numero_factura && String(factura.numero_factura).trim()) ||
+      `001-002-${String(Math.max(1, Number(factura.numero_boleta_medidor) || 1)).padStart(7, "0")}`;
+
+    const boxW = 74;
+    const boxH = 21.5;
+    const boxX = pageWidth - margin - boxW;
+    const boxY = y - 1;
+
+    doc.setDrawColor(30, 41, 59);
+    doc.setLineWidth(0.35);
+    doc.rect(boxX, boxY, boxW, boxH);
+
+    doc.setTextColor(15, 23, 42);
     doc.setFont("helvetica", "bold");
     doc.setFontSize(9.5);
-    doc.text(identificador, pageWidth - margin - 61, y + 2);
+    doc.text(`Factura N°: ${numeroFacturaSET}`, boxX + 3.5, boxY + 5);
+
     doc.setFont("helvetica", "normal");
     doc.setFontSize(8);
-    doc.text(`Emisión: ${factura.fecha_emision}`, pageWidth - margin - 61, y + 6.5);
-    doc.text(`Período: ${factura.periodo_facturado}`, pageWidth - margin - 61, y + 10.5);
+    doc.text(`Emisión: ${factura.fecha_emision}`, boxX + 3.5, boxY + 9.8);
+    doc.text(`Período Facturado: ${factura.periodo_facturado}`, boxX + 3.5, boxY + 14.1);
+    doc.setFont("helvetica", "bold");
+    doc.text(`Vencimiento: ${factura.fecha_vencimiento}`, boxX + 3.5, boxY + 18.4);
+    doc.setFont("helvetica", "normal");
 
-    y += 20;
+    y = boxY + boxH + 3.5;
+    doc.setDrawColor(0, 0, 0);
+    doc.setLineWidth(0.4);
     doc.line(margin, y, pageWidth - margin, y);
     y += 6;
 
@@ -176,7 +193,8 @@ serve(async (req) => {
     doc.text(`${Math.round(subtotal).toLocaleString("es-PY")} Gs.`, pageWidth - margin - 3, y, { align: "right" });
     y += 5;
 
-    const montoErssan = detErssan ? detErssan.monto : Math.round(subtotal * 0.02);
+    const baseErssanFallback = subtotal;
+    const montoErssan = detErssan ? detErssan.monto : Math.round(baseErssanFallback * 0.02);
     if (montoErssan > 0) {
       doc.setFont("helvetica", "normal");
       doc.text("Aporte ERSSAN (2%):", margin + 3, y);
@@ -200,7 +218,7 @@ serve(async (req) => {
       headers: {
         ...corsHeaders,
         "Content-Type": "application/pdf",
-        "Content-Disposition": `inline; filename="Boleta_${factura.numero_boleta_medidor || 1}_${factura.periodo_facturado}.pdf"`,
+        "Content-Disposition": `inline; filename="Factura_${numeroFacturaSET}_${factura.periodo_facturado}.pdf"`,
       },
     });
   } catch (err: any) {

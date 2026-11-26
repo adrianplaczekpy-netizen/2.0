@@ -326,6 +326,7 @@ CREATE TABLE IF NOT EXISTS public.facturas (
     alerta_consumo_elevado BOOLEAN NOT NULL DEFAULT FALSE,
     texto_alerta_consumo TEXT,
     numero_boleta_medidor INTEGER NOT NULL, -- Correlativo secuencial por medidor (MAX + 1)
+    numero_factura VARCHAR(20), -- Numeración oficial SET (ej: 001-002-0000001)
     lectura_anterior INTEGER,
     lectura_actual INTEGER,
     consumo_m3 INTEGER,
@@ -341,6 +342,74 @@ ALTER TABLE public.facturas ADD COLUMN IF NOT EXISTS motivo TEXT;
 ALTER TABLE public.facturas ADD COLUMN IF NOT EXISTS periodo_consumo VARCHAR(7);
 ALTER TABLE public.facturas ADD COLUMN IF NOT EXISTS lectura_id UUID REFERENCES public.lecturas(id) ON DELETE SET NULL;
 ALTER TABLE public.facturas ADD COLUMN IF NOT EXISTS monto_pagado INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE public.facturas ADD COLUMN IF NOT EXISTS numero_factura VARCHAR(20);
+
+-- Secuencia global para numeración SET 001-002-XXXXXXX (7 dígitos)
+CREATE SEQUENCE IF NOT EXISTS public.facturas_numero_seq START WITH 1 INCREMENT BY 1;
+
+-- Backfill idempotente para facturas existentes sin numero_factura en orden cronológico
+WITH pendientes_numerar AS (
+    SELECT
+        id,
+        ROW_NUMBER() OVER (ORDER BY created_at ASC, fecha_emision ASC, id ASC)
+        + COALESCE(
+            (SELECT MAX(SUBSTRING(f2.numero_factura FROM 9)::INTEGER)
+             FROM public.facturas f2
+             WHERE f2.numero_factura ~ '^001-002-[0-9]{7}$'),
+            0
+        ) AS seq_num
+    FROM public.facturas
+    WHERE numero_factura IS NULL OR numero_factura = ''
+)
+UPDATE public.facturas f
+SET numero_factura = '001-002-' || LPAD(p.seq_num::TEXT, 7, '0')
+FROM pendientes_numerar p
+WHERE f.id = p.id;
+
+SELECT setval(
+    'public.facturas_numero_seq',
+    GREATEST(
+        COALESCE(
+            (SELECT MAX(SUBSTRING(numero_factura FROM 9)::INTEGER)
+             FROM public.facturas
+             WHERE numero_factura ~ '^001-002-[0-9]{7}$'),
+            0
+        ),
+        1
+    ),
+    EXISTS (SELECT 1 FROM public.facturas WHERE numero_factura ~ '^001-002-[0-9]{7}$')
+);
+
+CREATE OR REPLACE FUNCTION public.asignar_numero_factura_set()
+RETURNS TRIGGER
+LANGUAGE plpgsql
+AS $$
+DECLARE
+    v_seq INTEGER;
+BEGIN
+    IF NEW.numero_factura IS NULL OR BTRIM(NEW.numero_factura) = '' THEN
+        v_seq := nextval('public.facturas_numero_seq');
+        NEW.numero_factura := '001-002-' || LPAD(v_seq::TEXT, 7, '0');
+    ELSIF NEW.numero_factura ~ '^001-002-[0-9]{7}$' THEN
+        v_seq := SUBSTRING(NEW.numero_factura FROM 9)::INTEGER;
+        IF v_seq > COALESCE((SELECT last_value FROM public.facturas_numero_seq), 0) THEN
+            PERFORM setval('public.facturas_numero_seq', v_seq, true);
+        END IF;
+    END IF;
+    RETURN NEW;
+END;
+$$;
+
+DROP TRIGGER IF EXISTS trg_asignar_numero_factura_set ON public.facturas;
+CREATE TRIGGER trg_asignar_numero_factura_set
+BEFORE INSERT ON public.facturas
+FOR EACH ROW
+EXECUTE FUNCTION public.asignar_numero_factura_set();
+
+CREATE UNIQUE INDEX IF NOT EXISTS uq_facturas_numero_factura
+    ON public.facturas (numero_factura)
+    WHERE numero_factura IS NOT NULL;
+
 UPDATE public.facturas f
 SET monto_pagado = COALESCE(
     (SELECT SUM(p.monto) FROM public.pagos p WHERE p.factura_id = f.id),

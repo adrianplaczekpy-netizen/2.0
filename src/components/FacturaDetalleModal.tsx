@@ -7,6 +7,7 @@ import React, { useState, useEffect } from 'react';
 import { db } from '../services/database';
 import { formatGs } from '../services/billingRules';
 import { descargarBoletaServer, imprimirBoletaServer } from '../services/apiPdfService';
+import { generarComprobantePagoPDF } from '../services/pdfService';
 import {
   ordenarYFiltrarDetalles,
   formatearNumeroFactura,
@@ -231,12 +232,35 @@ export const FacturaDetalleModal: React.FC<FacturaDetalleModalProps> = ({
     }
   };
 
+  const obtenerUltimoPagoParaComprobante = () => {
+    const pagosFac = db
+      .getPagosPorFactura(factura.id)
+      .slice()
+      .sort((a, b) => (b.fecha_pago || '').localeCompare(a.fecha_pago || ''));
+    return pagosFac[0];
+  };
+
   const handleDescargarPDF = async () => {
     setGeneratingPdf(true);
     setLocalError(null);
     try {
-      const filename = `Boleta_${factura.periodo_facturado}_Med_${medidor.numero_medidor}.pdf`;
-      await descargarBoletaServer(factura.id, filename);
+      if (factura.estado === 'pagada') {
+        const ultimoPago = obtenerUltimoPagoParaComprobante();
+        const doc = generarComprobantePagoPDF({
+          factura,
+          cliente,
+          medidor,
+          pago: ultimoPago,
+          detalles: factura.detalles,
+          cobradorNombre: ultimoPago?.cobradorNombre || user?.nombre || 'Caja Central',
+          saldoRestante: 0,
+        });
+        const recTag = ultimoPago?.numero_recibo || factura.periodo_facturado;
+        doc.save(`Recibo_${recTag}_Med_${medidor.numero_medidor}.pdf`);
+      } else {
+        const filename = `Boleta_${factura.periodo_facturado}_Med_${medidor.numero_medidor}.pdf`;
+        await descargarBoletaServer(factura.id, filename);
+      }
     } catch (err: any) {
       setLocalError(err?.message || 'No se pudo generar el PDF.');
     } finally {
@@ -248,7 +272,43 @@ export const FacturaDetalleModal: React.FC<FacturaDetalleModalProps> = ({
     setGeneratingPdf(true);
     setLocalError(null);
     try {
-      await imprimirBoletaServer(factura.id);
+      if (factura.estado === 'pagada') {
+        const ultimoPago = obtenerUltimoPagoParaComprobante();
+        const doc = generarComprobantePagoPDF({
+          factura,
+          cliente,
+          medidor,
+          pago: ultimoPago,
+          detalles: factura.detalles,
+          cobradorNombre: ultimoPago?.cobradorNombre || user?.nombre || 'Caja Central',
+          saldoRestante: 0,
+        });
+        const blob = doc.output('blob');
+        const blobUrl = window.URL.createObjectURL(blob);
+        const iframe = document.createElement('iframe');
+        iframe.style.position = 'fixed';
+        iframe.style.right = '0';
+        iframe.style.bottom = '0';
+        iframe.style.width = '0';
+        iframe.style.height = '0';
+        iframe.style.border = '0';
+        iframe.src = blobUrl;
+        document.body.appendChild(iframe);
+        iframe.onload = () => {
+          try {
+            iframe.contentWindow?.focus();
+            iframe.contentWindow?.print();
+          } catch {
+            window.print();
+          }
+          setTimeout(() => {
+            document.body.removeChild(iframe);
+            window.URL.revokeObjectURL(blobUrl);
+          }, 60000);
+        };
+      } else {
+        await imprimirBoletaServer(factura.id);
+      }
     } catch (err: any) {
       setLocalError(err?.message || 'No se pudo imprimir la boleta.');
     } finally {
@@ -726,7 +786,13 @@ export const FacturaDetalleModal: React.FC<FacturaDetalleModalProps> = ({
               className="min-h-[44px] flex-1 sm:flex-none px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white text-xs font-bold rounded-lg inline-flex items-center justify-center gap-1.5 cursor-pointer disabled:opacity-50"
             >
               {generatingPdf ? <Loader2 className="w-4 h-4 animate-spin" /> : <FileDown className="w-4 h-4" />}
-              <span>{generatingPdf ? 'Generando...' : 'Descargar PDF'}</span>
+              <span>
+                {generatingPdf
+                  ? 'Generando...'
+                  : factura.estado === 'pagada'
+                    ? 'Recibo de Pago'
+                    : 'Descargar PDF'}
+              </span>
             </button>
           </div>
         </div>

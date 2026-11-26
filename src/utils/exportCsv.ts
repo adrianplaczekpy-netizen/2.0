@@ -155,6 +155,7 @@ export function exportarFacturasCSV(
   facturas: Array<{
     id: string;
     numero_boleta_medidor?: number;
+    numero_factura?: string | null;
     periodo_facturado: string;
     clienteNombre: string;
     clienteDoc: string;
@@ -191,9 +192,10 @@ export function exportarFacturasCSV(
 
   const rows = facturas.map((f) => {
     const numFactura =
-      f.numero_boleta_medidor && f.periodo_facturado
+      f.numero_factura ||
+      (f.numero_boleta_medidor && f.periodo_facturado
         ? `${f.numero_boleta_medidor}-${f.periodo_facturado}`
-        : f.id.slice(0, 12);
+        : f.id.slice(0, 12));
     const saldo =
       f.estado === 'pagada' || f.estado === 'anulada' || f.estado === 'refinanciada'
         ? 0

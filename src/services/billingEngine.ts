@@ -18,6 +18,7 @@ import {
   esFacturaVencida,
   calcularDeudaYMoraConsolidadaPeriodoN,
 } from './billingRules';
+import { formatearNumeroFacturaSET } from './facturacionHelpers';
 
 export interface MedidorOmitidoFacturacion {
   medidor_id: string;
@@ -61,6 +62,7 @@ export interface CalculoFacturaParams {
   tarifa?: TarifaConfig;
   fechaEmision?: string; // YYYY-MM-DD
   correlativoPorMedidor: number;
+  numeroFactura?: string; // Formato oficial SET: 001-002-0000001
   fechaReferencia?: Date; // Para evaluar vencimiento de facturas pasadas
   facturaId?: string; // UUID opcional pregenerado
 }
@@ -153,6 +155,14 @@ export function lecturaTieneFacturaActiva(lectura: Lectura, facturas: Factura[])
     if (f.estado === 'anulada') return false;
     if (f.medidor_id !== lectura.medidor_id) return false;
 
+    const esFacturaSinLecturaNiConsumo =
+      !f.lectura_id &&
+      f.lectura_anterior === undefined &&
+      f.lectura_actual === undefined &&
+      (f.consumo_m3 === 0 || f.consumo_m3 === undefined) &&
+      !(f.detalles || []).some((d) => d.concepto === 'consumo_agua');
+    if (esFacturaSinLecturaNiConsumo) return false;
+
     // 1. Vínculo directo por lectura_id (criterio principal y más limpio)
     if (f.lectura_id) {
       return f.lectura_id === lectura.id;
@@ -217,7 +227,7 @@ export function buscarLecturaConfirmadaPendienteDeFacturar(
  * e) Cuota de conexión (planes_financiamiento tipo cuota_conexion activos)
  * f) Pérdida financiada (planes_financiamiento tipo perdida_financiada activos)
  * g) Reconexión (si aplica reconexión en el período)
- * h) ERSSAN 2% (sobre la suma de los conceptos a-g que tengan monto > 0)
+ * h) ERSSAN 2% (sobre la suma de TODOS los conceptos incluidos: a, b, c, d, e, f, g con monto > 0)
  *
  * NOTA: Solo incluir conceptos con monto > 0. NO crear filas en cero.
  */
@@ -346,9 +356,18 @@ export function calcularFacturaIndividual(params: CalculoFacturaParams): Calculo
   }
 
   // -------------------------------------------------------------------------
-  // d) Otros trabajos
+  // d) Otros trabajos (excluyendo cargos diferidos de RECONEXIÓN que van en g)
   // Cargos pendientes del medidor en estado 'pendiente' para este período
   // -------------------------------------------------------------------------
+  const esCargoReconexion = (descripcion: string): boolean => {
+    const normalizada = (descripcion || '')
+      .trim()
+      .normalize('NFD')
+      .replace(/[\u0300-\u036f]/g, '')
+      .toUpperCase();
+    return normalizada === 'RECONEXION';
+  };
+
   const cargosPeriodo = (params.cargosPendientes || []).filter(
     (c) =>
       c.medidor_id === params.medidor.id &&
@@ -357,8 +376,11 @@ export function calcularFacturaIndividual(params: CalculoFacturaParams): Calculo
       c.monto > 0
   );
 
+  const cargosReconexion = cargosPeriodo.filter((c) => esCargoReconexion(c.descripcion));
+  const cargosOtrosTrabajos = cargosPeriodo.filter((c) => !esCargoReconexion(c.descripcion));
+
   let montoOtrosTrabajos = 0;
-  for (const cargo of cargosPeriodo) {
+  for (const cargo of cargosOtrosTrabajos) {
     montoOtrosTrabajos += cargo.monto;
     cargosFacturadosIds.push(cargo.id);
     detalles.push({
@@ -433,28 +455,44 @@ export function calcularFacturaIndividual(params: CalculoFacturaParams): Calculo
 
   // -------------------------------------------------------------------------
   // g) Reconexión
-  // Solo si el medidor estaba cortado y se registró reconexión pendiente de facturar
+  // Incluye cargos pendientes diferidos de RECONEXIÓN del período o montoReconexion directo
   // -------------------------------------------------------------------------
-  const montoReconexion = params.montoReconexion && params.montoReconexion > 0 ? params.montoReconexion : 0;
-  if (montoReconexion > 0) {
+  let montoReconexion = 0;
+  for (const cargoRec of cargosReconexion) {
+    montoReconexion += cargoRec.monto;
+    cargosFacturadosIds.push(cargoRec.id);
+    detalles.push({
+      id: generarUUID(),
+      factura_id: facturaId,
+      concepto: 'reconexion',
+      descripcion: cargoRec.descripcion,
+      monto: cargoRec.monto,
+      cargo_pendiente_id: cargoRec.id,
+    });
+  }
+
+  const montoReconexionDirecto =
+    params.montoReconexion && params.montoReconexion > 0 ? params.montoReconexion : 0;
+  if (montoReconexionDirecto > 0) {
+    montoReconexion += montoReconexionDirecto;
     detalles.push({
       id: generarUUID(),
       factura_id: facturaId,
       concepto: 'reconexion',
       descripcion: 'Reconexión',
-      monto: montoReconexion,
+      monto: montoReconexionDirecto,
     });
   }
 
   // -------------------------------------------------------------------------
   // h) ERSSAN 2%
-  // Sumar todos los conceptos anteriores (a través de g) con monto > 0
-  // erssan = base × (erssan_porcentaje / 100), redondeado a entero
+  // Base ERSSAN = deuda_anterior + consumo_agua + mora + otros_trabajos + cuota_conexion + perdida_financiada + reconexion
+  // erssan = Math.round(baseErssan * erssan_porcentaje / 100)
   // Solo incluir si erssan > 0
   // -------------------------------------------------------------------------
   const baseErssan =
-    montoConsumo +
     deudaAnteriorMonto +
+    montoConsumo +
     montoMora +
     montoOtrosTrabajos +
     montoCuotaConexion +
@@ -475,7 +513,7 @@ export function calcularFacturaIndividual(params: CalculoFacturaParams): Calculo
     }
   }
 
-  // Total de la factura (suma de todos los conceptos incluidos)
+  // Total de la factura (todos los conceptos incluidos + ERSSAN)
   const total = baseErssan + montoErssan;
 
   // -------------------------------------------------------------------------
@@ -530,6 +568,7 @@ export function calcularFacturaIndividual(params: CalculoFacturaParams): Calculo
     alerta_consumo_elevado: alertaConsumoElevado,
     texto_alerta_consumo: textoAlertaConsumo,
     numero_boleta_medidor: params.correlativoPorMedidor,
+    numero_factura: params.numeroFactura || formatearNumeroFacturaSET(params.correlativoPorMedidor),
     detalles,
     lectura_anterior: lecturaAnterior,
     lectura_actual: lecturaActual,

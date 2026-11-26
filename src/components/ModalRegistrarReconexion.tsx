@@ -3,11 +3,16 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import React, { useState } from 'react';
+import React, { useState, useMemo } from 'react';
 import { db } from '../services/database';
-import { formatGs } from '../services/billingRules';
-import { Medidor, Factura, Pago, MetodoPago } from '../types';
-import { generarBoletaPDF } from '../services/pdfService';
+import {
+  formatGs,
+  liquidarReconexion,
+  calcularPeriodoSiguiente,
+} from '../services/billingRules';
+import { Medidor, Factura, Pago, MetodoPago, CargoPendiente } from '../types';
+import { generarComprobantePagoPDF } from '../services/pdfService';
+import { useAuth } from '../context/AuthContext';
 import {
   X,
   CheckCircle2,
@@ -17,16 +22,19 @@ import {
   Download,
   Wrench,
   ShieldCheck,
-  Calendar,
-  User,
-  Hash,
+  Info,
 } from 'lucide-react';
 
 interface Props {
   medidorId: string;
   isOpen: boolean;
   onClose: () => void;
-  onSuccess: (resultado: { medidor: Medidor; facturaRegularizacion: Factura; pago: Pago }) => void;
+  onSuccess: (resultado: {
+    medidor: Medidor;
+    facturaRegularizacion: Factura;
+    pago: Pago;
+    cargoReconexionDiferida?: CargoPendiente | null;
+  }) => void;
 }
 
 export const ModalRegistrarReconexion: React.FC<Props> = ({
@@ -35,12 +43,10 @@ export const ModalRegistrarReconexion: React.FC<Props> = ({
   onClose,
   onSuccess,
 }) => {
-  if (!isOpen) return null;
-
-  const medidorDetalle = db.getMedidorDetalle(medidorId);
-  const tarifas = db.getTarifasVigentes();
+  const { user } = useAuth();
 
   // Estados del formulario de reconexión y reinstalación
+  const [incluirReconexion, setIncluirReconexion] = useState<boolean>(true);
   const [metodoPago, setMetodoPago] = useState<MetodoPago>('efectivo');
   const [operario, setOperario] = useState<string>('Operario Cuadrilla');
   const [fechaReconexion, setFechaReconexion] = useState<string>(
@@ -60,9 +66,33 @@ export const ModalRegistrarReconexion: React.FC<Props> = ({
     medidor: Medidor;
     facturaRegularizacion: Factura;
     pago: Pago;
+    cargoReconexionDiferida?: CargoPendiente | null;
   } | null>(null);
 
-  if (!medidorDetalle || !medidorDetalle.medidor || !medidorDetalle.cliente) {
+  const medidorDetalle = isOpen ? db.getMedidorDetalle(medidorId) : null;
+  const tarifas = db.getTarifasVigentes();
+
+  const facturasImpagas = useMemo(() => {
+    if (!medidorDetalle) return [];
+    return medidorDetalle.facturas.filter(
+      (f) => f.estado !== 'pagada' && f.estado !== 'anulada' && f.estado !== 'refinanciada'
+    );
+  }, [medidorDetalle]);
+
+  const liquidacionActual = useMemo(() => {
+    if (!medidorDetalle?.medidor) return null;
+    return liquidarReconexion(
+      medidorDetalle.medidor,
+      facturasImpagas,
+      tarifas,
+      medidorDetalle.cargosPendientes,
+      incluirReconexion
+    );
+  }, [medidorDetalle, facturasImpagas, tarifas, incluirReconexion]);
+
+  if (!isOpen) return null;
+
+  if (!medidorDetalle || !medidorDetalle.medidor || !medidorDetalle.cliente || !liquidacionActual) {
     return (
       <div className="fixed inset-0 z-50 bg-black/60 flex items-center justify-center p-4">
         <div className="bg-white p-6 rounded-xl max-w-md w-full text-center space-y-4">
@@ -79,9 +109,9 @@ export const ModalRegistrarReconexion: React.FC<Props> = ({
     );
   }
 
-  const { medidor, cliente, liquidacionReconexion, facturas } = medidorDetalle;
-  const facturasImpagas = facturas.filter(
-    (f) => f.estado !== 'pagada' && f.estado !== 'anulada' && f.estado !== 'refinanciada'
+  const { medidor, cliente } = medidorDetalle;
+  const periodoSiguiente = calcularPeriodoSiguiente(
+    (fechaReconexion || new Date().toISOString().split('T')[0]).slice(0, 7)
   );
 
   const handleConfirmar = async (e: React.FormEvent) => {
@@ -121,7 +151,8 @@ export const ModalRegistrarReconexion: React.FC<Props> = ({
     setProcesando(true);
     try {
       const res = await db.confirmarReconexionAsync(medidor.id, {
-        cobradorId: operario || 'Caja Central',
+        cobradorId: user?.id || operario || 'Caja Central',
+        registradoPor: user?.id || user?.nombre || operario,
         metodoPago,
         tipoReinstalacion,
         nuevoNumeroMedidor: numeroNuevoParsed,
@@ -129,6 +160,7 @@ export const ModalRegistrarReconexion: React.FC<Props> = ({
         fechaReconexion,
         operario,
         observaciones,
+        incluirReconexion,
       });
 
       setResultadoReconexion(res);
@@ -142,31 +174,74 @@ export const ModalRegistrarReconexion: React.FC<Props> = ({
 
   const handleDescargarPDF = () => {
     if (!resultadoReconexion) return;
-    const doc = generarBoletaPDF({
+    const doc = generarComprobantePagoPDF({
       factura: resultadoReconexion.facturaRegularizacion,
       cliente,
       medidor: resultadoReconexion.medidor,
+      pago: resultadoReconexion.pago,
       detalles: resultadoReconexion.facturaRegularizacion.detalles,
+      cobradorNombre: user?.nombre || operario || 'Caja Central',
+      saldoRestante: 0,
     });
     doc.save(
-      `Factura_Regularizacion_Med_${resultadoReconexion.medidor.numero_medidor}_${resultadoReconexion.facturaRegularizacion.periodo_facturado}.pdf`
+      `Recibo_Reconexion_${resultadoReconexion.pago.numero_recibo}_Med_${resultadoReconexion.medidor.numero_medidor}.pdf`
     );
   };
 
+  const handleImprimirComprobante = () => {
+    if (!resultadoReconexion) return;
+    const doc = generarComprobantePagoPDF({
+      factura: resultadoReconexion.facturaRegularizacion,
+      cliente,
+      medidor: resultadoReconexion.medidor,
+      pago: resultadoReconexion.pago,
+      detalles: resultadoReconexion.facturaRegularizacion.detalles,
+      cobradorNombre: user?.nombre || operario || 'Caja Central',
+      saldoRestante: 0,
+    });
+    try {
+      const blob = doc.output('blob');
+      const blobUrl = window.URL.createObjectURL(blob);
+      const iframe = document.createElement('iframe');
+      iframe.style.position = 'fixed';
+      iframe.style.right = '0';
+      iframe.style.bottom = '0';
+      iframe.style.width = '0';
+      iframe.style.height = '0';
+      iframe.style.border = '0';
+      iframe.src = blobUrl;
+      document.body.appendChild(iframe);
+      iframe.onload = () => {
+        try {
+          iframe.contentWindow?.focus();
+          iframe.contentWindow?.print();
+        } catch {
+          window.print();
+        }
+        setTimeout(() => {
+          document.body.removeChild(iframe);
+          window.URL.revokeObjectURL(blobUrl);
+        }, 60000);
+      };
+    } catch {
+      window.print();
+    }
+  };
+
   return (
-    <div className="fixed inset-0 z-50 bg-black/60 backdrop-blur-xs flex items-center justify-center p-4 overflow-y-auto">
-      <div className="bg-white rounded-2xl shadow-2xl max-w-2xl w-full overflow-hidden border border-stone-200 my-8">
-        {/* Cabecera del Modal */}
-        <div className="bg-stone-900 text-white p-5 flex items-center justify-between">
-          <div className="flex items-center gap-3">
-            <div className="p-2 bg-emerald-500/20 text-emerald-400 rounded-lg">
-              <Layers className="w-5 h-5" />
+    <div className="fixed inset-0 z-50 bg-black/60 backdrop-blur-xs flex items-center justify-center p-2 sm:p-4">
+      <div className="bg-white rounded-2xl shadow-2xl max-w-2xl w-full max-h-[90vh] flex flex-col overflow-hidden border border-stone-200">
+        {/* Cabecera fija del Modal */}
+        <div className="sticky top-0 z-10 shrink-0 bg-stone-900 text-white p-3 sm:p-5 flex items-center justify-between gap-2">
+          <div className="flex items-center gap-2.5 sm:gap-3 min-w-0">
+            <div className="p-1.5 sm:p-2 bg-emerald-500/20 text-emerald-400 rounded-lg shrink-0">
+              <Layers className="w-4 h-4 sm:w-5 sm:h-5" />
             </div>
-            <div>
-              <h2 className="text-base font-bold tracking-tight">
+            <div className="min-w-0">
+              <h2 className="text-sm sm:text-base font-bold tracking-tight truncate">
                 Registrar Reconexión de Medidor
               </h2>
-              <p className="text-xs text-stone-300">
+              <p className="text-[11px] sm:text-xs text-stone-300 truncate">
                 Medidor N° {medidor.numero_medidor} • Titular: {cliente.nombre_completo}
               </p>
             </div>
@@ -174,22 +249,28 @@ export const ModalRegistrarReconexion: React.FC<Props> = ({
           <button
             type="button"
             onClick={onClose}
-            className="p-1.5 text-stone-400 hover:text-white rounded-lg hover:bg-stone-800 transition-colors cursor-pointer"
+            aria-label="Cerrar modal"
+            className="p-1.5 text-stone-400 hover:text-white rounded-lg hover:bg-stone-800 transition-colors cursor-pointer shrink-0"
           >
             <X className="w-5 h-5" />
           </button>
         </div>
 
-        {/* Pantalla de Éxito / Comprobante */}
-        {resultadoReconexion ? (
-          <div className="p-6 space-y-5">
+        {/* Contenido scrolleable */}
+        <div className="overflow-y-auto flex-1">
+          {/* Pantalla de Éxito / Comprobante */}
+          {resultadoReconexion ? (
+            <div className="p-4 pt-5 sm:p-6 sm:pt-6 space-y-4 sm:space-y-5">
             <div className="p-5 bg-emerald-50 border border-emerald-300 rounded-xl space-y-2 text-center">
               <CheckCircle2 className="w-10 h-10 text-emerald-600 mx-auto" />
               <h3 className="text-base font-bold text-emerald-950">
                 ¡Reconexión y Pago Registrados con Éxito!
               </h3>
               <p className="text-xs text-emerald-800 max-w-md mx-auto">
-                El medidor pasa a estado <span className="font-bold underline">ACTIVO</span> con mora congelada en 0 Gs. En el siguiente período mensual recibirá su factura ordinaria de forma normal.
+                El medidor pasa a estado <span className="font-bold underline">ACTIVO</span> con mora congelada en 0 Gs.
+                {resultadoReconexion.cargoReconexionDiferida
+                  ? ` La tasa de reconexión (${formatGs(resultadoReconexion.cargoReconexionDiferida.monto)}) quedó diferida como cargo pendiente para el período ${resultadoReconexion.cargoReconexionDiferida.periodo_facturacion}.`
+                  : ' En el siguiente período mensual recibirá su factura ordinaria de forma normal.'}
               </p>
             </div>
 
@@ -218,6 +299,17 @@ export const ModalRegistrarReconexion: React.FC<Props> = ({
                 <span className="font-bold text-stone-700">Lectura Inicial de Reconexión:</span>
                 <span className="font-bold text-stone-900">{resultadoReconexion.medidor.lectura_inicial_reconexion} m³</span>
               </div>
+              {resultadoReconexion.cargoReconexionDiferida && (
+                <div className="flex justify-between border-b border-stone-200 pb-2 text-amber-800">
+                  <span className="font-bold">
+                    Cargo Diferido ({resultadoReconexion.cargoReconexionDiferida.periodo_facturacion}):
+                  </span>
+                  <span className="font-bold">
+                    {resultadoReconexion.cargoReconexionDiferida.descripcion} —{' '}
+                    {formatGs(resultadoReconexion.cargoReconexionDiferida.monto)}
+                  </span>
+                </div>
+              )}
               <div className="flex justify-between pt-1 text-sm font-black text-stone-900">
                 <span>Total Abonado (100% Cancelado):</span>
                 <span>{formatGs(resultadoReconexion.facturaRegularizacion.total)}</span>
@@ -231,11 +323,11 @@ export const ModalRegistrarReconexion: React.FC<Props> = ({
                 className="flex-1 py-2.5 bg-blue-600 hover:bg-blue-700 text-white rounded-lg text-xs font-bold flex items-center justify-center gap-1.5 cursor-pointer shadow-xs"
               >
                 <Download className="w-4 h-4" />
-                <span>Descargar Factura PDF</span>
+                <span>Descargar Recibo de Pago</span>
               </button>
               <button
                 type="button"
-                onClick={() => window.print()}
+                onClick={handleImprimirComprobante}
                 className="flex-1 py-2.5 bg-stone-100 hover:bg-stone-200 text-stone-800 rounded-lg text-xs font-bold flex items-center justify-center gap-1.5 cursor-pointer border border-stone-200"
               >
                 <Printer className="w-4 h-4" />
@@ -252,7 +344,7 @@ export const ModalRegistrarReconexion: React.FC<Props> = ({
           </div>
         ) : (
           /* Formulario de Reconexión en 3 Pasos */
-          <form onSubmit={handleConfirmar} className="p-6 space-y-5">
+          <form onSubmit={handleConfirmar} className="p-4 pt-5 sm:p-6 sm:pt-6 space-y-4 sm:space-y-5">
             {errorValidacion && (
               <div className="p-3 bg-red-50 border border-red-300 rounded-lg text-red-800 text-xs font-semibold flex items-center gap-2">
                 <AlertTriangle className="w-4 h-4 text-red-600 shrink-0" />
@@ -272,43 +364,51 @@ export const ModalRegistrarReconexion: React.FC<Props> = ({
                 <span className="text-[10px] text-stone-500 font-medium">Regulado por ERSSAN</span>
               </div>
 
-              <div className="bg-stone-50 border border-stone-200 rounded-xl p-3.5 space-y-2 text-xs">
+              <div className="bg-stone-50 border border-stone-200 rounded-xl p-3 sm:p-3.5 space-y-2 text-xs">
                 <div className="flex justify-between items-center text-stone-700">
                   <span>1. Deuda anterior (última boleta impaga de {facturasImpagas.length} pendientes):</span>
                   <span className="font-semibold text-stone-900">
-                    {formatGs(liquidacionReconexion.subtotalFacturas)}
+                    {formatGs(liquidacionActual.subtotalFacturas)}
                   </span>
                 </div>
                 <div className="flex justify-between items-center text-stone-700">
                   <span>2. Mora congelada (fija al momento del corte):</span>
                   <span className="font-semibold text-stone-900">
-                    {formatGs(liquidacionReconexion.mora)}
+                    {formatGs(liquidacionActual.mora)}
                   </span>
                 </div>
                 <div className="flex justify-between items-center text-stone-700">
                   <span>3. Tasa de Reconexión (pliego tarifario):</span>
-                  <span className="font-semibold text-stone-900">
-                    {formatGs(liquidacionReconexion.montoReconexion)}
-                  </span>
+                  {incluirReconexion ? (
+                    <span className="font-semibold text-stone-900">
+                      {formatGs(liquidacionActual.montoReconexion)}
+                    </span>
+                  ) : (
+                    <span className="font-semibold text-amber-700">
+                      0 Gs. (Diferida a {periodoSiguiente})
+                    </span>
+                  )}
                 </div>
-                {liquidacionReconexion.subtotalCargos > 0 && (
+                {liquidacionActual.subtotalCargos > 0 && (
                   <div className="flex justify-between items-center text-stone-700">
                     <span>4. Otros trabajos pendientes del medidor:</span>
                     <span className="font-semibold text-stone-900">
-                      {formatGs(liquidacionReconexion.subtotalCargos)}
+                      {formatGs(liquidacionActual.subtotalCargos)}
                     </span>
                   </div>
                 )}
                 <div className="flex justify-between items-center text-stone-600 border-t border-stone-200 pt-1.5">
-                  <span>Aporte Regulador ERSSAN (2% sobre conceptos):</span>
+                  <span>
+                    Aporte Regulador ERSSAN ({tarifas.erssan_porcentaje}% sobre todos los conceptos):
+                  </span>
                   <span className="font-semibold text-stone-900">
-                    {formatGs(liquidacionReconexion.montoErssan)}
+                    {formatGs(liquidacionActual.montoErssan)}
                   </span>
                 </div>
                 <div className="flex justify-between items-center text-sm font-black text-stone-900 border-t-2 border-stone-300 pt-2">
                   <span>TOTAL LIQUIDACIÓN A COBRAR:</span>
                   <span className="text-emerald-700 text-base">
-                    {formatGs(liquidacionReconexion.totalPagar)}
+                    {formatGs(liquidacionActual.totalPagar)}
                   </span>
                 </div>
               </div>
@@ -472,21 +572,56 @@ export const ModalRegistrarReconexion: React.FC<Props> = ({
               </div>
             </div>
 
+            {/* Checkbox: Incluir o diferir tasa de reconexión (justo antes de Confirmar) */}
+            <label
+              htmlFor="incluir-reconexion-checkbox"
+              className={`scroll-mt-20 flex items-start gap-3 p-3.5 sm:p-4 rounded-xl cursor-pointer transition-colors ${
+                incluirReconexion
+                  ? 'bg-emerald-50 border-2 border-emerald-400 text-stone-900'
+                  : 'bg-amber-50 border-2 border-amber-400 text-amber-950'
+              }`}
+            >
+              <input
+                id="incluir-reconexion-checkbox"
+                type="checkbox"
+                checked={incluirReconexion}
+                onChange={(e) => setIncluirReconexion(e.target.checked)}
+                className="mt-0.5 h-5 w-5 rounded border-stone-400 text-emerald-600 focus:ring-emerald-500 cursor-pointer shrink-0"
+              />
+              <div className="flex-1 min-w-0 space-y-1">
+                <div className="flex items-start gap-1.5">
+                  {incluirReconexion ? (
+                    <CheckCircle2 className="w-4 h-4 text-emerald-600 shrink-0 mt-0.5" />
+                  ) : (
+                    <Info className="w-4 h-4 text-amber-600 shrink-0 mt-0.5" />
+                  )}
+                  <span className="text-sm font-bold leading-snug block">
+                    Incluir reconexión en la factura de regularización ({formatGs(tarifas.monto_reconexion)})
+                  </span>
+                </div>
+                <p className="text-xs text-stone-700 leading-snug">
+                  {incluirReconexion
+                    ? `Total a cobrar ahora: ${formatGs(liquidacionActual.totalPagar)}. Desmarque para diferir al mes ${periodoSiguiente}.`
+                    : `Diferida a ${periodoSiguiente} como cargo pendiente "RECONEXIÓN". Total a cobrar ahora: ${formatGs(liquidacionActual.totalPagar)}.`}
+                </p>
+              </div>
+            </label>
+
             {/* Botones de acción */}
-            <div className="flex items-center justify-end gap-3 pt-3 border-t border-stone-200">
+            <div className="flex flex-col-reverse sm:flex-row items-stretch sm:items-center justify-end gap-2.5 sm:gap-3 pt-3 border-t border-stone-200">
               <button
                 type="button"
                 onClick={onClose}
-                className="px-4 py-2.5 text-stone-600 hover:text-stone-900 text-xs font-bold cursor-pointer"
+                className="px-4 py-2.5 text-stone-600 hover:text-stone-900 text-xs font-bold cursor-pointer text-center"
               >
                 Cancelar
               </button>
               <button
                 type="submit"
                 disabled={procesando}
-                className="px-5 py-2.5 bg-emerald-600 hover:bg-emerald-700 active:bg-emerald-800 disabled:opacity-60 text-white rounded-lg text-xs font-bold flex items-center gap-1.5 cursor-pointer shadow-xs transition-colors"
+                className="px-5 py-2.5 bg-emerald-600 hover:bg-emerald-700 active:bg-emerald-800 disabled:opacity-60 text-white rounded-lg text-xs font-bold flex items-center justify-center gap-1.5 cursor-pointer shadow-xs transition-colors"
               >
-                <CheckCircle2 className="w-4 h-4" />
+                <CheckCircle2 className="w-4 h-4 shrink-0" />
                 <span>
                   {procesando
                     ? 'Procesando reconexión...'
@@ -496,6 +631,7 @@ export const ModalRegistrarReconexion: React.FC<Props> = ({
             </div>
           </form>
         )}
+        </div>
       </div>
     </div>
   );

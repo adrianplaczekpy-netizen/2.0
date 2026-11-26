@@ -199,10 +199,11 @@ test('7. Flujo de reconexión: genera factura de regularización completa', () =
   // Mora congelada: 9.000
   // Otros trabajos: 15.000
   // Reconexión: 60.000
-  // Base ERSSAN: 40.000 + 9.000 + 15.000 + 60.000 = 124.000 Gs.
+  // Base ERSSAN (todos los conceptos): 40.000 + 9.000 + 15.000 + 60.000 = 124.000 Gs.
   // ERSSAN 2%: 124.000 * 2% = 2.480 Gs.
-  // Total: 126.480 Gs.
+  // Total: 124.000 + 2.480 = 126.480 Gs.
   assert.equal(reg.factura.total, 126480);
+  assert.equal(reg.detalles.find((d) => d.concepto === 'erssan')?.monto, 2480);
   assert.ok(reg.detalles.some((d) => d.concepto === 'deuda_anterior'));
   assert.ok(reg.detalles.some((d) => d.concepto === 'mora'));
   assert.ok(reg.detalles.some((d) => d.concepto === 'otros_trabajos'));
@@ -1013,7 +1014,7 @@ test('26. Planes de Financiamiento: Cuota de conexión y Pérdida financiada se 
   assert.equal(planPerdida.estado, 'activo');
 });
 
-test('27. Factura de regularización: usa saldo_pendiente de última boleta impaga (206.550) + mora 9.000 + reconexión 60.000 + ERSSAN 2% = 281.061 (excluye anuladas y usa YYYY-MM)', () => {
+test('27. Factura de regularización: usa saldo_pendiente de última boleta impaga (206.550) + mora 9.000 + reconexión 60.000 + ERSSAN 2% sobre todos los conceptos (5.511) = 281.061 (excluye anuladas y usa YYYY-MM)', () => {
   const medidorCortado: Medidor = {
     id: 'med-reg-3',
     cliente_id: 'cli-03',
@@ -1088,8 +1089,8 @@ test('27. Factura de regularización: usa saldo_pendiente de última boleta impa
     },
   ];
 
-  // Liquidación previa (para modal): deuda = 206.550 (última no anulada 2026-10) + mora 9.000 + reconexión 60.000 = 275.550
-  // ERSSAN 2% = 5.511 -> Total = 281.061
+  // Liquidación previa (para modal): deuda = 206.550 + mora 9.000 + reconexión 60.000
+  // Base ERSSAN = 206.550 + 9.000 + 60.000 = 275.550 -> ERSSAN 2% = 5.511 -> Total = 281.061
   const liq = liquidarReconexion(medidorCortado, facturas);
   assert.equal(liq.subtotalFacturas, 206550);
   assert.equal(liq.mora, 9000);
@@ -1169,7 +1170,7 @@ test('28. Regularización usa saldo_pendiente en pagos parciales, evita colision
   ]);
   assert.equal(liq.subtotalFacturas, 40000);
   assert.equal(liq.subtotalCargos, 10000);
-  // Base = 40.000 + 3.000 + 10.000 + 60.000 = 113.000 -> ERSSAN 2% = 2.260 -> Total = 115.260
+  // Base ERSSAN (todos los conceptos) = 40.000 + 3.000 + 10.000 + 60.000 = 113.000 -> ERSSAN 2% = 2.260 -> Total = 115.260
   assert.equal(liq.montoErssan, 2260);
   assert.equal(liq.totalPagar, 115260);
 
@@ -1182,6 +1183,7 @@ test('28. Regularización usa saldo_pendiente en pagos parciales, evita colision
     correlativoPorMedidor: 2,
   });
   assert.equal(reg.factura.total, 115260);
+  assert.equal(reg.detalles.find((d) => d.concepto === 'erssan')?.monto, 2260);
   assert.equal(
     reg.detalles.find((d) => d.concepto === 'deuda_anterior')?.monto,
     40000

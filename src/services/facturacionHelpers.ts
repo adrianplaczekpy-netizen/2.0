@@ -74,12 +74,71 @@ export function resolverPeriodoPorDefecto(
   return `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}`;
 }
 
+export const EMPRESA_LEGAL = {
+  nombre: 'SERVICIO DE AGUA POTABLE - POZO ARTESIANO SAN GABRIEL',
+  titular: 'de LEO PLACZEK e HIJA',
+  ubicacion: "Fracción San Gabriel • Mboi'y - Itauguá",
+  ruc: '3950638-0',
+  timbrado: '19148339',
+  inicioVigencia: '01/10/2026',
+  finVigencia: '31/10/2027',
+  prefijoFactura: '001-002-',
+} as const;
+
+/**
+ * Formatea un número secuencial al formato oficial SET de Paraguay: 001-002-0000001.
+ */
+export function formatearNumeroFacturaSET(secuencial: number): string {
+  const n = Math.max(1, Math.floor(Number(secuencial) || 1));
+  return `${EMPRESA_LEGAL.prefijoFactura}${String(n).padStart(7, '0')}`;
+}
+
+/**
+ * Extrae el contador numérico de un número de factura SET (ej: '001-002-0000042' -> 42).
+ */
+export function extraerSecuencialFacturaSET(numeroFactura?: string | null): number {
+  if (!numeroFactura) return 0;
+  const match = /^001-002-(\d+)$/.exec(numeroFactura.trim());
+  if (!match) return 0;
+  const parsed = parseInt(match[1], 10);
+  return isNaN(parsed) || parsed < 0 ? 0 : parsed;
+}
+
+/**
+ * Calcula el próximo número secuencial global único e incremental a partir de todas las facturas emitidas.
+ */
+export function calcularSiguienteSecuencialFactura(
+  facturasExistentes: Array<Pick<Factura, 'numero_factura'>>
+): number {
+  let maxSec = 0;
+  for (const f of facturasExistentes) {
+    const sec = extraerSecuencialFacturaSET(f.numero_factura);
+    if (sec > maxSec) maxSec = sec;
+  }
+  return maxSec + 1;
+}
+
+/**
+ * Resuelve el número oficial de factura para PDFs y vistas (siempre en formato 001-002-XXXXXXX).
+ */
+export function resolverNumeroFacturaParaMostrar(
+  factura: Pick<Factura, 'numero_factura' | 'numero_boleta_medidor'>
+): string {
+  if (factura.numero_factura && factura.numero_factura.trim()) {
+    return factura.numero_factura.trim();
+  }
+  return formatearNumeroFacturaSET(Number(factura.numero_boleta_medidor) || 1);
+}
+
 /**
  * Formatea el identificador legible de la factura para listados, fichas y exportación.
  */
 export function formatearNumeroFactura(
-  factura: Pick<Factura, 'id' | 'numero_boleta_medidor' | 'periodo_facturado'>
+  factura: Pick<Factura, 'id' | 'numero_boleta_medidor' | 'periodo_facturado' | 'numero_factura'>
 ): string {
+  if (factura.numero_factura && factura.numero_factura.trim()) {
+    return factura.numero_factura.trim();
+  }
   const corr = Number(factura.numero_boleta_medidor);
   if (!isNaN(corr) && corr > 0 && factura.periodo_facturado) {
     return `N° ${corr}-${factura.periodo_facturado}`;

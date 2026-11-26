@@ -62,6 +62,8 @@ export interface OpcionesReconexion {
   fechaReconexion?: string;
   operario?: string;
   observaciones?: string;
+  incluirReconexion?: boolean;
+  registradoPor?: string;
 }
 
 export interface Lectura {
@@ -157,6 +159,7 @@ export interface Factura {
   saldo?: number; // Alias en memoria para UI
   monto_pagado?: number; // Calculado en memoria: total - saldo_pendiente
   numero_boleta_medidor?: number; // Correlativo por medidor
+  numero_factura?: string | null; // Numeración oficial SET (ej: 001-002-0000001)
   detalles?: DetalleFactura[];
   // Campos desnormalizados para visualización rápida
   lectura_anterior?: number;

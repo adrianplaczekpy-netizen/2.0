@@ -4,8 +4,19 @@
  */
 
 import { jsPDF } from 'jspdf';
-import { Factura, Cliente, Medidor, DetalleFactura, Contrato, TarifaConfig } from '../types';
+import {
+  Factura,
+  Cliente,
+  Medidor,
+  DetalleFactura,
+  Contrato,
+  TarifaConfig,
+  Pago,
+  MetodoPago,
+} from '../types';
 import { formatGs } from './billingRules';
+import { EMPRESA_LEGAL, resolverNumeroFacturaParaMostrar } from './facturacionHelpers';
+import { LOGO_PNG_DATA_URL, LOGO_ASPECT_RATIO } from '../assets/logoData';
 
 /**
  * Genera el documento PDF de la Boleta Oficial de Aguatería (Server-Side y Client-Side)
@@ -22,7 +33,6 @@ import { formatGs } from './billingRules';
  *   2) Si alerta_consumo_elevado = true: "CONSUMO ELEVADO" + "Su consumo de este mes es superior al habitual. Puede deberse a una pérdida en su propiedad. Por favor verifique."
  *   3) Si ambos aplican, mostrar ambos bloques uno debajo del otro, ambos visibles.
  * - Pie: Datos de pago + "Gracias por su pago."
- * - Marca de agua "PAGADA" si la factura está pagada (en gris claro).
  * - NUNCA incluye observaciones internas del lector.
  */
 export function generarBoletaPDF(params: {
@@ -41,45 +51,50 @@ export function generarBoletaPDF(params: {
   const pageWidth = 210;
   const margin = 18;
   const contentWidth = pageWidth - margin * 2;
-  let y = 18;
+  let y = 13;
 
-  // Marca de agua si está pagada (en gris claro)
-  if (factura.estado === 'pagada') {
-    doc.setTextColor(225, 225, 225);
-    doc.setFont('helvetica', 'bold');
-    doc.setFontSize(55);
-    // Texto centrado en diagonal suave
-    doc.text('PAGADA', pageWidth / 2, 130, { align: 'center', angle: 30 });
-    doc.setTextColor(0, 0, 0);
-  }
+  // Encabezado institucional con Logo (src/assets/logo.png) + datos legales a la izquierda
+  const logoW = 44; // ~4.4 cm de ancho (proporción original 725x251 -> ~15.23 mm alto)
+  const logoH = Number((logoW / LOGO_ASPECT_RATIO).toFixed(2));
+  doc.addImage(LOGO_PNG_DATA_URL, 'PNG', margin, y, logoW, logoH);
 
-  // Encabezado institucional (texto sin logo grande)
+  const xDatosLegales = margin + logoW + 3.5;
+  doc.setTextColor(15, 23, 42);
   doc.setFont('helvetica', 'bold');
-  doc.setFontSize(13);
-  doc.setTextColor(0, 0, 0);
-  doc.text('AGUATERÍA POTABLE PARAGUAY S.A.', margin, y);
-
+  doc.setFontSize(8);
+  doc.text(`RUC: ${EMPRESA_LEGAL.ruc}`, xDatosLegales, y + 2.5);
   doc.setFont('helvetica', 'normal');
-  doc.setFontSize(8.5);
-  doc.text('RUC: 80045921-3 — Ente Regulador: ERSSAN (Ley N° 1614/2000)', margin, y + 4.5);
-  doc.text('San Lorenzo - Gran Asunción, Paraguay — Tel: (021) 580-000', margin, y + 8.5);
+  doc.setFontSize(7.5);
+  doc.text(`TIMBRADO N°: ${EMPRESA_LEGAL.timbrado}`, xDatosLegales, y + 6.3);
+  doc.text(`Inicio Vigencia: ${EMPRESA_LEGAL.inicioVigencia}`, xDatosLegales, y + 10.1);
+  doc.text(`Fin Vigencia: ${EMPRESA_LEGAL.finVigencia}`, xDatosLegales, y + 13.9);
 
-  // Recuadro derecho: Boleta N° [numero_boleta_medidor]-[periodo_facturado] y Fecha de Emisión
-  const numeroBoleta = factura.numero_boleta_medidor || 1;
-  const identificadorBoleta = `Boleta N° ${numeroBoleta}-${factura.periodo_facturado}`;
+  // Recuadro derecho: Número de Factura SET (001-002-XXXXXXX), Emisión, Período Facturado y Vencimiento
+  const numeroFacturaSET = resolverNumeroFacturaParaMostrar(factura);
+  const boxW = 74;
+  const boxH = 21.5;
+  const boxX = pageWidth - margin - boxW;
+  const boxY = y - 1;
 
-  doc.setDrawColor(0, 0, 0);
-  doc.setLineWidth(0.3);
-  doc.rect(pageWidth - margin - 65, y - 4, 65, 17);
+  doc.setDrawColor(30, 41, 59);
+  doc.setLineWidth(0.35);
+  doc.rect(boxX, boxY, boxW, boxH);
+
+  doc.setTextColor(15, 23, 42);
   doc.setFont('helvetica', 'bold');
   doc.setFontSize(9.5);
-  doc.text(identificadorBoleta, pageWidth - margin - 61, y + 2);
+  doc.text(`Factura N°: ${numeroFacturaSET}`, boxX + 3.5, boxY + 5);
+
   doc.setFont('helvetica', 'normal');
   doc.setFontSize(8);
-  doc.text(`Emisión: ${factura.fecha_emision}`, pageWidth - margin - 61, y + 6.5);
-  doc.text(`Período: ${factura.periodo_facturado}`, pageWidth - margin - 61, y + 10.5);
+  doc.text(`Emisión: ${factura.fecha_emision}`, boxX + 3.5, boxY + 9.8);
+  doc.text(`Período Facturado: ${factura.periodo_facturado}`, boxX + 3.5, boxY + 14.1);
+  doc.setFont('helvetica', 'bold');
+  doc.text(`Vencimiento: ${factura.fecha_vencimiento}`, boxX + 3.5, boxY + 18.4);
+  doc.setFont('helvetica', 'normal');
 
-  y += 20;
+  y = boxY + boxH + 3.5;
+  doc.setDrawColor(0, 0, 0);
   doc.setLineWidth(0.4);
   doc.line(margin, y, pageWidth - margin, y);
   y += 6;
@@ -266,7 +281,8 @@ export function generarBoletaPDF(params: {
   y += 5;
 
   // ERSSAN 2%
-  const montoErssan = detalleErssan ? detalleErssan.monto : Math.round(subtotal * 0.02);
+  const baseErssanFallback = subtotal;
+  const montoErssan = detalleErssan ? detalleErssan.monto : Math.round(baseErssanFallback * 0.02);
   if (montoErssan > 0) {
     doc.setFont('helvetica', 'normal');
     doc.text('Aporte ERSSAN (2%):', margin + 3, y);
@@ -338,19 +354,24 @@ export function generarContratoPDF(params: {
   const pageWidth = 210;
   const margin = 20;
   const contentWidth = pageWidth - margin * 2;
-  let y = 20;
+  let y = 14;
 
-  // Encabezado
-  doc.setFont('helvetica', 'bold');
-  doc.setFontSize(13);
+  // Encabezado con Logo + datos legales
+  const logoW = 42;
+  const logoH = Number((logoW / LOGO_ASPECT_RATIO).toFixed(2));
+  doc.addImage(LOGO_PNG_DATA_URL, 'PNG', margin, y, logoW, logoH);
+
+  const xLeg = margin + logoW + 4;
   doc.setTextColor(0, 0, 0);
-  doc.text('AGUATERÍA POTABLE PARAGUAY S.A.', margin, y);
-
-  doc.setFont('helvetica', 'normal');
+  doc.setFont('helvetica', 'bold');
   doc.setFontSize(8.5);
-  doc.text('RUC: 80045921-3 — Permisionario Regulado por ERSSAN (Ley N° 1614/2000)', margin, y + 4.5);
+  doc.text(`RUC: ${EMPRESA_LEGAL.ruc} — TIMBRADO N°: ${EMPRESA_LEGAL.timbrado}`, xLeg, y + 3.5);
+  doc.setFont('helvetica', 'normal');
+  doc.setFontSize(8);
+  doc.text(`Inicio Vigencia: ${EMPRESA_LEGAL.inicioVigencia} • Fin Vigencia: ${EMPRESA_LEGAL.finVigencia}`, xLeg, y + 7.8);
+  doc.text(`${EMPRESA_LEGAL.ubicacion} — Regulado por ERSSAN`, xLeg, y + 12.1);
 
-  y += 12;
+  y += logoH + 4;
   doc.setLineWidth(0.4);
   doc.line(margin, y, pageWidth - margin, y);
   y += 7;
@@ -381,7 +402,7 @@ export function generarContratoPDF(params: {
   doc.setFont('helvetica', 'normal');
   doc.setFontSize(8.5);
   const textoPrestador =
-    'PRESTADOR: AGUATERÍA POTABLE PARAGUAY S.A., con RUC 80045921-3, con domicilio legal en Calle 10 de Agosto N° 450, San Lorenzo, República del Paraguay.';
+    `PRESTADOR: ${EMPRESA_LEGAL.nombre} (${EMPRESA_LEGAL.titular}), con RUC ${EMPRESA_LEGAL.ruc}, ubicado en ${EMPRESA_LEGAL.ubicacion}, República del Paraguay.`;
   const linesPrestador = doc.splitTextToSize(textoPrestador, contentWidth);
   doc.text(linesPrestador, margin, y);
   y += linesPrestador.length * 4.2 + 2;
@@ -439,7 +460,7 @@ export function generarContratoPDF(params: {
   // FIRMAS
   doc.setFont('helvetica', 'normal');
   doc.setFontSize(8.5);
-  doc.text(`Lugar y Fecha: San Lorenzo, Paraguay — ${fechaEmision}`, margin, y);
+  doc.text(`Lugar y Fecha: Mboi'y, Itauguá, Paraguay — ${fechaEmision}`, margin, y);
   y += 24;
 
   // Líneas de firma
@@ -460,12 +481,372 @@ export function generarContratoPDF(params: {
   y += 4;
   doc.setFont('helvetica', 'normal');
   doc.setFontSize(7.5);
-  doc.text('AGUATERÍA POTABLE PARAGUAY S.A.', xFirma1 + anchoFirma / 2, y, { align: 'center' });
+  doc.text('POZO ARTESIANO SAN GABRIEL', xFirma1 + anchoFirma / 2, y, { align: 'center' });
   doc.text(cliente.nombre_completo, xFirma2 + anchoFirma / 2, y, { align: 'center' });
 
   y += 3.5;
-  doc.text('Firma y Sello Autorizado', xFirma1 + anchoFirma / 2, y, { align: 'center' });
+  doc.text(`RUC: ${EMPRESA_LEGAL.ruc} • Firma Autorizada`, xFirma1 + anchoFirma / 2, y, { align: 'center' });
   doc.text(`Doc: ${cliente.documento}`, xFirma2 + anchoFirma / 2, y, { align: 'center' });
+
+  return doc;
+}
+
+export interface ComprobantePagoPDFParams {
+  factura: Factura;
+  cliente: Cliente;
+  medidor: Medidor;
+  pago?: Partial<Pago> & { cobradorNombre?: string };
+  detalles?: DetalleFactura[];
+  numeroRecibo?: string;
+  fechaPago?: string;
+  horaPago?: string;
+  montoAbonado?: number;
+  metodoPago?: MetodoPago | string;
+  cobradorNombre?: string;
+  saldoRestante?: number;
+}
+
+/**
+ * Genera el Comprobante de Pago / Recibo de Caja en formato A5 vertical (148mm x 210mm).
+ * Diseñado para impresoras térmicas o de recibos:
+ * - Márgenes amplios (12mm), tipografía base legible (10pt-11pt) y TOTAL ABONADO destacado (15pt).
+ * - Sin marca de agua gigante superpuesta: usa un sello compacto en la esquina superior derecha.
+ */
+export function generarComprobantePagoPDF(params: ComprobantePagoPDFParams): jsPDF {
+  const { factura, cliente, medidor, pago } = params;
+  const doc = new jsPDF({
+    orientation: 'portrait',
+    unit: 'mm',
+    format: 'a5',
+  });
+
+  const pageWidth = 148;
+  const pageHeight = 210;
+  const margin = 12;
+  const contentWidth = pageWidth - margin * 2; // 124mm
+  const xRight = pageWidth - margin;
+
+  const rawFecha =
+    params.fechaPago ||
+    pago?.fecha_pago ||
+    factura.fecha_pago ||
+    new Date().toISOString().split('T')[0];
+  const fechaBase = rawFecha.includes('T')
+    ? rawFecha.split('T')[0]
+    : rawFecha.split(' ')[0];
+  const horaExtraida = rawFecha.includes('T')
+    ? rawFecha.split('T')[1]?.slice(0, 5)
+    : rawFecha.includes(' ')
+      ? rawFecha.split(' ')[1]?.slice(0, 5)
+      : '';
+  const horaTexto =
+    params.horaPago || horaExtraida || new Date().toTimeString().slice(0, 5);
+  const fechaHoraTexto = `${fechaBase} ${horaTexto}`.trim();
+
+  const montoAbonado =
+    params.montoAbonado !== undefined
+      ? params.montoAbonado
+      : pago?.monto !== undefined
+        ? pago.monto
+        : factura.monto_pagado && factura.monto_pagado > 0
+          ? factura.monto_pagado
+          : factura.total;
+
+  const saldoActual =
+    params.saldoRestante !== undefined
+      ? params.saldoRestante
+      : factura.saldo_pendiente !== undefined
+        ? factura.saldo_pendiente
+        : Math.max(0, factura.total - montoAbonado);
+
+  const metodoRaw = (params.metodoPago || pago?.metodo_pago || 'efectivo').toLowerCase();
+  const metodoLabels: Record<string, string> = {
+    efectivo: 'Efectivo',
+    transferencia: 'Transferencia Bancaria',
+    cheque: 'Cheque',
+  };
+  const metodoTexto = metodoLabels[metodoRaw] || metodoRaw.toUpperCase();
+
+  const cobradorTexto =
+    params.cobradorNombre ||
+    pago?.cobradorNombre ||
+    pago?.cobrador_id ||
+    'Caja Central';
+
+  const numeroFacturaSET = resolverNumeroFacturaParaMostrar(factura);
+  const periodoConsumoTexto = factura.periodo_consumo || factura.periodo_facturado;
+
+  let y = 10;
+
+  // 1) Logo centrado más grande en la parte superior (5.4 cm x 1.87 cm aprox., x = 47..101 mm)
+  const logoW = 54;
+  const logoH = Number((logoW / LOGO_ASPECT_RATIO).toFixed(2));
+  const logoX = Number(((pageWidth - logoW) / 2).toFixed(2));
+  doc.addImage(LOGO_PNG_DATA_URL, 'PNG', logoX, y, logoW, logoH);
+
+  // 2) Sello compacto verde "PAGADO" (sin fecha debajo) en esquina superior izquierda
+  const esPagoParcial = saldoActual > 0;
+  const badgeW = esPagoParcial ? 29 : 25;
+  const badgeH = 8.5;
+  const badgeX = margin;
+  const badgeY = y + Number(((logoH - badgeH) / 2).toFixed(2));
+
+  if (esPagoParcial) {
+    doc.setFillColor(254, 243, 199); // Ámbar suave
+    doc.setDrawColor(217, 119, 6);
+  } else {
+    doc.setFillColor(240, 253, 244); // Verde suave
+    doc.setDrawColor(22, 163, 74);
+  }
+  doc.setLineWidth(0.5);
+  doc.roundedRect(badgeX, badgeY, badgeW, badgeH, 2, 2, 'FD');
+
+  doc.setFont('helvetica', 'bold');
+  doc.setFontSize(9.5);
+  doc.setTextColor(esPagoParcial ? 180 : 21, esPagoParcial ? 83 : 128, esPagoParcial ? 9 : 61);
+  doc.text(esPagoParcial ? 'PAGO PARCIAL' : 'PAGADO', badgeX + badgeW / 2, badgeY + badgeH / 2 + 1.2, {
+    align: 'center',
+  });
+
+  // Datos legales alineados a la derecha
+  doc.setTextColor(15, 23, 42);
+  doc.setFont('helvetica', 'bold');
+  doc.setFontSize(7.4);
+  doc.text(`RUC: ${EMPRESA_LEGAL.ruc}`, xRight, y + 3.2, { align: 'right' });
+
+  doc.setFont('helvetica', 'normal');
+  doc.setFontSize(6.9);
+  doc.setTextColor(51, 65, 85);
+  doc.text(`TIMBRADO N°: ${EMPRESA_LEGAL.timbrado}`, xRight, y + 7.0, { align: 'right' });
+  doc.text(`Inicio Vigencia: ${EMPRESA_LEGAL.inicioVigencia}`, xRight, y + 10.8, { align: 'right' });
+  doc.text(`Fin Vigencia: ${EMPRESA_LEGAL.finVigencia}`, xRight, y + 14.6, { align: 'right' });
+
+  y += Math.max(logoH, badgeH + 2, 16) + 3.5;
+  doc.setDrawColor(148, 163, 184);
+  doc.setLineWidth(0.4);
+  doc.line(margin, y, xRight, y);
+  y += 6;
+
+  // 3) Título único bien destacado
+  doc.setTextColor(15, 23, 42);
+  doc.setFont('helvetica', 'bold');
+  doc.setFontSize(13);
+  doc.text('COMPROBANTE OFICIAL DE PAGO', pageWidth / 2, y, { align: 'center' });
+
+  y += 4.5;
+
+  // 4) Recuadro estructurado: solo Factura N° (y Fecha/hora) a la izquierda; solo Emisión y Vencimiento a la derecha
+  doc.setFillColor(248, 250, 252);
+  doc.setDrawColor(203, 213, 225);
+  doc.setLineWidth(0.35);
+  doc.roundedRect(margin, y, contentWidth, 14, 1.5, 1.5, 'FD');
+
+  doc.setTextColor(15, 23, 42);
+  doc.setFont('helvetica', 'bold');
+  doc.setFontSize(9.5);
+  doc.text(`Factura N°: ${numeroFacturaSET}`, margin + 3.5, y + 5.4);
+
+  doc.setFont('helvetica', 'normal');
+  doc.setFontSize(8.8);
+  doc.text(`Fecha y hora: ${fechaHoraTexto}`, margin + 3.5, y + 10.6);
+
+  doc.setFontSize(8.8);
+  doc.setTextColor(51, 65, 85);
+  doc.text(`Emisión: ${factura.fecha_emision}`, xRight - 3.5, y + 5.4, { align: 'right' });
+  doc.text(`Vencimiento: ${factura.fecha_vencimiento}`, xRight - 3.5, y + 10.6, { align: 'right' });
+
+  y += 19.5; // 14mm caja + 5.5mm separación
+
+  // 5) Datos del Cliente y Medidor
+  doc.setFont('helvetica', 'bold');
+  doc.setFontSize(10.5);
+  doc.setTextColor(15, 23, 42);
+  doc.text('DATOS DEL CLIENTE Y MEDIDOR', margin, y);
+  y += 5.5;
+
+  doc.setFontSize(10);
+  doc.setFont('helvetica', 'bold');
+  doc.text('Cliente:', margin, y);
+  doc.setFont('helvetica', 'normal');
+  const clienteLines = doc.splitTextToSize(cliente.nombre_completo, contentWidth - 22);
+  doc.text(clienteLines, margin + 22, y);
+  y += Math.max(5.5, clienteLines.length * 4.8 + 0.8);
+
+  doc.setFont('helvetica', 'bold');
+  doc.text('Documento:', margin, y);
+  doc.setFont('helvetica', 'normal');
+  doc.text(cliente.documento || '--', margin + 26, y);
+  y += 5.5;
+
+  doc.setFont('helvetica', 'bold');
+  doc.text(`Medidor N°: ${medidor.numero_medidor}`, margin, y);
+  doc.text(`Período de Consumo: ${periodoConsumoTexto}`, xRight, y, { align: 'right' });
+  y += 6;
+
+  doc.setDrawColor(203, 213, 225);
+  doc.setLineWidth(0.3);
+  doc.line(margin, y, xRight, y);
+  y += 6;
+
+  // 6) Detalle de conceptos en MAYÚSCULAS y líneas inferiores intercaladas estilo Excel
+  doc.setFont('helvetica', 'bold');
+  doc.setFontSize(10.5);
+  doc.setTextColor(15, 23, 42);
+  doc.text('DETALLE DE CONCEPTOS', margin, y);
+  y += 4;
+
+  // Cabecera de tabla
+  doc.setFillColor(241, 245, 249);
+  doc.setDrawColor(203, 213, 225);
+  doc.rect(margin, y, contentWidth, 7, 'FD');
+  doc.setFontSize(10);
+  doc.text('CONCEPTO', margin + 3, y + 4.9);
+  doc.text('MONTO', xRight - 3, y + 4.9, { align: 'right' });
+  y += 11;
+
+  const ordenConceptos: Record<string, number> = {
+    consumo_agua: 1,
+    deuda_anterior: 2,
+    mora: 3,
+    otros_trabajos: 4,
+    cuota_conexion: 5,
+    perdida_financiada: 6,
+    reconexion: 7,
+    erssan: 8,
+  };
+
+  const detallesFuente =
+    (params.detalles && params.detalles.length > 0
+      ? params.detalles
+      : factura.detalles && factura.detalles.length > 0
+        ? factura.detalles
+        : [
+            {
+              id: '1',
+              factura_id: factura.id,
+              concepto: 'consumo_agua' as const,
+              descripcion: `Consumo de agua potable (${factura.consumo_m3 ?? 0} m³)`,
+              monto: factura.total,
+            },
+          ]
+    )
+      .filter((d) => d.monto > 0)
+      .sort((a, b) => (ordenConceptos[a.concepto] || 99) - (ordenConceptos[b.concepto] || 99));
+
+  const conceptoMaxWidth = contentWidth - 34; // Reserva espacio para montos alineados a la derecha
+
+  for (let idx = 0; idx < detallesFuente.length; idx++) {
+    const item = detallesFuente[idx];
+    const conceptoMayuscula = (item.descripcion || '').toUpperCase();
+    const descLines = doc.splitTextToSize(conceptoMayuscula, conceptoMaxWidth);
+    const extraLinesHeight = Math.max(0, descLines.length - 1) * 4.8;
+    const borderY = y + extraLinesHeight + 2.0;
+    const rowAdvance = extraLinesHeight + 6.8;
+
+    if (y + rowAdvance > pageHeight - 52) {
+      doc.addPage('a5', 'portrait');
+      y = margin + 4;
+    }
+
+    doc.setFont('helvetica', 'normal');
+    doc.setFontSize(9.8);
+    doc.setTextColor(30, 41, 59);
+    doc.text(descLines, margin + 3, y);
+
+    doc.setFont('helvetica', 'bold');
+    doc.text(formatGs(item.monto), xRight - 3, y, { align: 'right' });
+
+    // Líneas inferiores intercaladas tipo Excel:
+    // 1° concepto (idx=0): sin línea, 2° (idx=1): con línea, 3° (idx=2): sin línea, 4° (idx=3): con línea...
+    if (idx % 2 === 1) {
+      doc.setDrawColor(148, 163, 184);
+      doc.setLineWidth(0.3);
+      doc.line(margin, borderY, xRight, borderY);
+    }
+
+    y += rowAdvance;
+  }
+
+  if (esPagoParcial) {
+    y += 1.5;
+    doc.setDrawColor(226, 232, 240);
+    doc.line(margin, y, xRight, y);
+    y += 5;
+    doc.setFontSize(10);
+    doc.setFont('helvetica', 'normal');
+    doc.setTextColor(71, 85, 105);
+    doc.text('Total factura:', margin + 3, y);
+    doc.text(formatGs(factura.total), xRight - 3, y, { align: 'right' });
+    y += 5.5;
+    doc.setFont('helvetica', 'bold');
+    doc.setTextColor(180, 83, 9);
+    doc.text('Saldo pendiente:', margin + 3, y);
+    doc.text(formatGs(saldoActual), xRight - 3, y, { align: 'right' });
+    y += 3;
+  }
+
+  y += 3;
+  if (y + 42 > pageHeight - margin) {
+    doc.addPage('a5', 'portrait');
+    y = margin + 4;
+  }
+
+  // Bloque destacado: TOTAL ABONADO (15pt)
+  doc.setFillColor(236, 253, 245);
+  doc.setDrawColor(22, 163, 74);
+  doc.setLineWidth(0.5);
+  doc.roundedRect(margin, y, contentWidth, 14, 1.5, 1.5, 'FD');
+
+  doc.setFont('helvetica', 'bold');
+  doc.setFontSize(11.5);
+  doc.setTextColor(20, 83, 45);
+  doc.text('TOTAL ABONADO:', margin + 4, y + 9);
+
+  doc.setFontSize(15);
+  doc.setTextColor(21, 128, 61);
+  doc.text(formatGs(montoAbonado), xRight - 4, y + 9.2, { align: 'right' });
+
+  y += 20; // 14mm bloque + 6mm separación
+
+  // Método de pago y Cobrador / Cajero
+  doc.setFontSize(10);
+  doc.setTextColor(15, 23, 42);
+  doc.setFont('helvetica', 'bold');
+  doc.text('Método de pago:', margin, y);
+  doc.setFont('helvetica', 'normal');
+  doc.text(metodoTexto, margin + 35, y);
+
+  y += 5.8;
+  doc.setFont('helvetica', 'bold');
+  doc.text('Cobrador / Cajero:', margin, y);
+  doc.setFont('helvetica', 'normal');
+  const cobradorLines = doc.splitTextToSize(cobradorTexto, contentWidth - 38);
+  doc.text(cobradorLines, margin + 38, y);
+  y += Math.max(7, cobradorLines.length * 4.8 + 3);
+
+  // Pie del comprobante
+  doc.setDrawColor(203, 213, 225);
+  doc.setLineWidth(0.3);
+  doc.line(margin, y, xRight, y);
+  y += 5.5;
+
+  doc.setFont('helvetica', 'bold');
+  doc.setFontSize(11);
+  doc.setTextColor(15, 23, 42);
+  doc.text('¡Gracias por su pago!', pageWidth / 2, y, { align: 'center' });
+
+  y += 5;
+  doc.setFont('helvetica', 'normal');
+  doc.setFontSize(9);
+  doc.setTextColor(71, 85, 105);
+  doc.text(`Pozo Artesiano San Gabriel (${EMPRESA_LEGAL.titular}) • RUC: ${EMPRESA_LEGAL.ruc}`, pageWidth / 2, y, {
+    align: 'center',
+  });
+
+  y += 4.5;
+  doc.text(`${EMPRESA_LEGAL.ubicacion} • Regulado por ERSSAN`, pageWidth / 2, y, {
+    align: 'center',
+  });
 
   return doc;
 }

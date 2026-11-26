@@ -11,6 +11,9 @@ import {
   ordenarYFiltrarDetalles,
   resolverPeriodoPorDefecto,
   formatearNumeroFactura,
+  formatearNumeroFacturaSET,
+  extraerSecuencialFacturaSET,
+  calcularSiguienteSecuencialFactura,
   generarNumeroReciboSugerido,
   agruparOmitidosPorMotivo,
   formatearAvisoDesconexion,
@@ -75,10 +78,29 @@ test('2. resolverPeriodoPorDefecto prioriza el último período con lecturas con
   assert.equal(sinConfirmadas, '2026-11');
 });
 
-test('3. formatearNumeroFactura y generarNumeroReciboSugerido producen formatos válidos y únicos', () => {
+test('3. formatearNumeroFactura, numeración SET 001-002-XXXXXXX y generarNumeroReciboSugerido producen formatos válidos y únicos', () => {
   assert.equal(
     formatearNumeroFactura({ id: 'uuid-1234', numero_boleta_medidor: 3, periodo_facturado: '2026-11' }),
     'N° 3-2026-11'
+  );
+  assert.equal(
+    formatearNumeroFactura({
+      id: 'uuid-1234',
+      numero_boleta_medidor: 3,
+      numero_factura: '001-002-0000015',
+      periodo_facturado: '2026-11',
+    }),
+    '001-002-0000015'
+  );
+  assert.equal(formatearNumeroFacturaSET(1), '001-002-0000001');
+  assert.equal(formatearNumeroFacturaSET(42), '001-002-0000042');
+  assert.equal(extraerSecuencialFacturaSET('001-002-0000042'), 42);
+  assert.equal(
+    calcularSiguienteSecuencialFactura([
+      { numero_factura: '001-002-0000001' },
+      { numero_factura: '001-002-0000007' },
+    ]),
+    8
   );
 
   const now = new Date('2026-11-15T09:05:03');

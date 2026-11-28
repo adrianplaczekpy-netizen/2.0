@@ -4,7 +4,7 @@
  */
 
 import { Factura, Lectura, Medidor, TarifaConfig, DetalleFactura, EstadoMedidor, CargoPendiente } from '../types';
-import { formatearNumeroFacturaSET } from './facturacionHelpers';
+import { EMPRESA_LEGAL, formatearNumeroFacturaSET } from './facturacionHelpers';
 
 export const TARIFAS_DEFAULT: TarifaConfig = {
   id: 'tarifa-v1-py',
@@ -20,6 +20,9 @@ export const TARIFAS_DEFAULT: TarifaConfig = {
   texto_alerta_consumo:
     'CONSUMO ELEVADO — Su consumo de este mes es superior al habitual. Puede deberse a una pérdida en su propiedad. Por favor verifique.',
   max_numero_medidor: 1000,
+  timbrado: EMPRESA_LEGAL.timbrado,
+  timbrado_inicio_vigencia: EMPRESA_LEGAL.inicioVigencia,
+  timbrado_fin_vigencia: EMPRESA_LEGAL.finVigencia,
   vigente_desde: '2025-01-01',
   creado_por: 'admin-sistema',
   fecha_creacion: '2025-01-01T00:00:00Z',

@@ -19,6 +19,7 @@ import { formatGs } from './billingRules';
 import {
   EMPRESA_LEGAL,
   calcularIva10Incluido,
+  resolverDatosTimbrado,
   resolverNumeroComprobantePago,
   resolverNumeroFacturaParaMostrar,
 } from './facturacionHelpers';
@@ -200,6 +201,7 @@ export function generarBoletaPDF(params: {
   cliente: Cliente;
   medidor: Medidor;
   detalles?: DetalleFactura[];
+  tarifa?: Partial<TarifaConfig> | null;
   tipoComprobante?: TipoComprobantePago;
   numeroRecibo?: string;
   esConceptoPersonalizado?: boolean;
@@ -207,6 +209,7 @@ export function generarBoletaPDF(params: {
   montoPersonalizado?: number;
 }): jsPDF {
   const { factura, cliente, medidor } = params;
+  const datosTimbrado = resolverDatosTimbrado(params.tarifa);
   const tipoComprobante: TipoComprobantePago =
     params.tipoComprobante === 'recibo_sin_valor_fiscal'
       ? 'recibo_sin_valor_fiscal'
@@ -240,9 +243,9 @@ export function generarBoletaPDF(params: {
     doc.text(`RUC: ${EMPRESA_LEGAL.ruc}`, xDatosLegales, y + 2.2);
     doc.setFont('helvetica', 'normal');
     doc.setFontSize(7.5);
-    doc.text(`TIMBRADO N°: ${EMPRESA_LEGAL.timbrado}`, xDatosLegales, y + 5.8);
-    doc.text(`Inicio Vigencia: ${EMPRESA_LEGAL.inicioVigencia}`, xDatosLegales, y + 9.4);
-    doc.text(`Fin Vigencia: ${EMPRESA_LEGAL.finVigencia}`, xDatosLegales, y + 13.0);
+    doc.text(`TIMBRADO N°: ${datosTimbrado.timbrado}`, xDatosLegales, y + 5.8);
+    doc.text(`Inicio Vigencia: ${datosTimbrado.inicioVigencia}`, xDatosLegales, y + 9.4);
+    doc.text(`Fin Vigencia: ${datosTimbrado.finVigencia}`, xDatosLegales, y + 13.0);
     dibujarWhatsAppYTelefono(doc, xDatosLegales, y + 17.5, { align: 'left', fontSize: 7.8 });
   } else {
     dibujarWhatsAppYTelefono(doc, margin + logoW + 4, y + 8.8, { align: 'left', fontSize: 8.5 });
@@ -400,18 +403,13 @@ export function generarBoletaPDF(params: {
 
   // DETALLE DE CONCEPTOS (solo los que tienen monto > 0)
   // - Concepto Personalizado: sin título arriba de la tabla
-  // - Factura Legal o Recibo de Consumo de Agua: muestra "PERÍODO DE CONSUMO: [mes] | EMISIÓN: [fecha]"
+  // - Factura Legal o Recibo de Consumo de Agua: muestra únicamente "PERÍODO DE CONSUMO: [mes]"
   const periodoConsumoBoleta = factura.periodo_consumo || factura.periodo_facturado;
-  if (esConceptoPersonalizado) {
-    // Concepto personalizado: sin título arriba de la tabla
-  } else {
-    const tituloBoleta = periodoConsumoBoleta
-      ? `PERÍODO DE CONSUMO: ${periodoConsumoBoleta} | EMISIÓN: ${factura.fecha_emision}`
-      : `EMISIÓN: ${factura.fecha_emision}`;
+  if (!esConceptoPersonalizado && periodoConsumoBoleta) {
     doc.setFont('helvetica', 'bold');
     doc.setFontSize(9);
     doc.setTextColor(0, 0, 0);
-    doc.text(tituloBoleta, margin, y);
+    doc.text(`PERÍODO DE CONSUMO: ${periodoConsumoBoleta}`, margin, y);
     y += 4;
   }
 
@@ -599,14 +597,15 @@ export function generarContratoPDF(params: {
   const logoH = Number((logoW / LOGO_ASPECT_RATIO).toFixed(2));
   doc.addImage(LOGO_PNG_DATA_URL, 'PNG', margin, y, logoW, logoH);
 
+  const datosTimbradoContrato = resolverDatosTimbrado(tarifa);
   const xLeg = margin + logoW + 4;
   doc.setTextColor(0, 0, 0);
   doc.setFont('helvetica', 'bold');
   doc.setFontSize(8.5);
-  doc.text(`RUC: ${EMPRESA_LEGAL.ruc} — TIMBRADO N°: ${EMPRESA_LEGAL.timbrado}`, xLeg, y + 3.5);
+  doc.text(`RUC: ${EMPRESA_LEGAL.ruc} — TIMBRADO N°: ${datosTimbradoContrato.timbrado}`, xLeg, y + 3.5);
   doc.setFont('helvetica', 'normal');
   doc.setFontSize(8);
-  doc.text(`Inicio Vigencia: ${EMPRESA_LEGAL.inicioVigencia} • Fin Vigencia: ${EMPRESA_LEGAL.finVigencia}`, xLeg, y + 7.8);
+  doc.text(`Inicio Vigencia: ${datosTimbradoContrato.inicioVigencia} • Fin Vigencia: ${datosTimbradoContrato.finVigencia}`, xLeg, y + 7.8);
   doc.text(`${EMPRESA_LEGAL.ubicacion} — Regulado por ERSSAN`, xLeg, y + 12.1);
 
   y += logoH + 4;
@@ -745,6 +744,7 @@ export interface ComprobantePagoPDFParams {
   tipoComprobante?: TipoComprobantePago;
   esConceptoPersonalizado?: boolean;
   conceptoPersonalizado?: string;
+  tarifa?: Partial<TarifaConfig> | null;
 }
 
 /**
@@ -757,6 +757,7 @@ export interface ComprobantePagoPDFParams {
  */
 export function generarComprobantePagoPDF(params: ComprobantePagoPDFParams): jsPDF {
   const { factura, cliente, medidor, pago } = params;
+  const datosTimbrado = resolverDatosTimbrado(params.tarifa);
   const doc = new jsPDF({
     orientation: 'portrait',
     unit: 'mm',
@@ -891,9 +892,9 @@ export function generarComprobantePagoPDF(params: ComprobantePagoPDFParams): jsP
     doc.setFont('helvetica', 'normal');
     doc.setFontSize(6.8);
     doc.setTextColor(51, 65, 85);
-    doc.text(`TIMBRADO N°: ${EMPRESA_LEGAL.timbrado}`, xRight, y + 6.2, { align: 'right' });
-    doc.text(`Inicio Vigencia: ${EMPRESA_LEGAL.inicioVigencia}`, xRight, y + 9.8, { align: 'right' });
-    doc.text(`Fin Vigencia: ${EMPRESA_LEGAL.finVigencia}`, xRight, y + 13.4, { align: 'right' });
+    doc.text(`TIMBRADO N°: ${datosTimbrado.timbrado}`, xRight, y + 6.2, { align: 'right' });
+    doc.text(`Inicio Vigencia: ${datosTimbrado.inicioVigencia}`, xRight, y + 9.8, { align: 'right' });
+    doc.text(`Fin Vigencia: ${datosTimbrado.finVigencia}`, xRight, y + 13.4, { align: 'right' });
     dibujarWhatsAppYTelefono(doc, xRight, y + 17.8, { align: 'right', fontSize: 7.4 });
   } else {
     dibujarWhatsAppYTelefono(doc, xRight, y + 9.4, { align: 'right', fontSize: 8.1 });
@@ -995,17 +996,14 @@ export function generarComprobantePagoPDF(params: ComprobantePagoPDFParams): jsP
 
   // 6) Título de tabla de conceptos:
   //    - Concepto Personalizado (esConceptoPersonalizado): sin título arriba de la tabla
-  //    - Factura Legal o Recibo de Consumo de Agua (else): "PERÍODO DE CONSUMO: [mes] | EMISIÓN: [fecha]"
+  //    - Factura Legal o Recibo de Consumo de Agua (else): únicamente "PERÍODO DE CONSUMO: [mes]" (sin "| EMISIÓN: [fecha]")
   if (esConceptoPersonalizado) {
     // Concepto Personalizado: sin título arriba de la tabla, mostrar la tabla directamente
-  } else {
-    const tituloConceptos = periodoConsumoTexto
-      ? `PERÍODO DE CONSUMO: ${periodoConsumoTexto} | EMISIÓN: ${fechaEmisionMostrar}`
-      : `EMISIÓN: ${fechaEmisionMostrar}`;
+  } else if (periodoConsumoTexto) {
     doc.setFont('helvetica', 'bold');
     doc.setFontSize(9.5);
     doc.setTextColor(15, 23, 42);
-    doc.text(tituloConceptos, margin, y);
+    doc.text(`PERÍODO DE CONSUMO: ${periodoConsumoTexto}`, margin, y);
     y += 4;
   }
 

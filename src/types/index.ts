@@ -115,6 +115,9 @@ export interface TarifaConfig {
   umbral_alerta_consumo: number; // Ej: 3x sobre el promedio
   texto_alerta_consumo: string;
   max_numero_medidor: number; // Ej: 1000
+  timbrado?: string; // Ej: '19148339'
+  timbrado_inicio_vigencia?: string; // Ej: '01/10/2026' (DD/MM/AAAA)
+  timbrado_fin_vigencia?: string; // Ej: '31/10/2027' (DD/MM/AAAA)
   vigente_desde: string; // YYYY-MM-DD
   creado_por: string;
   creado_por_nombre?: string;

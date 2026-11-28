@@ -1152,4 +1152,89 @@ test('23. Zonas del sector: solo existen las 6 zonas oficiales en config, Medido
   }
 });
 
+test('24. Tarifas: editar timbrado, inicio vigencia y fin vigencia persiste en historial (con columnas o fallback schema-cache) y valida rango/formato', async () => {
+  db.clearData();
+  const mockLegacy = createStatefulSupabaseMock();
+  await db.loadFromSupabase({ clientOverride: mockLegacy.client, force: true });
+
+  const hoy = new Date().toISOString().split('T')[0];
+
+  // Validaciones estrictas
+  await assert.rejects(
+    () =>
+      db.actualizarTarifasAsync(
+        { timbrado: 'ABC' },
+        ADMIN_ID,
+        'Timbrado inválido',
+        hoy,
+        { clientOverride: mockLegacy.client }
+      ),
+    /número de timbrado debe contener solo dígitos/i
+  );
+
+  await assert.rejects(
+    () =>
+      db.actualizarTarifasAsync(
+        { timbrado_inicio_vigencia: '32/13/2026' },
+        ADMIN_ID,
+        'Fecha inválida',
+        hoy,
+        { clientOverride: mockLegacy.client }
+      ),
+    /inicio de vigencia del timbrado debe tener formato DD\/MM\/AAAA/i
+  );
+
+  await assert.rejects(
+    () =>
+      db.actualizarTarifasAsync(
+        {
+          timbrado_inicio_vigencia: '01/11/2027',
+          timbrado_fin_vigencia: '31/10/2027',
+        },
+        ADMIN_ID,
+        'Rango invertido',
+        hoy,
+        { clientOverride: mockLegacy.client }
+      ),
+    /fin de vigencia del timbrado no puede ser anterior al inicio/i
+  );
+
+  // Guardado exitoso contra mock legacy (sin columnas timbrado en schema aún) -> fallback + auditoría
+  const actualizadaLegacy = await db.actualizarTarifasAsync(
+    {
+      timbrado: '20458912',
+      timbrado_inicio_vigencia: '2026-11-01', // acepta YYYY-MM-DD y normaliza a DD/MM/AAAA
+      timbrado_fin_vigencia: '30/11/2027',
+    },
+    ADMIN_ID,
+    'Renovación anual de timbrado SET',
+    hoy,
+    { clientOverride: mockLegacy.client }
+  );
+
+  assert.equal(actualizadaLegacy.timbrado, '20458912');
+  assert.equal(actualizadaLegacy.timbrado_inicio_vigencia, '01/11/2026');
+  assert.equal(actualizadaLegacy.timbrado_fin_vigencia, '30/11/2027');
+  assert.equal(actualizadaLegacy.cambiosAuditados.length, 3);
+
+  // Recarga completa desde Supabase legacy reconstruye los 3 valores vía cambios_auditados
+  db.clearData();
+  await db.loadFromSupabase({ clientOverride: mockLegacy.client, force: true });
+  const trasRecarga = db.getTarifasVigentes();
+  assert.equal(trasRecarga.timbrado, '20458912');
+  assert.equal(trasRecarga.timbrado_inicio_vigencia, '01/11/2026');
+  assert.equal(trasRecarga.timbrado_fin_vigencia, '30/11/2027');
+
+  // También verifica que TarifasView y schema.sql expongan los 3 campos editables
+  const tarifasSrc = fs.readFileSync(path.join(process.cwd(), 'src/components/TarifasView.tsx'), 'utf8');
+  const schemaSrc = fs.readFileSync(path.join(process.cwd(), 'supabase/schema.sql'), 'utf8');
+  assert.match(tarifasSrc, /Número de Timbrado/);
+  assert.match(tarifasSrc, /Inicio de Vigencia/);
+  assert.match(tarifasSrc, /Fin de Vigencia/);
+  assert.match(schemaSrc, /ADD COLUMN IF NOT EXISTS timbrado /);
+  assert.match(schemaSrc, /ADD COLUMN IF NOT EXISTS timbrado_inicio_vigencia /);
+  assert.match(schemaSrc, /ADD COLUMN IF NOT EXISTS timbrado_fin_vigencia /);
+});
+
+
 

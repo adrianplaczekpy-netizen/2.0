@@ -33,6 +33,7 @@ import {
   esBufferPdfValido,
   generarBoletaPDF,
   generarComprobantePagoPDF,
+  generarContratoPDF,
   limpiarDescripcionConceptoPDF,
   pdfDocToValidBlob,
   sanitizarNombreArchivoPdf,
@@ -3106,8 +3107,8 @@ test('35. generarComprobantePagoPDF genera recibo A5 vertical (148x210mm), sin m
   assert.ok(pdfText.includes('2026-11-30'), 'Debe incluir fecha de vencimiento');
   assert.ok(!pdfText.includes('Per\\355odo de Consumo:') && !pdfText.includes('Período de Consumo:'), 'Debe quitar Período de Consumo del lado derecho del Medidor');
   assert.ok(!pdfText.includes('DETALLE DE CONCEPTOS'), 'Debe reemplazar DETALLE DE CONCEPTOS por período de consumo');
-  assert.ok(pdfText.includes('DE CONSUMO: 2026-10 | EMISI'), 'Título de tabla debe incluir PERÍODO DE CONSUMO y EMISIÓN');
-  assert.ok(pdfText.includes('2026-11-01'), 'Título de tabla debe incluir fecha de emisión');
+  assert.ok(pdfText.includes('DE CONSUMO: 2026-10'), 'Título de tabla debe incluir PERÍODO DE CONSUMO');
+  assert.ok(!pdfText.includes('| EMISI'), 'Título arriba de la tabla no debe mostrar | EMISIÓN');
   assert.ok(pdfText.includes('DEUDA ANTERIOR'), 'Concepto DEUDA ANTERIOR debe estar en MAYÚSCULAS');
   assert.ok(pdfText.includes('RECARGO POR MORA'), 'Concepto RECARGO POR MORA debe estar en MAYÚSCULAS');
   assert.ok(pdfText.includes('APORTE LEY ERSSAN'), 'Concepto ERSSAN debe estar en MAYÚSCULAS');
@@ -3565,7 +3566,7 @@ test('38. PDF Factura Legal vs Recibo sin Valor Fiscal vs Concepto Personalizado
   assert.ok(!rawFactura.includes('(25 m') && !rawFactura.includes('(2%)'), 'Debe eliminar paréntesis de los conceptos');
   assert.ok(rawFactura.includes('CONSUMO DE AGUA'), 'Concepto sin paréntesis');
   assert.ok(!rawFactura.includes('DETALLE DE CONCEPTOS'), 'Debe reemplazar DETALLE DE CONCEPTOS');
-  assert.ok(rawFactura.includes('DE CONSUMO: 2026-10 | EMISI'), 'Factura Legal debe mostrar PERÍODO DE CONSUMO: 2026-10 | EMISIÓN: 2026-11-01');
+  assert.ok(rawFactura.includes('DE CONSUMO: 2026-10') && !rawFactura.includes('| EMISI'), 'Factura Legal debe mostrar únicamente PERÍODO DE CONSUMO: 2026-10 sin | EMISIÓN');
   assert.ok((rawFactura.includes('Emisión: 2026-11-01') || rawFactura.includes('Emisi\\363n: 2026-11-01')) && rawFactura.includes('Vencimiento: 2026-11-30'), 'Factura Legal mantiene Emisión y Vencimiento en el recuadro superior derecho');
   assert.ok(!rawFactura.includes('Per\\355odo de Consumo:'), 'Debe quitar Período de Consumo de la línea del medidor');
   assert.ok(rawFactura.includes('IVA 10%'), 'Factura Legal debe mostrar concepto IVA 10%');
@@ -3599,8 +3600,8 @@ test('38. PDF Factura Legal vs Recibo sin Valor Fiscal vs Concepto Personalizado
     'Recibo de consumo de agua debe mostrar Emisión y Vencimiento en el recuadro superior derecho'
   );
   assert.ok(
-    textRecibo.includes('DE CONSUMO: 2026-10 | EMISI') && textRecibo.includes('2026-11-01'),
-    'Recibo de consumo de agua debe mostrar PERÍODO DE CONSUMO: 2026-10 | EMISIÓN: 2026-11-01 arriba de la tabla'
+    textRecibo.includes('DE CONSUMO: 2026-10') && !textRecibo.includes('| EMISI'),
+    'Recibo de consumo de agua debe mostrar únicamente PERÍODO DE CONSUMO: 2026-10 sin | EMISIÓN arriba de la tabla'
   );
   assert.ok(!textRecibo.includes('001-002-0000021'), 'Recibo no debe mostrar número de 7 dígitos');
   assert.ok(!textRecibo.includes('3950638-0'), 'Recibo NO debe mostrar RUC');
@@ -3641,7 +3642,7 @@ test('38. PDF Factura Legal vs Recibo sin Valor Fiscal vs Concepto Personalizado
   assert.ok(!textPers.includes('CONSUMO DE AGUA'), 'Concepto personalizado debe ocultar conceptos estándar');
   assert.equal(contarLineasTablaFullWidth(rawPers), 5, 'Con 1 concepto NO debe dibujar líneas separadoras en la tabla (solo 5 líneas base)');
 
-  // D) generarBoletaPDF Factura Legal y Recibo de Consumo muestran PERÍODO DE CONSUMO | EMISIÓN arriba de la tabla
+  // D) generarBoletaPDF Factura Legal y Recibo de Consumo muestran únicamente PERÍODO DE CONSUMO sin | EMISIÓN arriba de la tabla
   const docBoletaFactura = generarBoletaPDF({
     factura: fac,
     cliente: cli,
@@ -3649,7 +3650,7 @@ test('38. PDF Factura Legal vs Recibo sin Valor Fiscal vs Concepto Personalizado
     tipoComprobante: 'factura_legal',
   });
   const textBoletaFactura = docBoletaFactura.output().split(/\r?\n/).filter((l) => l.includes('Tj')).join('\n');
-  assert.ok(textBoletaFactura.includes('DE CONSUMO: 2026-10 | EMISI') && textBoletaFactura.includes('2026-11-01'));
+  assert.ok(textBoletaFactura.includes('DE CONSUMO: 2026-10') && !textBoletaFactura.includes('| EMISI'));
 
   const docBoletaRecibo = generarBoletaPDF({
     factura: fac,
@@ -3668,8 +3669,8 @@ test('38. PDF Factura Legal vs Recibo sin Valor Fiscal vs Concepto Personalizado
   assert.ok(textBoletaRecibo.includes('San Gabriel Mboi y'));
   assert.ok(!textBoletaRecibo.includes('DETALLE DE CONCEPTOS'));
   assert.ok(
-    textBoletaRecibo.includes('DE CONSUMO: 2026-10 | EMISI') && textBoletaRecibo.includes('2026-11-01'),
-    'Recibo de consumo de agua en generarBoletaPDF debe mostrar PERÍODO DE CONSUMO | EMISIÓN'
+    textBoletaRecibo.includes('DE CONSUMO: 2026-10') && !textBoletaRecibo.includes('| EMISI'),
+    'Recibo de consumo de agua en generarBoletaPDF debe mostrar únicamente PERÍODO DE CONSUMO sin | EMISIÓN'
   );
   assert.ok(textBoletaRecibo.includes('(CONSUMO DE AGUA) Tj'));
   assert.ok(textBoletaRecibo.includes('(APORTE ERSSAN:) Tj'));
@@ -3855,7 +3856,7 @@ test('41. Codificación binaria PDF (%PDF- / %%EOF), sanitización de nombre y r
 
   // 4) obtenerBlobBoleta prioriza generación binaria local y nunca descarga HTML como .pdf
   const blobLocal = await obtenerBlobBoleta(fac.id, {
-    localLookup: () => ({ factura: fac, cliente: cli, medidor: med, detalles: [] }),
+    localLookup: () => ({ factura: fac, cliente: cli, medidor: med, detalles: [], tarifa: TARIFAS_DEFAULT }),
     fetchImpl: async () =>
       new Response('<!doctype html><html></html>', {
         status: 200,
@@ -3901,3 +3902,110 @@ test('41. Codificación binaria PDF (%PDF- / %%EOF), sanitización de nombre y r
   assert.equal(blobFromRemoteValid.type, 'application/pdf');
   assert.equal(esBufferPdfValido(await blobFromRemoteValid.arrayBuffer()), true);
 });
+
+test('44. PDFs de Factura Legal (boleta, comprobante y contrato) reflejan timbrado, inicioVigencia y finVigencia configurados en tarifas mientras Recibo sin valor fiscal los omite', () => {
+  const cli = {
+    id: 'cli-timb-1',
+    nombre_completo: 'María Fernanda Giménez',
+    documento: '3456789',
+    direccion: 'Fracción San Gabriel Mzna 4',
+    telefono: '0981999888',
+    email: 'maria@example.com',
+    fecha_alta: '2026-01-01',
+  };
+  const med: Medidor = {
+    ...medidorBase,
+    id: 'med-timb-1',
+    cliente_id: cli.id,
+    numero_medidor: 77,
+    direccion: 'Fracción San Gabriel Mzna 4',
+  };
+  const fac: Factura = {
+    id: 'fac-timb-1',
+    medidor_id: med.id,
+    cliente_id: cli.id,
+    periodo_consumo: '2026-11',
+    periodo_facturado: '2026-12',
+    fecha_emision: '2026-12-01',
+    fecha_vencimiento: '2026-12-31',
+    estado: 'pendiente',
+    total: 40000,
+    saldo_pendiente: 40000,
+    saldo: 40000,
+    es_tercera_boleta: false,
+    alerta_consumo_elevado: false,
+    numero_boleta_medidor: 12,
+    numero_factura: '001-002-0000120',
+    consumo_m3: 10,
+  };
+  const tarifaCustom: TarifaConfig = {
+    ...TARIFAS_DEFAULT,
+    timbrado: '20998877',
+    timbrado_inicio_vigencia: '15/11/2026',
+    timbrado_fin_vigencia: '15/11/2027',
+  };
+
+  // 1) Boleta Factura Legal A4 usa los nuevos datos
+  const boletaPdf = generarBoletaPDF({
+    factura: fac,
+    cliente: cli,
+    medidor: med,
+    tarifa: tarifaCustom,
+    tipoComprobante: 'factura_legal',
+  });
+  const boletaRaw = Buffer.from(boletaPdf.output('arraybuffer')).toString('latin1');
+  assert.ok(boletaRaw.includes('20998877'), 'Boleta legal debe imprimir el timbrado configurado');
+  assert.ok(boletaRaw.includes('15/11/2026'), 'Boleta legal debe imprimir el inicio de vigencia configurado');
+  assert.ok(boletaRaw.includes('15/11/2027'), 'Boleta legal debe imprimir el fin de vigencia configurado');
+
+  // 2) Comprobante Factura Legal A5 usa los nuevos datos
+  const compLegalPdf = generarComprobantePagoPDF({
+    factura: fac,
+    cliente: cli,
+    medidor: med,
+    tarifa: tarifaCustom,
+    tipoComprobante: 'factura_legal',
+    montoAbonado: 40000,
+    saldoRestante: 0,
+  });
+  const compLegalRaw = Buffer.from(compLegalPdf.output('arraybuffer')).toString('latin1');
+  assert.ok(compLegalRaw.includes('20998877'));
+  assert.ok(compLegalRaw.includes('15/11/2026'));
+  assert.ok(compLegalRaw.includes('15/11/2027'));
+
+  // 3) Recibo sin valor fiscal sigue omitiendo timbrado y vigencias
+  const reciboPdf = generarComprobantePagoPDF({
+    factura: fac,
+    cliente: cli,
+    medidor: med,
+    tarifa: tarifaCustom,
+    tipoComprobante: 'recibo_sin_valor_fiscal',
+    numeroRecibo: '001-002-0045',
+    montoAbonado: 40000,
+    saldoRestante: 0,
+  });
+  const reciboRaw = Buffer.from(reciboPdf.output('arraybuffer')).toString('latin1');
+  assert.ok(!reciboRaw.includes('20998877'));
+  assert.ok(!reciboRaw.includes('15/11/2026'));
+  assert.ok(!reciboRaw.includes('15/11/2027'));
+
+  // 4) Contrato PDF usa el timbrado y vigencias configurados
+  const contratoPdf = generarContratoPDF({
+    cliente: cli,
+    contrato: {
+      id: 'con-timb-1',
+      cliente_id: cli.id,
+      fecha_inicio: '2026-11-28',
+      fecha_fin: null,
+      condiciones: 'Servicio regular',
+      estado: 'vigente',
+    },
+    medidores: [med],
+    tarifa: tarifaCustom,
+  });
+  const contratoRaw = Buffer.from(contratoPdf.output('arraybuffer')).toString('latin1');
+  assert.ok(contratoRaw.includes('20998877'));
+  assert.ok(contratoRaw.includes('15/11/2026'));
+  assert.ok(contratoRaw.includes('15/11/2027'));
+});
+

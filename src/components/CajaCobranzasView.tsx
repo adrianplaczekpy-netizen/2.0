@@ -246,6 +246,7 @@ export const CajaCobranzasView: React.FC = () => {
         medidor: medidorActual.medidor,
         pago: ultimoPago,
         detalles: factura.detalles,
+        tarifa: db.getTarifasVigentes(),
         cobradorNombre:
           user?.nombre || user?.email || ultimoPago?.cobrador_id || 'Caja Central',
         saldoRestante: 0,
@@ -263,6 +264,7 @@ export const CajaCobranzasView: React.FC = () => {
       cliente: medidorActual.cliente,
       medidor: medidorActual.medidor,
       detalles: factura.detalles,
+      tarifa: db.getTarifasVigentes(),
     });
     descargarPdfDocumento(
       doc,
@@ -292,6 +294,7 @@ export const CajaCobranzasView: React.FC = () => {
       cliente,
       medidor,
       detalles: facBundle?.detalles || factura?.detalles,
+      tarifa: db.getTarifasVigentes(),
       numeroRecibo: comprobantePago.recibo,
       fechaPago: comprobantePago.fechaPago,
       montoAbonado: comprobantePago.monto,
@@ -898,6 +901,7 @@ export const CajaCobranzasView: React.FC = () => {
                         medidor: medidorActual.medidor,
                         pago: p,
                         detalles: p.esPersonalizado ? undefined : p.factura?.detalles,
+                        tarifa: db.getTarifasVigentes(),
                         numeroRecibo: p.numero_recibo,
                         fechaPago: p.fecha_pago,
                         montoAbonado: p.monto,

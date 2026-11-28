@@ -47,6 +47,18 @@ serve(async (req) => {
       });
     }
 
+    const { data: tarifaVigente } = await supabase
+      .from("tarifas")
+      .select("timbrado, timbrado_inicio_vigencia, timbrado_fin_vigencia")
+      .order("vigente_desde", { ascending: false })
+      .order("fecha_creacion", { ascending: false })
+      .limit(1)
+      .maybeSingle();
+
+    const timbradoActual = String(tarifaVigente?.timbrado || "").trim() || "19148339";
+    const inicioVigActual = String(tarifaVigente?.timbrado_inicio_vigencia || "").trim() || "01/10/2026";
+    const finVigActual = String(tarifaVigente?.timbrado_fin_vigencia || "").trim() || "31/10/2027";
+
     const doc = new jsPDF({ orientation: "portrait", unit: "mm", format: "a4" });
     const pageWidth = 210;
     const margin = 20;
@@ -60,10 +72,10 @@ serve(async (req) => {
     const xLeg = margin + logoW + 4;
     doc.setFont("helvetica", "bold");
     doc.setFontSize(8.5);
-    doc.text("RUC: 3950638-0 — TIMBRADO N°: 19148339", xLeg, y + 3.5);
+    doc.text(`RUC: 3950638-0 — TIMBRADO N°: ${timbradoActual}`, xLeg, y + 3.5);
     doc.setFont("helvetica", "normal");
     doc.setFontSize(8);
-    doc.text("Inicio Vigencia: 01/10/2026 • Fin Vigencia: 31/10/2027", xLeg, y + 7.8);
+    doc.text(`Inicio Vigencia: ${inicioVigActual} • Fin Vigencia: ${finVigActual}`, xLeg, y + 7.8);
     doc.text("Fracción San Gabriel • Mboi'y - Itauguá — Regulado por ERSSAN", xLeg, y + 12.1);
 
     y += logoH + 4;

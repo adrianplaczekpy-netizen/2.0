@@ -252,6 +252,9 @@ CREATE TABLE IF NOT EXISTS public.tarifas (
     umbral_alerta_consumo NUMERIC(4, 2) NOT NULL DEFAULT 3.00, -- 3x sobre promedio últimos 3 meses
     texto_alerta_consumo TEXT NOT NULL DEFAULT 'CONSUMO ELEVADO — Su consumo de este mes es superior al habitual. Puede deberse a una pérdida en su propiedad. Por favor verifique.',
     max_numero_medidor INTEGER NOT NULL DEFAULT 1000,
+    timbrado VARCHAR(30) NOT NULL DEFAULT '19148339',
+    timbrado_inicio_vigencia VARCHAR(20) NOT NULL DEFAULT '01/10/2026',
+    timbrado_fin_vigencia VARCHAR(20) NOT NULL DEFAULT '31/10/2027',
     vigente_desde DATE NOT NULL DEFAULT CURRENT_DATE,
     creado_por UUID REFERENCES public.usuarios(id),
     fecha_creacion TIMESTAMPTZ DEFAULT TIMEZONE('utc', NOW()),
@@ -262,6 +265,9 @@ CREATE TABLE IF NOT EXISTS public.tarifas (
 ALTER TABLE public.tarifas ALTER COLUMN dia_vencimiento_boletas_normales TYPE VARCHAR(20) USING dia_vencimiento_boletas_normales::text;
 ALTER TABLE public.tarifas ADD COLUMN IF NOT EXISTS motivo_cambio TEXT;
 ALTER TABLE public.tarifas ADD COLUMN IF NOT EXISTS cambios_auditados JSONB DEFAULT '[]'::jsonb;
+ALTER TABLE public.tarifas ADD COLUMN IF NOT EXISTS timbrado VARCHAR(30) NOT NULL DEFAULT '19148339';
+ALTER TABLE public.tarifas ADD COLUMN IF NOT EXISTS timbrado_inicio_vigencia VARCHAR(20) NOT NULL DEFAULT '01/10/2026';
+ALTER TABLE public.tarifas ADD COLUMN IF NOT EXISTS timbrado_fin_vigencia VARCHAR(20) NOT NULL DEFAULT '31/10/2027';
 
 -- Migración idempotente de columnas de auditoría/autoría a UUID si provienen de bases con TEXT
 DO $$

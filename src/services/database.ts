@@ -63,6 +63,8 @@ import {
   generarSiguienteNumeroFacturaLegal7Digitos,
   generarSiguienteNumeroRecibo4Digitos,
   resolverNumeroFacturaParaMostrar,
+  normalizarFechaTimbradoDDMMYYYY,
+  fechaTimbradoASortKey,
 } from './facturacionHelpers';
 import { generarFotoPlaceholder } from '../utils/imageCompressor';
 import {
@@ -606,47 +608,103 @@ class DatabaseEngine {
         }
       }
 
-      const tarifas: TarifaConfig[] =
+      const tarifasPreviasById = new Map<string, TarifaConfig>(
+        (this.data.tarifas || []).map((tf) => [tf.id, tf])
+      );
+      const tarifasRowsOrdenadasAsc =
         tarifasRes.data && tarifasRes.data.length > 0
-          ? tarifasRes.data.map((t: any) => {
-              const creadorResuelto = this.resolverNombreUsuario(t.creado_por);
-              return {
-                id: t.id,
-                precio_m3: Number(t.precio_m3),
-                consumo_minimo_m3: Number(t.consumo_minimo_m3),
-                monto_minimo_consumo: Number(t.monto_minimo_consumo),
-                monto_mora_fijo: Number(t.monto_mora_fijo),
-                monto_reconexion: Number(t.monto_reconexion),
-                erssan_porcentaje: Number(t.erssan_porcentaje),
-                dia_vencimiento_boletas_normales:
-                  t.dia_vencimiento_boletas_normales === 'ultimo_dia_mes' ||
-                  t.dia_vencimiento_boletas_normales === '0' ||
-                  t.dia_vencimiento_boletas_normales === 0
-                    ? 'ultimo_dia_mes'
-                    : Number(t.dia_vencimiento_boletas_normales),
-                dia_vencimiento_tercera_boleta: Number(t.dia_vencimiento_tercera_boleta),
-                umbral_alerta_consumo: Number(t.umbral_alerta_consumo),
-                texto_alerta_consumo: t.texto_alerta_consumo,
-                max_numero_medidor: Number(t.max_numero_medidor),
-                vigente_desde: t.vigente_desde,
-                creado_por: t.creado_por || 'admin',
-                creado_por_nombre: creadorResuelto,
-                fecha_creacion: t.fecha_creacion || t.vigente_desde,
-                motivo_cambio: t.motivo_cambio,
-                cambios_auditados: Array.isArray(t.cambios_auditados) ? t.cambios_auditados : [],
-                auditoria: t.cambios_auditados
-                  ? {
-                      id: t.id,
-                      tarifa_id: t.id,
-                      usuario: creadorResuelto,
-                      fecha: t.fecha_creacion || t.vigente_desde,
-                      cambios: t.cambios_auditados,
-                      motivo: t.motivo_cambio,
-                    }
-                  : undefined,
-              };
+          ? [...tarifasRes.data].sort((a: any, b: any) => {
+              const cmpV = String(a.vigente_desde || '').localeCompare(String(b.vigente_desde || ''));
+              if (cmpV !== 0) return cmpV;
+              return String(a.fecha_creacion || a.vigente_desde || '').localeCompare(
+                String(b.fecha_creacion || b.vigente_desde || '')
+              );
             })
           : [];
+
+      let timbradoCorriente = String(TARIFAS_DEFAULT.timbrado || '19148339');
+      let inicioVigCorriente = String(TARIFAS_DEFAULT.timbrado_inicio_vigencia || '01/10/2026');
+      let finVigCorriente = String(TARIFAS_DEFAULT.timbrado_fin_vigencia || '31/10/2027');
+
+      const tarifas: TarifaConfig[] = tarifasRowsOrdenadasAsc.map((t: any) => {
+        const creadorResuelto = this.resolverNombreUsuario(t.creado_por);
+        const cambiosAuditados = Array.isArray(t.cambios_auditados) ? t.cambios_auditados : [];
+        const cambioTimbrado = cambiosAuditados.find((c: any) => c?.parametro === 'timbrado');
+        const cambioInicio = cambiosAuditados.find((c: any) => c?.parametro === 'timbrado_inicio_vigencia');
+        const cambioFin = cambiosAuditados.find((c: any) => c?.parametro === 'timbrado_fin_vigencia');
+        const previaLocal = tarifasPreviasById.get(t.id);
+
+        if (t.timbrado && String(t.timbrado).trim()) {
+          timbradoCorriente = String(t.timbrado).trim();
+        } else if (cambioTimbrado?.valor_nuevo) {
+          timbradoCorriente = String(cambioTimbrado.valor_nuevo).trim();
+        } else if (previaLocal?.timbrado) {
+          timbradoCorriente = String(previaLocal.timbrado).trim();
+        }
+
+        if (t.timbrado_inicio_vigencia && String(t.timbrado_inicio_vigencia).trim()) {
+          inicioVigCorriente =
+            normalizarFechaTimbradoDDMMYYYY(t.timbrado_inicio_vigencia) ||
+            String(t.timbrado_inicio_vigencia).trim();
+        } else if (cambioInicio?.valor_nuevo) {
+          inicioVigCorriente =
+            normalizarFechaTimbradoDDMMYYYY(String(cambioInicio.valor_nuevo)) ||
+            String(cambioInicio.valor_nuevo).trim();
+        } else if (previaLocal?.timbrado_inicio_vigencia) {
+          inicioVigCorriente = String(previaLocal.timbrado_inicio_vigencia).trim();
+        }
+
+        if (t.timbrado_fin_vigencia && String(t.timbrado_fin_vigencia).trim()) {
+          finVigCorriente =
+            normalizarFechaTimbradoDDMMYYYY(t.timbrado_fin_vigencia) ||
+            String(t.timbrado_fin_vigencia).trim();
+        } else if (cambioFin?.valor_nuevo) {
+          finVigCorriente =
+            normalizarFechaTimbradoDDMMYYYY(String(cambioFin.valor_nuevo)) ||
+            String(cambioFin.valor_nuevo).trim();
+        } else if (previaLocal?.timbrado_fin_vigencia) {
+          finVigCorriente = String(previaLocal.timbrado_fin_vigencia).trim();
+        }
+
+        return {
+          id: t.id,
+          precio_m3: Number(t.precio_m3),
+          consumo_minimo_m3: Number(t.consumo_minimo_m3),
+          monto_minimo_consumo: Number(t.monto_minimo_consumo),
+          monto_mora_fijo: Number(t.monto_mora_fijo),
+          monto_reconexion: Number(t.monto_reconexion),
+          erssan_porcentaje: Number(t.erssan_porcentaje),
+          dia_vencimiento_boletas_normales:
+            t.dia_vencimiento_boletas_normales === 'ultimo_dia_mes' ||
+            t.dia_vencimiento_boletas_normales === '0' ||
+            t.dia_vencimiento_boletas_normales === 0
+              ? 'ultimo_dia_mes'
+              : Number(t.dia_vencimiento_boletas_normales),
+          dia_vencimiento_tercera_boleta: Number(t.dia_vencimiento_tercera_boleta),
+          umbral_alerta_consumo: Number(t.umbral_alerta_consumo),
+          texto_alerta_consumo: t.texto_alerta_consumo,
+          max_numero_medidor: Number(t.max_numero_medidor),
+          timbrado: timbradoCorriente,
+          timbrado_inicio_vigencia: inicioVigCorriente,
+          timbrado_fin_vigencia: finVigCorriente,
+          vigente_desde: t.vigente_desde,
+          creado_por: t.creado_por || 'admin',
+          creado_por_nombre: creadorResuelto,
+          fecha_creacion: t.fecha_creacion || t.vigente_desde,
+          motivo_cambio: t.motivo_cambio,
+          cambios_auditados: cambiosAuditados,
+          auditoria: t.cambios_auditados
+            ? {
+                id: t.id,
+                tarifa_id: t.id,
+                usuario: creadorResuelto,
+                fecha: t.fecha_creacion || t.vigente_desde,
+                cambios: t.cambios_auditados,
+                motivo: t.motivo_cambio,
+              }
+            : undefined,
+        };
+      });
 
       const planes_financiamiento: PlanFinanciamiento[] = (planesRes?.data || []).map((p: any) => ({
         id: p.id,
@@ -1110,7 +1168,7 @@ class DatabaseEngine {
         }
       }
 
-      const { error } = await sb.from('tarifas').insert({
+      const { error } = await this.insertTarifaConFallbackSchema(sb, {
         id: nuevoId,
         precio_m3: tarifaInicial.precio_m3,
         consumo_minimo_m3: tarifaInicial.consumo_minimo_m3,
@@ -1123,6 +1181,11 @@ class DatabaseEngine {
         umbral_alerta_consumo: tarifaInicial.umbral_alerta_consumo,
         texto_alerta_consumo: tarifaInicial.texto_alerta_consumo,
         max_numero_medidor: tarifaInicial.max_numero_medidor,
+        timbrado: tarifaInicial.timbrado || TARIFAS_DEFAULT.timbrado,
+        timbrado_inicio_vigencia:
+          tarifaInicial.timbrado_inicio_vigencia || TARIFAS_DEFAULT.timbrado_inicio_vigencia,
+        timbrado_fin_vigencia:
+          tarifaInicial.timbrado_fin_vigencia || TARIFAS_DEFAULT.timbrado_fin_vigencia,
         vigente_desde: tarifaInicial.vigente_desde,
         creado_por: creadoPorUuid,
         motivo_cambio: tarifaInicial.motivo_cambio,
@@ -1260,6 +1323,42 @@ class DatabaseEngine {
       }
     }
 
+    let timbradoNormalizado: string | undefined;
+    if (nuevas.timbrado !== undefined) {
+      timbradoNormalizado = String(nuevas.timbrado).trim();
+      if (!/^\d{4,15}$/.test(timbradoNormalizado)) {
+        throw new Error('El número de timbrado debe contener solo dígitos (entre 4 y 15 dígitos, ej: 19148339)');
+      }
+    }
+
+    let inicioVigNormalizado: string | undefined;
+    if (nuevas.timbrado_inicio_vigencia !== undefined) {
+      const norm = normalizarFechaTimbradoDDMMYYYY(nuevas.timbrado_inicio_vigencia);
+      if (!norm) {
+        throw new Error('El inicio de vigencia del timbrado debe tener formato DD/MM/AAAA válido (ej: 01/10/2026)');
+      }
+      inicioVigNormalizado = norm;
+    }
+
+    let finVigNormalizado: string | undefined;
+    if (nuevas.timbrado_fin_vigencia !== undefined) {
+      const norm = normalizarFechaTimbradoDDMMYYYY(nuevas.timbrado_fin_vigencia);
+      if (!norm) {
+        throw new Error('El fin de vigencia del timbrado debe tener formato DD/MM/AAAA válido (ej: 31/10/2027)');
+      }
+      finVigNormalizado = norm;
+    }
+
+    const inicioEfectivo =
+      inicioVigNormalizado ?? actual.timbrado_inicio_vigencia ?? TARIFAS_DEFAULT.timbrado_inicio_vigencia;
+    const finEfectivo =
+      finVigNormalizado ?? actual.timbrado_fin_vigencia ?? TARIFAS_DEFAULT.timbrado_fin_vigencia;
+    const keyInicio = fechaTimbradoASortKey(inicioEfectivo);
+    const keyFin = fechaTimbradoASortKey(finEfectivo);
+    if (keyInicio && keyFin && keyFin < keyInicio) {
+      throw new Error('El fin de vigencia del timbrado no puede ser anterior al inicio de vigencia');
+    }
+
     const cambios: AuditoriaCambioParametro[] = [];
     const keysToCheck: (keyof TarifaConfig)[] = [
       'precio_m3',
@@ -1273,6 +1372,9 @@ class DatabaseEngine {
       'umbral_alerta_consumo',
       'texto_alerta_consumo',
       'max_numero_medidor',
+      'timbrado',
+      'timbrado_inicio_vigencia',
+      'timbrado_fin_vigencia',
     ];
 
     const labels: Record<string, string> = {
@@ -1287,6 +1389,9 @@ class DatabaseEngine {
       umbral_alerta_consumo: 'Umbral Alerta Consumo (x Veces)',
       texto_alerta_consumo: 'Texto de Alerta en Boleta',
       max_numero_medidor: 'Capacidad Máxima de Medidores',
+      timbrado: 'Número de Timbrado (Factura Legal)',
+      timbrado_inicio_vigencia: 'Inicio Vigencia Timbrado',
+      timbrado_fin_vigencia: 'Fin Vigencia Timbrado',
     };
 
     const nuevasNormalizadas: Partial<TarifaConfig> = {
@@ -1294,14 +1399,18 @@ class DatabaseEngine {
       ...(nuevas.texto_alerta_consumo !== undefined
         ? { texto_alerta_consumo: nuevas.texto_alerta_consumo.trim() }
         : {}),
+      ...(timbradoNormalizado !== undefined ? { timbrado: timbradoNormalizado } : {}),
+      ...(inicioVigNormalizado !== undefined ? { timbrado_inicio_vigencia: inicioVigNormalizado } : {}),
+      ...(finVigNormalizado !== undefined ? { timbrado_fin_vigencia: finVigNormalizado } : {}),
     };
 
     for (const key of keysToCheck) {
-      if (nuevasNormalizadas[key] !== undefined && String(nuevasNormalizadas[key]) !== String(actual[key])) {
+      const valorActual = actual[key] ?? TARIFAS_DEFAULT[key];
+      if (nuevasNormalizadas[key] !== undefined && String(nuevasNormalizadas[key]) !== String(valorActual)) {
         cambios.push({
           parametro: key,
           etiqueta: labels[key] || key,
-          valor_anterior: actual[key] as any,
+          valor_anterior: valorActual as any,
           valor_nuevo: nuevasNormalizadas[key] as any,
         });
       }
@@ -1372,7 +1481,7 @@ class DatabaseEngine {
       const sb = supabase;
       sb.auth.getSession().then(async ({ data: { session } }) => {
         const creadoPorUuid = this.esUuidValido(creadoPor) ? creadoPor : session?.user?.id || null;
-        const { error } = await sb.from('tarifas').insert({
+        const { error } = await this.insertTarifaConFallbackSchema(sb, {
           id: actualizada.id,
           precio_m3: actualizada.precio_m3,
           consumo_minimo_m3: actualizada.consumo_minimo_m3,
@@ -1385,6 +1494,11 @@ class DatabaseEngine {
           umbral_alerta_consumo: actualizada.umbral_alerta_consumo,
           texto_alerta_consumo: actualizada.texto_alerta_consumo,
           max_numero_medidor: actualizada.max_numero_medidor,
+          timbrado: actualizada.timbrado || TARIFAS_DEFAULT.timbrado,
+          timbrado_inicio_vigencia:
+            actualizada.timbrado_inicio_vigencia || TARIFAS_DEFAULT.timbrado_inicio_vigencia,
+          timbrado_fin_vigencia:
+            actualizada.timbrado_fin_vigencia || TARIFAS_DEFAULT.timbrado_fin_vigencia,
           vigente_desde: actualizada.vigente_desde,
           creado_por: creadoPorUuid,
           motivo_cambio: motivo,
@@ -1401,6 +1515,40 @@ class DatabaseEngine {
 
     this.notify();
     return Object.assign(actualizada, { cambiosAuditados: cambios });
+  }
+
+  private async insertTarifaConFallbackSchema(
+    sb: any,
+    payloadInicial: Record<string, any>
+  ): Promise<{ error: any }> {
+    const payload = { ...payloadInicial };
+    const columnasOpcionalesTimbrado = new Set([
+      'timbrado',
+      'timbrado_inicio_vigencia',
+      'timbrado_fin_vigencia',
+    ]);
+
+    for (let intento = 0; intento < 4; intento++) {
+      const { error } = await sb.from('tarifas').insert({ ...payload });
+      if (!error) return { error: null };
+
+      const msg = String(error?.message || '');
+      const pgrstMatch = msg.match(/Could not find the '([a-zA-Z0-9_]+)' column/i);
+      const pgMatch = msg.match(/column "([a-zA-Z0-9_]+)" of relation/i);
+      const pgDotMatch = msg.match(/column (?:tarifas\.)?([a-zA-Z0-9_]+) does not exist/i);
+      const col = pgrstMatch?.[1] || pgMatch?.[1] || pgDotMatch?.[1] || null;
+
+      if (col && columnasOpcionalesTimbrado.has(col) && col in payload) {
+        console.warn(
+          `[DatabaseEngine] Columna opcional "${col}" aún no existe en public.tarifas; reintentando inserción sin "${col}".`
+        );
+        delete payload[col];
+        continue;
+      }
+      return { error };
+    }
+
+    return { error: null };
   }
 
   /**
@@ -1440,7 +1588,7 @@ class DatabaseEngine {
           this.usuariosMap.set(creadoPorUuid, nombreCreador);
         }
 
-        const { error } = await sb.from('tarifas').insert({
+        const { error } = await this.insertTarifaConFallbackSchema(sb, {
           id: actualizada.id,
           precio_m3: actualizada.precio_m3,
           consumo_minimo_m3: actualizada.consumo_minimo_m3,
@@ -1453,6 +1601,11 @@ class DatabaseEngine {
           umbral_alerta_consumo: actualizada.umbral_alerta_consumo,
           texto_alerta_consumo: actualizada.texto_alerta_consumo,
           max_numero_medidor: actualizada.max_numero_medidor,
+          timbrado: actualizada.timbrado || TARIFAS_DEFAULT.timbrado,
+          timbrado_inicio_vigencia:
+            actualizada.timbrado_inicio_vigencia || TARIFAS_DEFAULT.timbrado_inicio_vigencia,
+          timbrado_fin_vigencia:
+            actualizada.timbrado_fin_vigencia || TARIFAS_DEFAULT.timbrado_fin_vigencia,
           vigente_desde: actualizada.vigente_desde,
           creado_por: creadoPorUuid,
           motivo_cambio: motivo,
@@ -7288,6 +7441,7 @@ class DatabaseEngine {
     cliente: Cliente;
     medidor: Medidor;
     detalles: DetalleFactura[];
+    tarifa: TarifaConfig;
   } | null {
     let factura = this.data.facturas.find((f) => f.id === id);
     if (!factura) {
@@ -7318,6 +7472,7 @@ class DatabaseEngine {
       cliente,
       medidor,
       detalles: factura.detalles || [],
+      tarifa: this.getTarifasVigentes(),
     };
   }
 

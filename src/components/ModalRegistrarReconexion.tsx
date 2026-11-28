@@ -184,6 +184,7 @@ export const ModalRegistrarReconexion: React.FC<Props> = ({
       medidor: resultadoReconexion.medidor,
       pago: resultadoReconexion.pago,
       detalles: resultadoReconexion.facturaRegularizacion.detalles,
+      tarifa: db.getTarifasVigentes(),
       cobradorNombre: user?.nombre || operario || 'Caja Central',
       saldoRestante: 0,
     });
@@ -201,6 +202,7 @@ export const ModalRegistrarReconexion: React.FC<Props> = ({
       medidor: resultadoReconexion.medidor,
       pago: resultadoReconexion.pago,
       detalles: resultadoReconexion.facturaRegularizacion.detalles,
+      tarifa: db.getTarifasVigentes(),
       cobradorNombre: user?.nombre || operario || 'Caja Central',
       saldoRestante: 0,
     });

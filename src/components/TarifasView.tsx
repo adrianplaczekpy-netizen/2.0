@@ -9,6 +9,11 @@ import { isSupabaseConfigured, supabase } from '../services/supabaseClient';
 import { TarifaConfig } from '../types';
 import { useAuth } from '../context/AuthContext';
 import {
+  EMPRESA_LEGAL,
+  fechaTimbradoASortKey,
+  normalizarFechaTimbradoDDMMYYYY,
+} from '../services/facturacionHelpers';
+import {
   construirMensajeResumenErroresTarifa,
   seleccionarPrimerCampoConError,
 } from '../utils/tarifaValidationHelper';
@@ -49,6 +54,15 @@ export const TarifasView: React.FC = () => {
   const [umbralAlerta, setUmbralAlerta] = useState<string>(String(tarifasVigentes.umbral_alerta_consumo));
   const [textoAlerta, setTextoAlerta] = useState<string>(tarifasVigentes.texto_alerta_consumo);
   const [maxNumeroMedidor, setMaxNumeroMedidor] = useState<string>(String(tarifasVigentes.max_numero_medidor));
+  const [timbrado, setTimbrado] = useState<string>(
+    String(tarifasVigentes.timbrado || EMPRESA_LEGAL.timbrado)
+  );
+  const [timbradoInicioVigencia, setTimbradoInicioVigencia] = useState<string>(
+    String(tarifasVigentes.timbrado_inicio_vigencia || EMPRESA_LEGAL.inicioVigencia)
+  );
+  const [timbradoFinVigencia, setTimbradoFinVigencia] = useState<string>(
+    String(tarifasVigentes.timbrado_fin_vigencia || EMPRESA_LEGAL.finVigencia)
+  );
 
   // Metadatos de la nueva versión
   const [vigenteDesde, setVigenteDesde] = useState<string>(new Date().toISOString().split('T')[0]);
@@ -91,6 +105,9 @@ export const TarifasView: React.FC = () => {
     setUmbralAlerta(String(tarifa.umbral_alerta_consumo));
     setTextoAlerta(tarifa.texto_alerta_consumo);
     setMaxNumeroMedidor(String(tarifa.max_numero_medidor));
+    setTimbrado(String(tarifa.timbrado || EMPRESA_LEGAL.timbrado));
+    setTimbradoInicioVigencia(String(tarifa.timbrado_inicio_vigencia || EMPRESA_LEGAL.inicioVigencia));
+    setTimbradoFinVigencia(String(tarifa.timbrado_fin_vigencia || EMPRESA_LEGAL.finVigencia));
     setHistorial(db.getHistorialTarifas());
     setTieneTarifasGuardadas(db.hasTarifasIniciales());
   };
@@ -246,6 +263,28 @@ export const TarifasView: React.FC = () => {
       errs.max_numero_medidor = 'La capacidad debe ser mayor o igual a 1.';
     }
 
+    // 12. Datos fiscales Factura Legal (Timbrado SET)
+    const timbradoTrim = timbrado.trim();
+    if (!/^\d{4,15}$/.test(timbradoTrim)) {
+      errs.timbrado = 'Debe ingresar un número de timbrado numérico válido (4 a 15 dígitos, ej: 19148339).';
+    }
+
+    const inicioNorm = normalizarFechaTimbradoDDMMYYYY(timbradoInicioVigencia);
+    if (!inicioNorm) {
+      errs.timbrado_inicio_vigencia = 'Ingrese una fecha válida en formato DD/MM/AAAA (ej: 01/10/2026).';
+    }
+
+    const finNorm = normalizarFechaTimbradoDDMMYYYY(timbradoFinVigencia);
+    if (!finNorm) {
+      errs.timbrado_fin_vigencia = 'Ingrese una fecha válida en formato DD/MM/AAAA (ej: 31/10/2027).';
+    } else if (inicioNorm) {
+      const kIni = fechaTimbradoASortKey(inicioNorm);
+      const kFin = fechaTimbradoASortKey(finNorm);
+      if (kIni && kFin && kFin < kIni) {
+        errs.timbrado_fin_vigencia = 'El fin de vigencia no puede ser anterior al inicio de vigencia.';
+      }
+    }
+
     // Fecha de vigencia
     if (!vigenteDesde || !/^\d{4}-\d{2}-\d{2}$/.test(vigenteDesde)) {
       errs.vigente_desde = 'Debe especificar una fecha válida (YYYY-MM-DD).';
@@ -273,6 +312,11 @@ export const TarifasView: React.FC = () => {
       umbral_alerta_consumo: Number(umbralAlerta),
       texto_alerta_consumo: textoAlerta.trim(),
       max_numero_medidor: Math.round(Number(maxNumeroMedidor)),
+      timbrado: timbrado.trim(),
+      timbrado_inicio_vigencia:
+        normalizarFechaTimbradoDDMMYYYY(timbradoInicioVigencia) || timbradoInicioVigencia.trim(),
+      timbrado_fin_vigencia:
+        normalizarFechaTimbradoDDMMYYYY(timbradoFinVigencia) || timbradoFinVigencia.trim(),
     };
   };
 
@@ -310,8 +354,13 @@ export const TarifasView: React.FC = () => {
     }
 
     const payload = construirPayloadTarifa();
+    const fallbacksComparacion: Partial<Record<keyof typeof payload, string>> = {
+      timbrado: EMPRESA_LEGAL.timbrado,
+      timbrado_inicio_vigencia: EMPRESA_LEGAL.inicioVigencia,
+      timbrado_fin_vigencia: EMPRESA_LEGAL.finVigencia,
+    };
     const hayCambios = (Object.keys(payload) as Array<keyof typeof payload>).some(
-      (k) => String(payload[k]) !== String(tarifasVigentes[k])
+      (k) => String(payload[k]) !== String(tarifasVigentes[k] ?? fallbacksComparacion[k] ?? '')
     );
     if (!hayCambios) {
       const msgSinCambios = 'No se detectaron cambios en los parámetros respecto a la versión actual.';
@@ -811,6 +860,102 @@ export const TarifasView: React.FC = () => {
               Por defecto: &quot;CONSUMO ELEVADO — Su consumo de este mes es superior al habitual. Puede deberse a una pérdida en su propiedad. Por favor verifique.&quot;
             </p>
           )}
+        </div>
+
+        {/* 12. Datos Fiscales de Factura Legal (Timbrado SET) */}
+        <div className="pt-4 border-t border-stone-100 space-y-4">
+          <div>
+            <h3 className="text-xs font-bold uppercase tracking-wider text-stone-500">
+              Datos fiscales de Factura Legal (Timbrado SET)
+            </h3>
+            <p className="text-[11px] text-stone-500 mt-0.5">
+              Estos datos aparecen en el encabezado de las Facturas Legales (boletas, recibos oficiales y contratos). No se muestran en los Recibos sin valor fiscal.
+            </p>
+          </div>
+
+          <div className="grid grid-cols-1 md:grid-cols-3 gap-5">
+            {/* Número de Timbrado */}
+            <div>
+              <label htmlFor="tarifa-timbrado" className="block text-xs font-bold text-stone-800 mb-1">
+                Número de Timbrado
+              </label>
+              <p className="text-[11px] text-stone-500 mb-1.5">
+                Código numérico vigente habilitado por la SET/DNIT.
+              </p>
+              <input
+                id="tarifa-timbrado"
+                ref={setFieldRef('timbrado')}
+                type="text"
+                inputMode="numeric"
+                maxLength={15}
+                value={timbrado}
+                onChange={(e) => setTimbrado(e.target.value)}
+                placeholder="19148339"
+                className={`w-full px-3 py-2 text-xs border rounded-md font-mono ${
+                  errores.timbrado ? 'border-red-500 bg-red-50' : 'border-stone-300'
+                }`}
+              />
+              {errores.timbrado ? (
+                <p role="alert" className="text-[11px] text-red-600 mt-1 font-semibold">{errores.timbrado}</p>
+              ) : (
+                <p className="text-[10px] text-stone-400 mt-0.5">Por defecto: {EMPRESA_LEGAL.timbrado}</p>
+              )}
+            </div>
+
+            {/* Inicio de Vigencia */}
+            <div>
+              <label htmlFor="tarifa-timbrado-inicio" className="block text-xs font-bold text-stone-800 mb-1">
+                Inicio de Vigencia (DD/MM/AAAA)
+              </label>
+              <p className="text-[11px] text-stone-500 mb-1.5">
+                Fecha de inicio impresa en la Factura Legal.
+              </p>
+              <input
+                id="tarifa-timbrado-inicio"
+                ref={setFieldRef('timbrado_inicio_vigencia')}
+                type="text"
+                maxLength={10}
+                value={timbradoInicioVigencia}
+                onChange={(e) => setTimbradoInicioVigencia(e.target.value)}
+                placeholder="01/10/2026"
+                className={`w-full px-3 py-2 text-xs border rounded-md font-mono ${
+                  errores.timbrado_inicio_vigencia ? 'border-red-500 bg-red-50' : 'border-stone-300'
+                }`}
+              />
+              {errores.timbrado_inicio_vigencia ? (
+                <p role="alert" className="text-[11px] text-red-600 mt-1 font-semibold">{errores.timbrado_inicio_vigencia}</p>
+              ) : (
+                <p className="text-[10px] text-stone-400 mt-0.5">Por defecto: {EMPRESA_LEGAL.inicioVigencia}</p>
+              )}
+            </div>
+
+            {/* Fin de Vigencia */}
+            <div>
+              <label htmlFor="tarifa-timbrado-fin" className="block text-xs font-bold text-stone-800 mb-1">
+                Fin de Vigencia (DD/MM/AAAA)
+              </label>
+              <p className="text-[11px] text-stone-500 mb-1.5">
+                Fecha de vencimiento del timbrado en Factura Legal.
+              </p>
+              <input
+                id="tarifa-timbrado-fin"
+                ref={setFieldRef('timbrado_fin_vigencia')}
+                type="text"
+                maxLength={10}
+                value={timbradoFinVigencia}
+                onChange={(e) => setTimbradoFinVigencia(e.target.value)}
+                placeholder="31/10/2027"
+                className={`w-full px-3 py-2 text-xs border rounded-md font-mono ${
+                  errores.timbrado_fin_vigencia ? 'border-red-500 bg-red-50' : 'border-stone-300'
+                }`}
+              />
+              {errores.timbrado_fin_vigencia ? (
+                <p role="alert" className="text-[11px] text-red-600 mt-1 font-semibold">{errores.timbrado_fin_vigencia}</p>
+              ) : (
+                <p className="text-[10px] text-stone-400 mt-0.5">Por defecto: {EMPRESA_LEGAL.finVigencia}</p>
+              )}
+            </div>
+          </div>
         </div>
 
         {/* Datos de la nueva versión: Fecha de vigencia y Motivo */}

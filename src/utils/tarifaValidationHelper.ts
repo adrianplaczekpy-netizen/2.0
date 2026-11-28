@@ -15,6 +15,9 @@ export const TARIFA_FIELD_ORDER = [
   'umbral_alerta_consumo',
   'max_numero_medidor',
   'texto_alerta_consumo',
+  'timbrado',
+  'timbrado_inicio_vigencia',
+  'timbrado_fin_vigencia',
   'vigente_desde',
 ] as const;
 

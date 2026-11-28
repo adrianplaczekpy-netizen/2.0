@@ -87,6 +87,90 @@ export const EMPRESA_LEGAL = {
 } as const;
 
 /**
+ * Normaliza una fecha de vigencia del timbrado al formato DD/MM/AAAA.
+ * Acepta tanto DD/MM/YYYY como YYYY-MM-DD y verifica que sea una fecha calendario real.
+ * Retorna null si la fecha es inválida.
+ */
+export function normalizarFechaTimbradoDDMMYYYY(valor?: string | null): string | null {
+  const raw = String(valor || '').trim();
+  if (!raw) return null;
+
+  let dia: number;
+  let mes: number;
+  let anio: number;
+
+  const matchDMY = /^(\d{2})\/(\d{2})\/(\d{4})$/.exec(raw);
+  const matchYMD = /^(\d{4})-(\d{2})-(\d{2})$/.exec(raw);
+
+  if (matchDMY) {
+    dia = Number(matchDMY[1]);
+    mes = Number(matchDMY[2]);
+    anio = Number(matchDMY[3]);
+  } else if (matchYMD) {
+    anio = Number(matchYMD[1]);
+    mes = Number(matchYMD[2]);
+    dia = Number(matchYMD[3]);
+  } else {
+    return null;
+  }
+
+  if (anio < 1900 || anio > 2199 || mes < 1 || mes > 12 || dia < 1 || dia > 31) {
+    return null;
+  }
+
+  const dt = new Date(Date.UTC(anio, mes - 1, dia));
+  if (
+    dt.getUTCFullYear() !== anio ||
+    dt.getUTCMonth() !== mes - 1 ||
+    dt.getUTCDate() !== dia
+  ) {
+    return null;
+  }
+
+  return `${String(dia).padStart(2, '0')}/${String(mes).padStart(2, '0')}/${String(anio)}`;
+}
+
+/**
+ * Convierte DD/MM/AAAA a YYYYMMDD numérico para comparar rangos de vigencia.
+ */
+export function fechaTimbradoASortKey(ddmmyyyy?: string | null): string | null {
+  const norm = normalizarFechaTimbradoDDMMYYYY(ddmmyyyy);
+  if (!norm) return null;
+  const [dd, mm, yyyy] = norm.split('/');
+  return `${yyyy}${mm}${dd}`;
+}
+
+/**
+ * Resuelve los datos fiscales del Timbrado (número, inicio y fin de vigencia)
+ * desde una configuración tarifaria, con fallback seguro a EMPRESA_LEGAL.
+ */
+export function resolverDatosTimbrado(tarifa?: {
+  timbrado?: string | null;
+  timbrado_inicio_vigencia?: string | null;
+  timbrado_fin_vigencia?: string | null;
+} | null): {
+  timbrado: string;
+  inicioVigencia: string;
+  finVigencia: string;
+} {
+  const timbrado = String(tarifa?.timbrado || '').trim() || EMPRESA_LEGAL.timbrado;
+  const inicioVigencia =
+    normalizarFechaTimbradoDDMMYYYY(tarifa?.timbrado_inicio_vigencia) ||
+    String(tarifa?.timbrado_inicio_vigencia || '').trim() ||
+    EMPRESA_LEGAL.inicioVigencia;
+  const finVigencia =
+    normalizarFechaTimbradoDDMMYYYY(tarifa?.timbrado_fin_vigencia) ||
+    String(tarifa?.timbrado_fin_vigencia || '').trim() ||
+    EMPRESA_LEGAL.finVigencia;
+
+  return {
+    timbrado,
+    inicioVigencia,
+    finVigencia,
+  };
+}
+
+/**
  * Formatea un número secuencial al formato oficial SET de Paraguay: 001-002-0000001.
  */
 export function formatearNumeroFacturaSET(secuencial: number): string {

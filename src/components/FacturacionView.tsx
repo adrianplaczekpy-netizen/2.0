@@ -355,6 +355,7 @@ export const FacturacionView: React.FC = () => {
                           medidor: p.medidor,
                           pago: p,
                           detalles: p.esPersonalizado ? undefined : p.factura?.detalles,
+                          tarifa: db.getTarifasVigentes(),
                           numeroRecibo: p.numero_recibo,
                           fechaPago: p.fecha_pago,
                           montoAbonado: p.monto,

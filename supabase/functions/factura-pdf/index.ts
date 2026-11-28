@@ -49,6 +49,18 @@ serve(async (req) => {
       });
     }
 
+    const { data: tarifaVigente } = await supabase
+      .from("tarifas")
+      .select("timbrado, timbrado_inicio_vigencia, timbrado_fin_vigencia")
+      .order("vigente_desde", { ascending: false })
+      .order("fecha_creacion", { ascending: false })
+      .limit(1)
+      .maybeSingle();
+
+    const timbradoActual = String(tarifaVigente?.timbrado || "").trim() || "19148339";
+    const inicioVigActual = String(tarifaVigente?.timbrado_inicio_vigencia || "").trim() || "01/10/2026";
+    const finVigActual = String(tarifaVigente?.timbrado_fin_vigencia || "").trim() || "31/10/2027";
+
     // Generar PDF usando jsPDF en Deno
     const doc = new jsPDF({ orientation: "portrait", unit: "mm", format: "a4" });
     const pageWidth = 210;
@@ -68,9 +80,9 @@ serve(async (req) => {
     doc.text("RUC: 3950638-0", xDatosLegales, y + 2.5);
     doc.setFont("helvetica", "normal");
     doc.setFontSize(7.5);
-    doc.text("TIMBRADO N°: 19148339", xDatosLegales, y + 6.3);
-    doc.text("Inicio Vigencia: 01/10/2026", xDatosLegales, y + 10.1);
-    doc.text("Fin Vigencia: 31/10/2027", xDatosLegales, y + 13.9);
+    doc.text(`TIMBRADO N°: ${timbradoActual}`, xDatosLegales, y + 6.3);
+    doc.text(`Inicio Vigencia: ${inicioVigActual}`, xDatosLegales, y + 10.1);
+    doc.text(`Fin Vigencia: ${finVigActual}`, xDatosLegales, y + 13.9);
 
     // Recuadro derecho: Número de Factura SET (001-002-XXXXXXX) + Emisión, Período Facturado y Vencimiento
     const numeroFacturaSET =

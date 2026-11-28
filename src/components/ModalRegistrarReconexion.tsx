@@ -11,7 +11,11 @@ import {
   calcularPeriodoSiguiente,
 } from '../services/billingRules';
 import { Medidor, Factura, Pago, MetodoPago, CargoPendiente } from '../types';
-import { generarComprobantePagoPDF } from '../services/pdfService';
+import {
+  descargarPdfDocumento,
+  generarComprobantePagoPDF,
+  pdfDocToValidBlob,
+} from '../services/pdfService';
 import { useAuth } from '../context/AuthContext';
 import {
   X,
@@ -183,7 +187,8 @@ export const ModalRegistrarReconexion: React.FC<Props> = ({
       cobradorNombre: user?.nombre || operario || 'Caja Central',
       saldoRestante: 0,
     });
-    doc.save(
+    descargarPdfDocumento(
+      doc,
       `Recibo_Reconexion_${resultadoReconexion.pago.numero_recibo}_Med_${resultadoReconexion.medidor.numero_medidor}.pdf`
     );
   };
@@ -200,7 +205,7 @@ export const ModalRegistrarReconexion: React.FC<Props> = ({
       saldoRestante: 0,
     });
     try {
-      const blob = doc.output('blob');
+      const blob = pdfDocToValidBlob(doc);
       const blobUrl = window.URL.createObjectURL(blob);
       const iframe = document.createElement('iframe');
       iframe.style.position = 'fixed';

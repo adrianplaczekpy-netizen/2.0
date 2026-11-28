@@ -6,7 +6,11 @@
 import express from 'express';
 import path from 'path';
 import { db } from './src/services/database.js';
-import { generarBoletaPDF, generarContratoPDF } from './src/services/pdfService.js';
+import {
+  generarBoletaPDF,
+  generarContratoPDF,
+  sanitizarNombreArchivoPdf,
+} from './src/services/pdfService.js';
 
 const app = express();
 const PORT = 3000;
@@ -49,12 +53,15 @@ const handleFacturaPdf = (req: express.Request, res: express.Response) => {
     const buffer = Buffer.from(arrayBuffer);
 
     const numTag = data.factura.numero_factura || `${data.factura.numero_boleta_medidor || 1}`;
-    const filename = `Factura_${numTag}_${data.factura.periodo_facturado}.pdf`;
+    const filename = sanitizarNombreArchivoPdf(
+      `Factura_${numTag}_${data.factura.periodo_facturado}.pdf`
+    );
 
     res.setHeader('Content-Type', 'application/pdf');
+    res.setHeader('X-Content-Type-Options', 'nosniff');
     res.setHeader('Content-Disposition', `inline; filename="${filename}"`);
     res.setHeader('Content-Length', buffer.length.toString());
-    res.setHeader('Cache-Control', 'public, max-age=60');
+    res.setHeader('Cache-Control', 'no-store');
 
     return res.end(buffer);
   } catch (error: any) {
@@ -83,12 +90,13 @@ const handleContratoPdf = (req: express.Request, res: express.Response) => {
     const arrayBuffer = doc.output('arraybuffer');
     const buffer = Buffer.from(arrayBuffer);
 
-    const filename = `Contrato_${data.cliente.documento}.pdf`;
+    const filename = sanitizarNombreArchivoPdf(`Contrato_${data.cliente.documento}.pdf`);
 
     res.setHeader('Content-Type', 'application/pdf');
+    res.setHeader('X-Content-Type-Options', 'nosniff');
     res.setHeader('Content-Disposition', `inline; filename="${filename}"`);
     res.setHeader('Content-Length', buffer.length.toString());
-    res.setHeader('Cache-Control', 'public, max-age=60');
+    res.setHeader('Cache-Control', 'no-store');
 
     return res.end(buffer);
   } catch (error: any) {

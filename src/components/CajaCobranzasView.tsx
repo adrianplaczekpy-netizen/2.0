@@ -9,7 +9,12 @@ import { db } from '../services/database';
 import { isSupabaseConfigured } from '../services/supabaseClient';
 import { formatGs } from '../services/billingRules';
 import { Factura, MetodoPago, TipoComprobantePago } from '../types';
-import { generarBoletaPDF, generarComprobantePagoPDF } from '../services/pdfService';
+import {
+  descargarPdfDocumento,
+  generarBoletaPDF,
+  generarComprobantePagoPDF,
+  pdfDocToValidBlob,
+} from '../services/pdfService';
 import {
   CreditCard,
   Search,
@@ -249,7 +254,7 @@ export const CajaCobranzasView: React.FC = () => {
         conceptoPersonalizado: ultimoPago?.concepto_personalizado || undefined,
       });
       const recTag = ultimoPago?.numero_recibo || factura.periodo_facturado;
-      doc.save(`Recibo_${recTag}_Med_${medidorActual.medidor.numero_medidor}.pdf`);
+      descargarPdfDocumento(doc, `Recibo_${recTag}_Med_${medidorActual.medidor.numero_medidor}.pdf`);
       return;
     }
 
@@ -259,7 +264,10 @@ export const CajaCobranzasView: React.FC = () => {
       medidor: medidorActual.medidor,
       detalles: factura.detalles,
     });
-    doc.save(`Boleta_${factura.periodo_facturado}_Med_${medidorActual.medidor.numero_medidor}.pdf`);
+    descargarPdfDocumento(
+      doc,
+      `Boleta_${factura.periodo_facturado}_Med_${medidorActual.medidor.numero_medidor}.pdf`
+    );
   };
 
   const construirDocComprobanteActual = () => {
@@ -303,7 +311,10 @@ export const CajaCobranzasView: React.FC = () => {
     if (!doc) return;
     const prefix =
       comprobantePago.tipoComprobante === 'recibo_sin_valor_fiscal' ? 'Recibo' : 'Factura';
-    doc.save(`${prefix}_${comprobantePago.recibo}_Med_${comprobantePago.medidorNum}.pdf`);
+    descargarPdfDocumento(
+      doc,
+      `${prefix}_${comprobantePago.recibo}_Med_${comprobantePago.medidorNum}.pdf`
+    );
   };
 
   const handleImprimirComprobante = () => {
@@ -313,7 +324,7 @@ export const CajaCobranzasView: React.FC = () => {
       return;
     }
     try {
-      const blob = doc.output('blob');
+      const blob = pdfDocToValidBlob(doc);
       const blobUrl = window.URL.createObjectURL(blob);
       const iframe = document.createElement('iframe');
       iframe.style.position = 'fixed';
@@ -898,7 +909,10 @@ export const CajaCobranzasView: React.FC = () => {
                         conceptoPersonalizado: p.esPersonalizado ? p.descripcionConcepto : undefined,
                       });
                       const prefix = p.esPersonalizado ? 'Recibo_Personalizado' : 'Recibo';
-                      doc.save(`${prefix}_${p.numero_recibo || p.fecha_pago}_Med_${medidorActual.medidor.numero_medidor}.pdf`);
+                      descargarPdfDocumento(
+                        doc,
+                        `${prefix}_${p.numero_recibo || p.fecha_pago}_Med_${medidorActual.medidor.numero_medidor}.pdf`
+                      );
                     };
 
                     return (

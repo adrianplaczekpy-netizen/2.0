@@ -7,7 +7,11 @@ import React, { useState, useEffect } from 'react';
 import { db } from '../services/database';
 import { formatGs } from '../services/billingRules';
 import { descargarBoletaServer, imprimirBoletaServer } from '../services/apiPdfService';
-import { generarComprobantePagoPDF } from '../services/pdfService';
+import {
+  descargarPdfDocumento,
+  generarComprobantePagoPDF,
+  pdfDocToValidBlob,
+} from '../services/pdfService';
 import {
   ordenarYFiltrarDetalles,
   formatearNumeroFactura,
@@ -321,7 +325,7 @@ export const FacturaDetalleModal: React.FC<FacturaDetalleModalProps> = ({
           conceptoPersonalizado: ultimoPago?.concepto_personalizado || undefined,
         });
         const recTag = ultimoPago?.numero_recibo || factura.periodo_facturado;
-        doc.save(`Recibo_${recTag}_Med_${medidor.numero_medidor}.pdf`);
+        descargarPdfDocumento(doc, `Recibo_${recTag}_Med_${medidor.numero_medidor}.pdf`);
       } else {
         const filename = `Boleta_${factura.periodo_facturado}_Med_${medidor.numero_medidor}.pdf`;
         await descargarBoletaServer(factura.id, filename);
@@ -351,7 +355,7 @@ export const FacturaDetalleModal: React.FC<FacturaDetalleModalProps> = ({
           esConceptoPersonalizado: ultimoPago?.es_concepto_personalizado,
           conceptoPersonalizado: ultimoPago?.concepto_personalizado || undefined,
         });
-        const blob = doc.output('blob');
+        const blob = pdfDocToValidBlob(doc);
         const blobUrl = window.URL.createObjectURL(blob);
         const iframe = document.createElement('iframe');
         iframe.style.position = 'fixed';
@@ -964,7 +968,10 @@ export const FacturaDetalleModal: React.FC<FacturaDetalleModalProps> = ({
                         type="button"
                         onClick={() => {
                           const doc = construirDocPersonalizado(p);
-                          doc.save(`Recibo_Personalizado_${p.numero_recibo || p.fecha_pago}_Med_${medidor.numero_medidor}.pdf`);
+                          descargarPdfDocumento(
+                            doc,
+                            `Recibo_Personalizado_${p.numero_recibo || p.fecha_pago}_Med_${medidor.numero_medidor}.pdf`
+                          );
                         }}
                         className="px-2.5 py-1.5 bg-white hover:bg-stone-100 text-stone-800 border border-stone-300 rounded-md text-[11px] font-bold inline-flex items-center gap-1 cursor-pointer"
                       >

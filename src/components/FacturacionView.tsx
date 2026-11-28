@@ -16,7 +16,10 @@ import {
 import { useAuth } from '../context/AuthContext';
 import { FacturacionBatchPanel } from './FacturacionBatchPanel';
 import { FacturaDetalleModal } from './FacturaDetalleModal';
-import { generarComprobantePagoPDF } from '../services/pdfService';
+import {
+  descargarPdfDocumento,
+  generarComprobantePagoPDF,
+} from '../services/pdfService';
 import { EstadoFactura } from '../types';
 import {
   FileText,
@@ -363,7 +366,10 @@ export const FacturacionView: React.FC = () => {
                           conceptoPersonalizado: p.esPersonalizado ? p.descripcionConcepto : undefined,
                         });
                         const prefix = p.esPersonalizado ? 'Recibo_Personalizado' : 'Recibo';
-                        doc.save(`${prefix}_${p.numero_recibo || p.fecha_pago}_Med_${p.numeroMedidor || 0}.pdf`);
+                        descargarPdfDocumento(
+                          doc,
+                          `${prefix}_${p.numero_recibo || p.fecha_pago}_Med_${p.numeroMedidor || 0}.pdf`
+                        );
                       };
 
                       return (

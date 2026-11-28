@@ -30,10 +30,17 @@ import { FacturaDetalleModal } from '../components/FacturaDetalleModal';
 import { CajaCobranzasView } from '../components/CajaCobranzasView';
 import { FacturacionView } from '../components/FacturacionView';
 import {
+  esBufferPdfValido,
   generarBoletaPDF,
   generarComprobantePagoPDF,
   limpiarDescripcionConceptoPDF,
+  pdfDocToValidBlob,
+  sanitizarNombreArchivoPdf,
 } from './pdfService';
+import {
+  extraerBlobPdfDeResponse,
+  obtenerBlobBoleta,
+} from './apiPdfService';
 import { LOGO_PNG_BASE64 } from '../assets/logoData';
 import {
   calcularIva10Incluido,
@@ -3099,8 +3106,8 @@ test('35. generarComprobantePagoPDF genera recibo A5 vertical (148x210mm), sin m
   assert.ok(pdfText.includes('2026-11-30'), 'Debe incluir fecha de vencimiento');
   assert.ok(!pdfText.includes('Per\\355odo de Consumo:') && !pdfText.includes('Período de Consumo:'), 'Debe quitar Período de Consumo del lado derecho del Medidor');
   assert.ok(!pdfText.includes('DETALLE DE CONCEPTOS'), 'Debe reemplazar DETALLE DE CONCEPTOS por período de consumo');
-  assert.ok(pdfText.includes('DE CONSUMO: 2026-10'), 'Título de tabla debe incluir PERÍODO DE CONSUMO');
-  assert.ok(!pdfText.includes('| EMISI'), 'Factura Legal no debe mostrar | EMISIÓN en el título de la tabla');
+  assert.ok(pdfText.includes('DE CONSUMO: 2026-10 | EMISI'), 'Título de tabla debe incluir PERÍODO DE CONSUMO y EMISIÓN');
+  assert.ok(pdfText.includes('2026-11-01'), 'Título de tabla debe incluir fecha de emisión');
   assert.ok(pdfText.includes('DEUDA ANTERIOR'), 'Concepto DEUDA ANTERIOR debe estar en MAYÚSCULAS');
   assert.ok(pdfText.includes('RECARGO POR MORA'), 'Concepto RECARGO POR MORA debe estar en MAYÚSCULAS');
   assert.ok(pdfText.includes('APORTE LEY ERSSAN'), 'Concepto ERSSAN debe estar en MAYÚSCULAS');
@@ -3558,8 +3565,7 @@ test('38. PDF Factura Legal vs Recibo sin Valor Fiscal vs Concepto Personalizado
   assert.ok(!rawFactura.includes('(25 m') && !rawFactura.includes('(2%)'), 'Debe eliminar paréntesis de los conceptos');
   assert.ok(rawFactura.includes('CONSUMO DE AGUA'), 'Concepto sin paréntesis');
   assert.ok(!rawFactura.includes('DETALLE DE CONCEPTOS'), 'Debe reemplazar DETALLE DE CONCEPTOS');
-  assert.ok(rawFactura.includes('DE CONSUMO: 2026-10'), 'Factura Legal debe mostrar PERÍODO DE CONSUMO: 2026-10');
-  assert.ok(!rawFactura.includes('| EMISI'), 'Factura Legal NO debe mostrar | EMISIÓN en el título de la tabla');
+  assert.ok(rawFactura.includes('DE CONSUMO: 2026-10 | EMISI'), 'Factura Legal debe mostrar PERÍODO DE CONSUMO: 2026-10 | EMISIÓN: 2026-11-01');
   assert.ok((rawFactura.includes('Emisión: 2026-11-01') || rawFactura.includes('Emisi\\363n: 2026-11-01')) && rawFactura.includes('Vencimiento: 2026-11-30'), 'Factura Legal mantiene Emisión y Vencimiento en el recuadro superior derecho');
   assert.ok(!rawFactura.includes('Per\\355odo de Consumo:'), 'Debe quitar Período de Consumo de la línea del medidor');
   assert.ok(rawFactura.includes('IVA 10%'), 'Factura Legal debe mostrar concepto IVA 10%');
@@ -3568,7 +3574,7 @@ test('38. PDF Factura Legal vs Recibo sin Valor Fiscal vs Concepto Personalizado
   assert.ok(!rawFactura.includes('SIN VALOR FISCAL'), 'No debe mostrar texto SIN VALOR FISCAL');
   assert.equal(contarLineasTablaFullWidth(rawFactura), 6, 'Con 3 conceptos debe dibujar línea separadora en la tabla (5 base + 1 separadora)');
 
-  // B) RECIBO SIN VALOR FISCAL (2 conceptos: CONSUMO DE AGUA + APORTE LEY ERSSAN -> < 3 conceptos, NO debe dibujar líneas separadoras entre ellos)
+  // B) RECIBO DE CONSUMO DE AGUA SIN VALOR FISCAL (mismas fechas/período que Factura Legal, sin RUC/Timbrado/IVA)
   const docRecibo = generarComprobantePagoPDF({
     factura: fac,
     cliente: cli,
@@ -3587,9 +3593,15 @@ test('38. PDF Factura Legal vs Recibo sin Valor Fiscal vs Concepto Personalizado
   assert.ok(textRecibo.includes('San Gabriel Mboi y'), 'Recibo debe mostrar la dirección del cliente');
   assert.ok(!textRecibo.includes('SIN VALOR FISCAL'), 'Recibo NO debe mostrar el texto SIN VALOR FISCAL');
   assert.ok(textRecibo.includes('001-002-0001'), 'Recibo debe usar formato 4 dígitos');
-  assert.ok(!textRecibo.includes('Emisi') && !textRecibo.includes('EMISI'), 'Recibo debe dejar vacío el lado derecho del recuadro superior y sin título EMISIÓN arriba de la tabla');
-  assert.ok(!textRecibo.includes('Vencimiento:'), 'Recibo no debe mostrar Vencimiento en el recuadro superior');
-  assert.ok(!textRecibo.includes('DE CONSUMO:'), 'Recibo no debe mostrar título arriba de la tabla de conceptos');
+  assert.ok(
+    (textRecibo.includes('Emisión: 2026-11-01') || textRecibo.includes('Emisi\\363n: 2026-11-01')) &&
+      textRecibo.includes('Vencimiento: 2026-11-30'),
+    'Recibo de consumo de agua debe mostrar Emisión y Vencimiento en el recuadro superior derecho'
+  );
+  assert.ok(
+    textRecibo.includes('DE CONSUMO: 2026-10 | EMISI') && textRecibo.includes('2026-11-01'),
+    'Recibo de consumo de agua debe mostrar PERÍODO DE CONSUMO: 2026-10 | EMISIÓN: 2026-11-01 arriba de la tabla'
+  );
   assert.ok(!textRecibo.includes('001-002-0000021'), 'Recibo no debe mostrar número de 7 dígitos');
   assert.ok(!textRecibo.includes('3950638-0'), 'Recibo NO debe mostrar RUC');
   assert.ok(!textRecibo.includes('19148339'), 'Recibo NO debe mostrar Timbrado');
@@ -3598,13 +3610,13 @@ test('38. PDF Factura Legal vs Recibo sin Valor Fiscal vs Concepto Personalizado
   assert.ok(!textRecibo.includes('IVA 10%'), 'Recibo NO debe incluir IVA 10%');
   assert.equal(contarLineasTablaFullWidth(rawRecibo), 5, 'Con 2 conceptos NO debe dibujar líneas separadoras en la tabla (solo 5 líneas base)');
 
-  // C) CONCEPTO PERSONALIZADO independiente (1 concepto -> sin líneas separadoras; recuadro derecho vacío y sin título arriba de la tabla)
+  // C) CONCEPTO PERSONALIZADO independiente (recuadro derecho totalmente vacío y sin título arriba de la tabla)
   const docPers = generarComprobantePagoPDF({
-    factura: null,
+    factura: fac,
     cliente: cli,
     medidor: med,
-    tipoComprobante: 'factura_legal',
-    numeroRecibo: '001-002-0000099',
+    tipoComprobante: 'recibo_sin_valor_fiscal',
+    numeroRecibo: '001-002-0009',
     esConceptoPersonalizado: true,
     conceptoPersonalizado: 'Reparacion de caneria matriz (Tramo Norte)',
     montoAbonado: 150000,
@@ -3614,13 +3626,14 @@ test('38. PDF Factura Legal vs Recibo sin Valor Fiscal vs Concepto Personalizado
   const rawPers = docPers.output();
   const textPers = rawPers.split(/\r?\n/).filter((l) => l.includes('Tj')).join('\n');
   assert.ok(textPers.includes('0986 977 631'), 'Comprobante personalizado debe mostrar teléfono WhatsApp');
-  assert.ok(textPers.includes('001-002-0000099'), 'Debe mostrar el comprobante asignado');
+  assert.ok(textPers.includes('001-002-0009'), 'Debe mostrar el comprobante asignado');
   assert.ok(textPers.includes('REPARACION DE CANERIA MATRIZ'), 'Concepto personalizado debe renderizarse en MAYÚSCULAS');
   assert.ok(!textPers.includes('Tramo Norte') && !textPers.includes('TRAMO NORTE'), 'Debe limpiar paréntesis en concepto personalizado');
   assert.ok(textPers.includes('150.000 Gs.'), 'Debe mostrar el monto exacto ingresado');
   const ocurrenciasDireccion = textPers.split('San Gabriel Mboi y').length - 1;
   assert.equal(ocurrenciasDireccion, 1, 'La dirección debe aparecer únicamente en DATOS DEL CLIENTE Y MEDIDOR, nunca en el recuadro superior');
   assert.ok(!textPers.includes('Emisi') && !textPers.includes('EMISI'), 'Concepto personalizado debe dejar el recuadro derecho vacío y sin título EMISIÓN arriba de la tabla');
+  assert.ok(!textPers.includes('Vencimiento:'), 'Concepto personalizado no debe mostrar Vencimiento en el recuadro derecho');
   assert.ok(!textPers.includes('DE CONSUMO:'), 'Concepto personalizado no debe mostrar título arriba de la tabla');
   assert.ok(!textPers.includes('Cobro Independiente'), 'Concepto personalizado NO debe mostrar "Cobro Independiente"');
   assert.ok(!textPers.includes('ERSSAN 2%') && !textPers.includes('APORTE LEY ERSSAN') && !textPers.includes('2.157 Gs.'), 'Concepto personalizado NO debe calcular ni mostrar ERSSAN 2%');
@@ -3628,7 +3641,7 @@ test('38. PDF Factura Legal vs Recibo sin Valor Fiscal vs Concepto Personalizado
   assert.ok(!textPers.includes('CONSUMO DE AGUA'), 'Concepto personalizado debe ocultar conceptos estándar');
   assert.equal(contarLineasTablaFullWidth(rawPers), 5, 'Con 1 concepto NO debe dibujar líneas separadoras en la tabla (solo 5 líneas base)');
 
-  // D) generarBoletaPDF Factura Legal muestra solo PERÍODO DE CONSUMO: 2026-10 (sin | EMISIÓN) y Recibo omite título arriba de la tabla
+  // D) generarBoletaPDF Factura Legal y Recibo de Consumo muestran PERÍODO DE CONSUMO | EMISIÓN arriba de la tabla
   const docBoletaFactura = generarBoletaPDF({
     factura: fac,
     cliente: cli,
@@ -3636,7 +3649,7 @@ test('38. PDF Factura Legal vs Recibo sin Valor Fiscal vs Concepto Personalizado
     tipoComprobante: 'factura_legal',
   });
   const textBoletaFactura = docBoletaFactura.output().split(/\r?\n/).filter((l) => l.includes('Tj')).join('\n');
-  assert.ok(textBoletaFactura.includes('DE CONSUMO: 2026-10') && !textBoletaFactura.includes('| EMISI'));
+  assert.ok(textBoletaFactura.includes('DE CONSUMO: 2026-10 | EMISI') && textBoletaFactura.includes('2026-11-01'));
 
   const docBoletaRecibo = generarBoletaPDF({
     factura: fac,
@@ -3654,7 +3667,10 @@ test('38. PDF Factura Legal vs Recibo sin Valor Fiscal vs Concepto Personalizado
   assert.ok(textBoletaRecibo.includes('0986 977 631'));
   assert.ok(textBoletaRecibo.includes('San Gabriel Mboi y'));
   assert.ok(!textBoletaRecibo.includes('DETALLE DE CONCEPTOS'));
-  assert.ok(!textBoletaRecibo.includes('DE CONSUMO:'), 'Recibo sin valor fiscal en generarBoletaPDF no debe mostrar título arriba de la tabla');
+  assert.ok(
+    textBoletaRecibo.includes('DE CONSUMO: 2026-10 | EMISI') && textBoletaRecibo.includes('2026-11-01'),
+    'Recibo de consumo de agua en generarBoletaPDF debe mostrar PERÍODO DE CONSUMO | EMISIÓN'
+  );
   assert.ok(textBoletaRecibo.includes('(CONSUMO DE AGUA) Tj'));
   assert.ok(textBoletaRecibo.includes('(APORTE ERSSAN:) Tj'));
   assert.ok(!textBoletaRecibo.includes('\\(25 m') && !textBoletaRecibo.includes('\\(2%'));
@@ -3777,10 +3793,111 @@ test('40. Historial de Pagos incluye factura_id = null y getUltimoPagoPorMedidor
   assert.ok(htmlModal.includes('INSTALACIÓN DE LLAVE MAESTRA'));
 });
 
+test('41. Codificación binaria PDF (%PDF- / %%EOF), sanitización de nombre y rechazo de respuestas HTML en apiPdfService', async () => {
+  const cli = {
+    id: 'cli-pdf-41',
+    nombre_completo: 'María Ñandú',
+    documento: '4.111.222',
+    direccion: 'San Gabriel',
+    telefono: '0981',
+    email: 'm@example.com',
+    fecha_alta: '2026-01-01',
+  };
+  const med: Medidor = {
+    ...medidorBase,
+    id: 'med-pdf-41',
+    cliente_id: cli.id,
+    numero_medidor: 410,
+  };
+  const fac: Factura = {
+    id: 'fac-pdf-41',
+    medidor_id: med.id,
+    cliente_id: cli.id,
+    periodo_consumo: '2026-10',
+    periodo_facturado: '2026-11',
+    fecha_emision: '2026-11-01',
+    fecha_vencimiento: '2026-11-30',
+    estado: 'pendiente',
+    total: 40000,
+    saldo_pendiente: 40000,
+    saldo: 40000,
+    es_tercera_boleta: false,
+    alerta_consumo_elevado: false,
+    numero_boleta_medidor: 1,
+    consumo_m3: 10,
+  };
 
+  // 1) pdfDocToValidBlob produce Blob application/pdf binario válido (%PDF- ... %%EOF)
+  const docBoleta = generarBoletaPDF({ factura: fac, cliente: cli, medidor: med });
+  const blobBoleta = pdfDocToValidBlob(docBoleta);
+  assert.equal(blobBoleta.type, 'application/pdf');
+  const abBoleta = await blobBoleta.arrayBuffer();
+  assert.equal(esBufferPdfValido(abBoleta), true);
 
+  // 2) sanitizarNombreArchivoPdf elimina caracteres ilegales en Windows/PC
+  assert.equal(
+    sanitizarNombreArchivoPdf('Boleta:2026/11*Med?410|San Gabriel.pdf'),
+    'Boleta_2026_11_Med_410_San_Gabriel.pdf'
+  );
 
+  // 3) extraerBlobPdfDeResponse rechaza respuestas 200 OK con HTML del SPA fallback o JSON
+  const htmlSpoofRes = new Response('<!doctype html><html><body>SPA</body></html>', {
+    status: 200,
+    headers: { 'Content-Type': 'text/html; charset=utf-8' },
+  });
+  assert.equal(await extraerBlobPdfDeResponse(htmlSpoofRes), null);
 
+  const htmlDisguisedAsOctetRes = new Response('<!doctype html><html><body>SPA</body></html>', {
+    status: 200,
+    headers: { 'Content-Type': 'application/octet-stream' },
+  });
+  assert.equal(await extraerBlobPdfDeResponse(htmlDisguisedAsOctetRes), null);
 
+  // 4) obtenerBlobBoleta prioriza generación binaria local y nunca descarga HTML como .pdf
+  const blobLocal = await obtenerBlobBoleta(fac.id, {
+    localLookup: () => ({ factura: fac, cliente: cli, medidor: med, detalles: [] }),
+    fetchImpl: async () =>
+      new Response('<!doctype html><html></html>', {
+        status: 200,
+        headers: { 'Content-Type': 'text/html' },
+      }),
+  });
+  assert.equal(blobLocal.type, 'application/pdf');
+  assert.equal(esBufferPdfValido(await blobLocal.arrayBuffer()), true);
 
+  // 5) Si solo hay backend y el primer endpoint devuelve HTML SPA, rechaza y cae al siguiente válido (o lanza error claro)
+  await assert.rejects(
+    obtenerBlobBoleta('id-solo-spa-html', {
+      localLookup: () => null,
+      supabaseUrl: '',
+      fetchImpl: async () =>
+        new Response('<!doctype html><html></html>', {
+          status: 200,
+          headers: { 'Content-Type': 'text/html' },
+        }),
+    }),
+    /archivo PDF válido/i
+  );
 
+  const blobFromRemoteValid = await obtenerBlobBoleta('id-remoto-valido', {
+    localLookup: () => null,
+    supabaseUrl: 'https://demo.supabase.co',
+    fetchImpl: async (input) => {
+      const url = String(input);
+      if (url.startsWith('/facturas/')) {
+        // Simula hosting estático devolviendo index.html con HTTP 200
+        return new Response('<!doctype html><html></html>', {
+          status: 200,
+          headers: { 'Content-Type': 'text/html' },
+        });
+      }
+      // Edge Function devuelve PDF binario real
+      return new Response(abBoleta, {
+        status: 200,
+        headers: { 'Content-Type': 'application/pdf' },
+      });
+    },
+  });
+  assert.equal(blobFromRemoteValid.type, 'application/pdf');
+  assert.equal(esBufferPdfValido(await blobFromRemoteValid.arrayBuffer()), true);
+});

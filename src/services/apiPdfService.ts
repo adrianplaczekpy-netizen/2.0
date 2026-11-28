@@ -4,14 +4,22 @@
  */
 
 import { db } from './database';
-import { generarBoletaPDF, generarContratoPDF } from './pdfService';
+import {
+  esBufferPdfValido,
+  generarBoletaPDF,
+  generarContratoPDF,
+  pdfDocToValidBlob,
+  sanitizarNombreArchivoPdf,
+} from './pdfService';
 
 /**
- * Servicio de consumo de PDFs:
- * 1. Prioridad 1: Supabase Edge Functions en producción Lovable (`/functions/v1/factura-pdf`, etc.)
- * 2. Prioridad 2: Servidor Node/Express en desarrollo local (`/facturas/:id/pdf`)
- * 3. Prioridad 3 (Fallback resiliente): Generación directa si no hay conectividad backend,
- *    garantizando que el botón de descarga nunca falle ni quede bloqueado en ningún entorno.
+ * Servicio de consumo y descarga segura de PDFs:
+ * 1. Si los datos completos de la boleta/contrato ya están cargados en el cliente, genera el PDF
+ *    directamente en ArrayBuffer binario con el diseño vigente, verificando firma `%PDF-` y cierre `%%EOF`
+ *    (evita descargar HTML del SPA fallback o versiones desactualizadas de Edge Functions).
+ * 2. Para consultas remotas (`/facturas/:id/pdf` o Supabase Edge Function), valida estrictamente
+ *    que la respuesta NO sea `text/html`/`application/json` y que los bytes comiencen con `%PDF-`.
+ * 3. Normaliza siempre a `Blob` con tipo `application/pdf` y nombre sanitizado para PC.
  */
 
 const SUPABASE_URL = (import.meta as any).env?.VITE_SUPABASE_URL || '';
@@ -26,105 +34,165 @@ export async function sincronizarEstadoConBackend(): Promise<void> {
       body: JSON.stringify(data),
     });
   } catch (err) {
-    // Sincronización transparente
     console.debug('Sync background status:', err);
   }
 }
 
 /**
- * Obtiene el Blob del PDF desde Edge Function, endpoint Express o fallback local
+ * Extrae y valida un Blob binario `application/pdf` desde una respuesta HTTP.
+ * Rechaza respuestas `200 OK` que contengan HTML (SPA index.html), JSON o texto plano.
  */
-async function obtenerBlobBoleta(facturaId: string): Promise<Blob> {
-  // 1. Probar Supabase Edge Function si está configurada la URL de Supabase
-  if (SUPABASE_URL) {
-    try {
-      const edgeUrl = `${SUPABASE_URL}/functions/v1/factura-pdf?id=${encodeURIComponent(facturaId)}`;
-      const res = await fetch(edgeUrl, {
-        headers: SUPABASE_ANON_KEY ? { Authorization: `Bearer ${SUPABASE_ANON_KEY}` } : {},
-      });
-      if (res.ok) {
-        return await res.blob();
-      }
-    } catch (e) {
-      console.warn('Supabase Edge Function no alcanzable, probando endpoint local:', e);
-    }
+export async function extraerBlobPdfDeResponse(res: Response): Promise<Blob | null> {
+  if (!res.ok) return null;
+
+  const contentType = (res.headers.get('content-type') || '').toLowerCase();
+  if (
+    contentType.includes('text/html') ||
+    contentType.includes('application/json') ||
+    contentType.includes('text/plain')
+  ) {
+    return null;
   }
 
-  // 2. Probar endpoint del servidor Express local
-  try {
-    await sincronizarEstadoConBackend();
-    const res = await fetch(`/facturas/${encodeURIComponent(facturaId)}/pdf`);
-    if (res.ok) {
-      return await res.blob();
-    }
-  } catch (e) {
-    console.warn('Endpoint Express local no alcanzable, activando fallback resiliente:', e);
+  const arrayBuffer = await res.arrayBuffer();
+  if (!esBufferPdfValido(arrayBuffer)) {
+    return null;
   }
 
-  // 3. Fallback de contingencia: genera a través del motor desacoplado jsPDF
-  const facData = db.getFacturaPorId(facturaId);
-  if (!facData) {
-    throw new Error('No se pudo generar el PDF. Intentá de nuevo.');
-  }
-  const doc = generarBoletaPDF(facData);
-  return doc.output('blob');
+  return new Blob([arrayBuffer], { type: 'application/pdf' });
+}
+
+function dispararDescargaBlobPdf(blob: Blob, nombreArchivo: string): void {
+  const safeName = sanitizarNombreArchivoPdf(nombreArchivo);
+  const url = window.URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.style.display = 'none';
+  a.href = url;
+  a.download = safeName;
+  a.rel = 'noopener';
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  setTimeout(() => window.URL.revokeObjectURL(url), 15000);
 }
 
 /**
- * Obtiene el Blob del Contrato desde Edge Function, endpoint Express o fallback local
+ * Obtiene el Blob binario `application/pdf` verificado para una boleta.
  */
-async function obtenerBlobContrato(clienteId: string): Promise<Blob> {
-  // 1. Probar Supabase Edge Function si está configurada
-  if (SUPABASE_URL) {
-    try {
-      const edgeUrl = `${SUPABASE_URL}/functions/v1/contrato-pdf?id=${encodeURIComponent(clienteId)}`;
-      const res = await fetch(edgeUrl, {
-        headers: SUPABASE_ANON_KEY ? { Authorization: `Bearer ${SUPABASE_ANON_KEY}` } : {},
-      });
-      if (res.ok) {
-        return await res.blob();
-      }
-    } catch (e) {
-      console.warn('Supabase Edge Function no alcanzable para contrato, probando endpoint local:', e);
-    }
+export async function obtenerBlobBoleta(
+  facturaId: string,
+  options?: {
+    fetchImpl?: typeof fetch;
+    localLookup?: typeof db.getFacturaPorId;
+    supabaseUrl?: string;
+    supabaseAnonKey?: string;
+  }
+): Promise<Blob> {
+  const localLookup = options?.localLookup ?? ((id: string) => db.getFacturaPorId(id));
+  const fetchFn = options?.fetchImpl ?? fetch;
+  const sbUrl = options?.supabaseUrl ?? SUPABASE_URL;
+  const sbAnon = options?.supabaseAnonKey ?? SUPABASE_ANON_KEY;
+
+  // 1. Generación binaria directa si la boleta ya está en memoria (diseño 100% actualizado y libre de HTML SPA)
+  const facData = localLookup(facturaId);
+  if (facData) {
+    const doc = generarBoletaPDF(facData);
+    return pdfDocToValidBlob(doc);
   }
 
-  // 2. Probar endpoint del servidor Express local
+  // 2. Endpoint Express local (`/facturas/:id/pdf`) con validación estricta %PDF-
   try {
-    await sincronizarEstadoConBackend();
-    const res = await fetch(`/clientes/${encodeURIComponent(clienteId)}/contrato/pdf`);
-    if (res.ok) {
-      return await res.blob();
+    const res = await fetchFn(`/facturas/${encodeURIComponent(facturaId)}/pdf`);
+    const validBlob = await extraerBlobPdfDeResponse(res);
+    if (validBlob) {
+      return validBlob;
     }
   } catch (e) {
-    console.warn('Endpoint Express local no alcanzable para contrato, activando fallback:', e);
+    console.warn('Endpoint Express local no disponible para boleta:', e);
   }
 
-  // 3. Fallback de contingencia
-  const cliData = db.getClienteContratoParaPdf(clienteId);
-  if (!cliData) {
-    throw new Error('No se pudo generar el PDF. Intentá de nuevo.');
+  // 3. Supabase Edge Function con validación estricta %PDF-
+  if (sbUrl) {
+    try {
+      const edgeUrl = `${sbUrl}/functions/v1/factura-pdf?id=${encodeURIComponent(facturaId)}`;
+      const res = await fetchFn(edgeUrl, {
+        headers: sbAnon ? { Authorization: `Bearer ${sbAnon}` } : {},
+      });
+      const validBlob = await extraerBlobPdfDeResponse(res);
+      if (validBlob) {
+        return validBlob;
+      }
+    } catch (e) {
+      console.warn('Supabase Edge Function no alcanzó un PDF válido:', e);
+    }
   }
-  const doc = generarContratoPDF(cliData);
-  return doc.output('blob');
+
+  throw new Error('No se pudo generar un archivo PDF válido para la boleta. Intentá de nuevo.');
 }
 
 /**
- * Solicita y descarga la boleta en el navegador
+ * Obtiene el Blob binario `application/pdf` verificado para un contrato.
+ */
+export async function obtenerBlobContrato(
+  clienteId: string,
+  options?: {
+    fetchImpl?: typeof fetch;
+    localLookup?: typeof db.getClienteContratoParaPdf;
+    supabaseUrl?: string;
+    supabaseAnonKey?: string;
+  }
+): Promise<Blob> {
+  const localLookup = options?.localLookup ?? ((id: string) => db.getClienteContratoParaPdf(id));
+  const fetchFn = options?.fetchImpl ?? fetch;
+  const sbUrl = options?.supabaseUrl ?? SUPABASE_URL;
+  const sbAnon = options?.supabaseAnonKey ?? SUPABASE_ANON_KEY;
+
+  // 1. Generación binaria directa si los datos están en memoria
+  const cliData = localLookup(clienteId);
+  if (cliData) {
+    const doc = generarContratoPDF(cliData);
+    return pdfDocToValidBlob(doc);
+  }
+
+  // 2. Endpoint Express local con validación estricta %PDF-
+  try {
+    const res = await fetchFn(`/clientes/${encodeURIComponent(clienteId)}/contrato/pdf`);
+    const validBlob = await extraerBlobPdfDeResponse(res);
+    if (validBlob) {
+      return validBlob;
+    }
+  } catch (e) {
+    console.warn('Endpoint Express local no disponible para contrato:', e);
+  }
+
+  // 3. Supabase Edge Function con validación estricta %PDF-
+  if (sbUrl) {
+    try {
+      const edgeUrl = `${sbUrl}/functions/v1/contrato-pdf?id=${encodeURIComponent(clienteId)}`;
+      const res = await fetchFn(edgeUrl, {
+        headers: sbAnon ? { Authorization: `Bearer ${sbAnon}` } : {},
+      });
+      const validBlob = await extraerBlobPdfDeResponse(res);
+      if (validBlob) {
+        return validBlob;
+      }
+    } catch (e) {
+      console.warn('Supabase Edge Function no alcanzó un PDF válido para contrato:', e);
+    }
+  }
+
+  throw new Error('No se pudo generar un archivo PDF válido para el contrato. Intentá de nuevo.');
+}
+
+/**
+ * Solicita y descarga la boleta en el navegador asegurando codificación binaria PDF válida
  */
 export async function descargarBoletaServer(
   facturaId: string,
   nombreArchivo?: string
 ): Promise<void> {
   const blob = await obtenerBlobBoleta(facturaId);
-  const url = window.URL.createObjectURL(blob);
-  const a = document.createElement('a');
-  a.href = url;
-  a.download = nombreArchivo || `Boleta_${facturaId}.pdf`;
-  document.body.appendChild(a);
-  a.click();
-  document.body.removeChild(a);
-  setTimeout(() => window.URL.revokeObjectURL(url), 1000);
+  dispararDescargaBlobPdf(blob, nombreArchivo || `Boleta_${facturaId}.pdf`);
 }
 
 /**
@@ -152,7 +220,9 @@ export async function imprimirBoletaServer(facturaId: string): Promise<void> {
       console.warn('Error al llamar print en iframe:', e);
     }
     setTimeout(() => {
-      document.body.removeChild(iframe);
+      if (iframe.parentNode) {
+        iframe.parentNode.removeChild(iframe);
+      }
       window.URL.revokeObjectURL(blobUrl);
     }, 60000);
   };
@@ -166,12 +236,5 @@ export async function descargarContratoServer(
   nombreArchivo?: string
 ): Promise<void> {
   const blob = await obtenerBlobContrato(clienteId);
-  const url = window.URL.createObjectURL(blob);
-  const a = document.createElement('a');
-  a.href = url;
-  a.download = nombreArchivo || `Contrato_Cliente_${clienteId}.pdf`;
-  document.body.appendChild(a);
-  a.click();
-  document.body.removeChild(a);
-  setTimeout(() => window.URL.revokeObjectURL(url), 1000);
+  dispararDescargaBlobPdf(blob, nombreArchivo || `Contrato_Cliente_${clienteId}.pdf`);
 }

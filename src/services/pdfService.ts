@@ -105,6 +105,80 @@ export function limpiarDescripcionConceptoPDF(texto: string): string {
 }
 
 /**
+ * Verifica que un ArrayBuffer o Uint8Array corresponda a un documento PDF binario válido
+ * (encabezado mágico `%PDF-` al inicio y marca `%%EOF` en el tramo final).
+ */
+export function esBufferPdfValido(buffer: ArrayBuffer | Uint8Array): boolean {
+  const bytes = buffer instanceof Uint8Array ? buffer : new Uint8Array(buffer);
+  if (bytes.byteLength < 64) return false;
+
+  // Encabezado mágico "%PDF-" (0x25, 0x50, 0x44, 0x46, 0x2D)
+  const hasHeader =
+    bytes[0] === 0x25 &&
+    bytes[1] === 0x50 &&
+    bytes[2] === 0x44 &&
+    bytes[3] === 0x46 &&
+    bytes[4] === 0x2d;
+  if (!hasHeader) return false;
+
+  // Verificar marca de cierre %%EOF dentro de los últimos 1024 bytes
+  const tailStart = Math.max(0, bytes.byteLength - 1024);
+  let tailStr = '';
+  for (let i = tailStart; i < bytes.byteLength; i++) {
+    tailStr += String.fromCharCode(bytes[i]);
+  }
+  return tailStr.includes('%%EOF');
+}
+
+/**
+ * Sanitiza nombres de archivo para descarga segura en Windows/macOS/Linux
+ * garantizando extensión `.pdf` y eliminando caracteres no permitidos.
+ */
+export function sanitizarNombreArchivoPdf(
+  nombreArchivo: string,
+  fallback = 'Comprobante_Aguateria.pdf'
+): string {
+  const baseRaw = (nombreArchivo || fallback).trim() || fallback;
+  const sinExtension = baseRaw.replace(/\.pdf$/i, '');
+  const limpio = sinExtension
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .replace(/[^a-zA-Z0-9._-]+/g, '_')
+    .replace(/^_+|_+$/g, '');
+  return `${limpio || 'Comprobante_Aguateria'}.pdf`;
+}
+
+/**
+ * Convierte un jsPDF a Blob binario `application/pdf` verificando encabezado `%PDF-` y cierre `%%EOF`.
+ */
+export function pdfDocToValidBlob(doc: jsPDF): Blob {
+  const arrayBuffer = doc.output('arraybuffer');
+  if (!esBufferPdfValido(arrayBuffer)) {
+    throw new Error('La codificación binaria del PDF generado no es válida.');
+  }
+  return new Blob([arrayBuffer], { type: 'application/pdf' });
+}
+
+/**
+ * Descarga un documento jsPDF en el navegador usando Blob binario `application/pdf`
+ * con nombre sanitizado y liberación diferida del ObjectURL para evitar truncamientos en PC.
+ */
+export function descargarPdfDocumento(doc: jsPDF, nombreArchivo: string): void {
+  const blob = pdfDocToValidBlob(doc);
+  const safeName = sanitizarNombreArchivoPdf(nombreArchivo);
+  const url = window.URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.style.display = 'none';
+  a.href = url;
+  a.download = safeName;
+  a.rel = 'noopener';
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  setTimeout(() => window.URL.revokeObjectURL(url), 15000);
+}
+
+/**
  * Genera el documento PDF de la Boleta Oficial de Aguatería (Server-Side y Client-Side)
  * Estructura estricta según pliego:
  * - Una página (A4), blanco y negro con avisos en ROJO.
@@ -198,13 +272,15 @@ export function generarBoletaPDF(params: {
     boxY + 5
   );
 
-  doc.setFont('helvetica', 'normal');
-  doc.setFontSize(8);
-  doc.text(`Emisión: ${factura.fecha_emision}`, boxX + 3.5, boxY + 9.8);
-  doc.text(`Período Facturado: ${factura.periodo_facturado}`, boxX + 3.5, boxY + 14.1);
-  doc.setFont('helvetica', 'bold');
-  doc.text(`Vencimiento: ${factura.fecha_vencimiento}`, boxX + 3.5, boxY + 18.4);
-  doc.setFont('helvetica', 'normal');
+  if (!esConceptoPersonalizado) {
+    doc.setFont('helvetica', 'normal');
+    doc.setFontSize(8);
+    doc.text(`Emisión: ${factura.fecha_emision}`, boxX + 3.5, boxY + 9.8);
+    doc.text(`Período Facturado: ${factura.periodo_facturado}`, boxX + 3.5, boxY + 14.1);
+    doc.setFont('helvetica', 'bold');
+    doc.text(`Vencimiento: ${factura.fecha_vencimiento}`, boxX + 3.5, boxY + 18.4);
+    doc.setFont('helvetica', 'normal');
+  }
 
   y = boxY + boxH + 3.5;
   doc.setDrawColor(0, 0, 0);
@@ -323,14 +399,19 @@ export function generarBoletaPDF(params: {
   }
 
   // DETALLE DE CONCEPTOS (solo los que tienen monto > 0)
-  // Factura Legal estándar: muestra únicamente "PERÍODO DE CONSUMO: [mes]"
-  // Recibo sin valor fiscal y Concepto Personalizado: sin título arriba de la tabla
+  // - Concepto Personalizado: sin título arriba de la tabla
+  // - Factura Legal o Recibo de Consumo de Agua: muestra "PERÍODO DE CONSUMO: [mes] | EMISIÓN: [fecha]"
   const periodoConsumoBoleta = factura.periodo_consumo || factura.periodo_facturado;
-  if (esFacturaLegal && !esConceptoPersonalizado && periodoConsumoBoleta) {
+  if (esConceptoPersonalizado) {
+    // Concepto personalizado: sin título arriba de la tabla
+  } else {
+    const tituloBoleta = periodoConsumoBoleta
+      ? `PERÍODO DE CONSUMO: ${periodoConsumoBoleta} | EMISIÓN: ${factura.fecha_emision}`
+      : `EMISIÓN: ${factura.fecha_emision}`;
     doc.setFont('helvetica', 'bold');
     doc.setFontSize(9);
     doc.setTextColor(0, 0, 0);
-    doc.text(`PERÍODO DE CONSUMO: ${periodoConsumoBoleta}`, margin, y);
+    doc.text(tituloBoleta, margin, y);
     y += 4;
   }
 
@@ -838,8 +919,8 @@ export function generarComprobantePagoPDF(params: ComprobantePagoPDFParams): jsP
   y += 4.5;
 
   // 4) Recuadro estructurado:
-  //    - Factura Legal estándar: número + fecha/hora a la izquierda, Emisión/Vencimiento a la derecha
-  //    - Recibo sin valor fiscal y Concepto Personalizado: lado derecho TOTALMENTE VACÍO
+  //    - Concepto Personalizado (esConceptoPersonalizado): lado derecho TOTALMENTE VACÍO
+  //    - Factura Legal o Recibo de Consumo de Agua (else): Emisión arriba y Vencimiento abajo a la derecha
   const direccionClienteMostrar = (cliente.direccion || medidor.direccion || '--').trim();
   const fechaEmisionMostrar = factura?.fecha_emision ? factura.fecha_emision : fechaBase;
   const metaBoxH = 14;
@@ -862,7 +943,9 @@ export function generarComprobantePagoPDF(params: ComprobantePagoPDFParams): jsP
   doc.setFontSize(8.8);
   doc.text(`Fecha y hora: ${fechaHoraTexto}`, margin + 3.5, y + 10.6);
 
-  if (esFacturaLegal && !esConceptoPersonalizado) {
+  if (esConceptoPersonalizado) {
+    // Concepto Personalizado: dejar el lado derecho del recuadro superior totalmente vacío
+  } else {
     doc.setFontSize(8.8);
     doc.setTextColor(51, 65, 85);
     doc.text(`Emisión: ${fechaEmisionMostrar}`, xRight - 3.5, y + 5.4, { align: 'right' });
@@ -911,13 +994,18 @@ export function generarComprobantePagoPDF(params: ComprobantePagoPDFParams): jsP
   y += 6;
 
   // 6) Título de tabla de conceptos:
-  //    - Factura Legal estándar: muestra ÚNICAMENTE "PERÍODO DE CONSUMO: [mes]"
-  //    - Recibo sin valor fiscal y Concepto Personalizado: sin título arriba de la tabla
-  if (esFacturaLegal && !esConceptoPersonalizado && periodoConsumoTexto) {
+  //    - Concepto Personalizado (esConceptoPersonalizado): sin título arriba de la tabla
+  //    - Factura Legal o Recibo de Consumo de Agua (else): "PERÍODO DE CONSUMO: [mes] | EMISIÓN: [fecha]"
+  if (esConceptoPersonalizado) {
+    // Concepto Personalizado: sin título arriba de la tabla, mostrar la tabla directamente
+  } else {
+    const tituloConceptos = periodoConsumoTexto
+      ? `PERÍODO DE CONSUMO: ${periodoConsumoTexto} | EMISIÓN: ${fechaEmisionMostrar}`
+      : `EMISIÓN: ${fechaEmisionMostrar}`;
     doc.setFont('helvetica', 'bold');
     doc.setFontSize(9.5);
     doc.setTextColor(15, 23, 42);
-    doc.text(`PERÍODO DE CONSUMO: ${periodoConsumoTexto}`, margin, y);
+    doc.text(tituloConceptos, margin, y);
     y += 4;
   }
 

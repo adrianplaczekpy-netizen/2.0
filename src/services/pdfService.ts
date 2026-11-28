@@ -13,10 +13,96 @@ import {
   TarifaConfig,
   Pago,
   MetodoPago,
+  TipoComprobantePago,
 } from '../types';
 import { formatGs } from './billingRules';
-import { EMPRESA_LEGAL, resolverNumeroFacturaParaMostrar } from './facturacionHelpers';
+import {
+  EMPRESA_LEGAL,
+  calcularIva10Incluido,
+  resolverNumeroComprobantePago,
+  resolverNumeroFacturaParaMostrar,
+} from './facturacionHelpers';
 import { LOGO_PNG_DATA_URL, LOGO_ASPECT_RATIO } from '../assets/logoData';
+
+/**
+ * Dibuja un ícono vectorial estilo WhatsApp (burbuja verde + auricular blanco)
+ * seguido del número de teléfono (ej. "0986 977 631") en Factura Legal y Recibo.
+ */
+function dibujarWhatsAppYTelefono(
+  doc: jsPDF,
+  x: number,
+  y: number,
+  options?: {
+    align?: 'left' | 'right';
+    fontSize?: number;
+    telefono?: string;
+  }
+): void {
+  const align = options?.align ?? 'left';
+  const fontSize = options?.fontSize ?? 7.8;
+  const telefono = options?.telefono ?? EMPRESA_LEGAL.whatsapp;
+
+  doc.setFont('helvetica', 'bold');
+  doc.setFontSize(fontSize);
+  const textW = doc.getTextWidth(telefono);
+
+  const r = 1.9;
+  const gap = 1.4;
+  const iconCx = align === 'right' ? x - textW - gap - r : x + r;
+  const iconCy = y - fontSize * 0.11;
+
+  // Burbuja circular verde WhatsApp (#25D366) + cola inferior izquierda
+  doc.setFillColor(37, 211, 102);
+  doc.setDrawColor(37, 211, 102);
+  doc.setLineWidth(0.15);
+  doc.circle(iconCx, iconCy, r, 'F');
+  doc.triangle(
+    iconCx - r * 0.85,
+    iconCy + r * 0.35,
+    iconCx - r * 1.12,
+    iconCy + r * 1.05,
+    iconCx - r * 0.18,
+    iconCy + r * 0.82,
+    'F'
+  );
+
+  // Auricular telefónico blanco vectorial dentro del círculo
+  doc.setDrawColor(255, 255, 255);
+  doc.setFillColor(255, 255, 255);
+  doc.setLineWidth(0.46);
+  doc.setLineCap('round');
+  doc.setLineJoin('round');
+  doc.lines(
+    [[0.15, 0.82, 0.55, 1.22, 1.28, 1.38]],
+    iconCx - 0.58,
+    iconCy - 0.72,
+    [1, 1],
+    'S'
+  );
+  doc.circle(iconCx - 0.48, iconCy - 0.66, 0.31, 'F');
+  doc.circle(iconCx + 0.66, iconCy + 0.62, 0.31, 'F');
+
+  // Número de teléfono
+  doc.setTextColor(15, 23, 42);
+  doc.setFont('helvetica', 'bold');
+  doc.setFontSize(fontSize);
+  const textX = align === 'right' ? x : iconCx + r + gap;
+  doc.text(telefono, textX, y, align === 'right' ? { align: 'right' } : undefined);
+  doc.setLineCap('butt');
+  doc.setLineJoin('miter');
+}
+
+/**
+ * Limpia la descripción de un concepto eliminando paréntesis y su contenido
+ * (ej. "Consumo de agua (12 m³)" -> "CONSUMO DE AGUA") y normaliza a MAYÚSCULAS.
+ */
+export function limpiarDescripcionConceptoPDF(texto: string): string {
+  return (texto || '')
+    .replace(/\s*\([^)]*\)/g, '')
+    .replace(/\s{2,}/g, ' ')
+    .trim()
+    .toUpperCase();
+}
 
 /**
  * Genera el documento PDF de la Boleta Oficial de Aguatería (Server-Side y Client-Side)
@@ -40,8 +126,21 @@ export function generarBoletaPDF(params: {
   cliente: Cliente;
   medidor: Medidor;
   detalles?: DetalleFactura[];
+  tipoComprobante?: TipoComprobantePago;
+  numeroRecibo?: string;
+  esConceptoPersonalizado?: boolean;
+  conceptoPersonalizado?: string;
+  montoPersonalizado?: number;
 }): jsPDF {
   const { factura, cliente, medidor } = params;
+  const tipoComprobante: TipoComprobantePago =
+    params.tipoComprobante === 'recibo_sin_valor_fiscal'
+      ? 'recibo_sin_valor_fiscal'
+      : 'factura_legal';
+  const esFacturaLegal = tipoComprobante === 'factura_legal';
+  const conceptoPersonalizado = (params.conceptoPersonalizado || '').trim();
+  const esConceptoPersonalizado = Boolean(params.esConceptoPersonalizado && conceptoPersonalizado);
+
   const doc = new jsPDF({
     orientation: 'portrait',
     unit: 'mm',
@@ -53,24 +152,34 @@ export function generarBoletaPDF(params: {
   const contentWidth = pageWidth - margin * 2;
   let y = 13;
 
-  // Encabezado institucional con Logo (src/assets/logo.png) + datos legales a la izquierda
+  // Encabezado institucional con Logo (src/assets/logo.png)
   const logoW = 44; // ~4.4 cm de ancho (proporción original 725x251 -> ~15.23 mm alto)
   const logoH = Number((logoW / LOGO_ASPECT_RATIO).toFixed(2));
   doc.addImage(LOGO_PNG_DATA_URL, 'PNG', margin, y, logoW, logoH);
 
-  const xDatosLegales = margin + logoW + 3.5;
-  doc.setTextColor(15, 23, 42);
-  doc.setFont('helvetica', 'bold');
-  doc.setFontSize(8);
-  doc.text(`RUC: ${EMPRESA_LEGAL.ruc}`, xDatosLegales, y + 2.5);
-  doc.setFont('helvetica', 'normal');
-  doc.setFontSize(7.5);
-  doc.text(`TIMBRADO N°: ${EMPRESA_LEGAL.timbrado}`, xDatosLegales, y + 6.3);
-  doc.text(`Inicio Vigencia: ${EMPRESA_LEGAL.inicioVigencia}`, xDatosLegales, y + 10.1);
-  doc.text(`Fin Vigencia: ${EMPRESA_LEGAL.finVigencia}`, xDatosLegales, y + 13.9);
+  // Solo Factura Legal muestra RUC, Timbrado y Vigencias; ambos incluyen WhatsApp + teléfono
+  if (esFacturaLegal) {
+    const xDatosLegales = margin + logoW + 3.5;
+    doc.setTextColor(15, 23, 42);
+    doc.setFont('helvetica', 'bold');
+    doc.setFontSize(8);
+    doc.text(`RUC: ${EMPRESA_LEGAL.ruc}`, xDatosLegales, y + 2.2);
+    doc.setFont('helvetica', 'normal');
+    doc.setFontSize(7.5);
+    doc.text(`TIMBRADO N°: ${EMPRESA_LEGAL.timbrado}`, xDatosLegales, y + 5.8);
+    doc.text(`Inicio Vigencia: ${EMPRESA_LEGAL.inicioVigencia}`, xDatosLegales, y + 9.4);
+    doc.text(`Fin Vigencia: ${EMPRESA_LEGAL.finVigencia}`, xDatosLegales, y + 13.0);
+    dibujarWhatsAppYTelefono(doc, xDatosLegales, y + 17.5, { align: 'left', fontSize: 7.8 });
+  } else {
+    dibujarWhatsAppYTelefono(doc, margin + logoW + 4, y + 8.8, { align: 'left', fontSize: 8.5 });
+  }
 
-  // Recuadro derecho: Número de Factura SET (001-002-XXXXXXX), Emisión, Período Facturado y Vencimiento
-  const numeroFacturaSET = resolverNumeroFacturaParaMostrar(factura);
+  // Recuadro derecho: 7 dígitos (Factura Legal) vs 4 dígitos (Recibo sin valor fiscal)
+  const numeroComprobante = resolverNumeroComprobantePago({
+    tipoComprobante,
+    factura,
+    numeroReciboActual: params.numeroRecibo,
+  });
   const boxW = 74;
   const boxH = 21.5;
   const boxX = pageWidth - margin - boxW;
@@ -83,7 +192,11 @@ export function generarBoletaPDF(params: {
   doc.setTextColor(15, 23, 42);
   doc.setFont('helvetica', 'bold');
   doc.setFontSize(9.5);
-  doc.text(`Factura N°: ${numeroFacturaSET}`, boxX + 3.5, boxY + 5);
+  doc.text(
+    `${esFacturaLegal ? 'Factura N°' : 'Recibo N°'}: ${numeroComprobante}`,
+    boxX + 3.5,
+    boxY + 5
+  );
 
   doc.setFont('helvetica', 'normal');
   doc.setFontSize(8);
@@ -116,14 +229,19 @@ export function generarBoletaPDF(params: {
   doc.text(`Zona: ${medidor.zona}`, margin + 95, y);
 
   y += 4.5;
-  doc.text(`Dirección del terreno: ${medidor.direccion}`, margin, y, { maxWidth: 90 });
+  const direccionClienteBoleta = (cliente.direccion || medidor.direccion || '--').trim();
+  const dirClienteLines = doc.splitTextToSize(`Dirección: ${direccionClienteBoleta}`, 88);
+  doc.text(dirClienteLines, margin, y);
   const textoPeriodo =
     factura.periodo_consumo && factura.periodo_consumo !== factura.periodo_facturado
       ? `Facturado: ${factura.periodo_facturado} (Consumo: ${factura.periodo_consumo})`
       : `Período facturado: ${factura.periodo_facturado}`;
   doc.text(textoPeriodo, margin + 95, y);
 
-  y += 4.5;
+  y += Math.max(4.5, dirClienteLines.length * 4.2);
+  if (medidor.direccion && medidor.direccion.trim() !== direccionClienteBoleta) {
+    doc.text(`Terreno: ${medidor.direccion}`, margin, y, { maxWidth: 88 });
+  }
   doc.setFont('helvetica', 'bold');
   doc.text(`Fecha de vencimiento: ${factura.fecha_vencimiento}`, margin + 95, y);
   doc.setFont('helvetica', 'normal');
@@ -205,13 +323,16 @@ export function generarBoletaPDF(params: {
   }
 
   // DETALLE DE CONCEPTOS (solo los que tienen monto > 0)
-  // Orden estricto: consumo de agua, deuda anterior, recargo por mora, otros trabajos (uno por línea si hay varios),
-  //                 cuota de conexión, pérdida financiada, reconexión.
-  doc.setFont('helvetica', 'bold');
-  doc.setFontSize(9);
-  doc.setTextColor(0, 0, 0);
-  doc.text('DETALLE DE CONCEPTOS', margin, y);
-  y += 4;
+  // Factura Legal estándar: muestra únicamente "PERÍODO DE CONSUMO: [mes]"
+  // Recibo sin valor fiscal y Concepto Personalizado: sin título arriba de la tabla
+  const periodoConsumoBoleta = factura.periodo_consumo || factura.periodo_facturado;
+  if (esFacturaLegal && !esConceptoPersonalizado && periodoConsumoBoleta) {
+    doc.setFont('helvetica', 'bold');
+    doc.setFontSize(9);
+    doc.setTextColor(0, 0, 0);
+    doc.text(`PERÍODO DE CONSUMO: ${periodoConsumoBoleta}`, margin, y);
+    y += 4;
+  }
 
   // Cabecera de la tabla de dos columnas: CONCEPTO | MONTO
   doc.setFillColor(245, 245, 245);
@@ -219,76 +340,98 @@ export function generarBoletaPDF(params: {
   doc.setFontSize(8);
   doc.text('CONCEPTO', margin + 3, y + 4.2);
   doc.text('MONTO', pageWidth - margin - 3, y + 4.2, { align: 'right' });
-  y += 8;
+  y += 10.5;
 
-  const ordenJerarquia: Record<string, number> = {
-    consumo_agua: 1,
-    deuda_anterior: 2,
-    mora: 3,
-    otros_trabajos: 4,
-    cuota_conexion: 5,
-    perdida_financiada: 6,
-    reconexion: 7,
-  };
+  const totalBoletaMostrar =
+    esConceptoPersonalizado && params.montoPersonalizado !== undefined
+      ? Math.round(params.montoPersonalizado)
+      : factura.total;
 
-  const detalles = factura.detalles && factura.detalles.length > 0
-    ? factura.detalles
-    : [
-        {
-          id: '1',
-          factura_id: factura.id,
-          concepto: 'consumo_agua' as const,
-          descripcion: `Consumo de agua potable (${factura.consumo_m3 || 0} m³)`,
-          monto: Math.round(factura.total * 0.98),
-        },
-        {
-          id: '2',
-          factura_id: factura.id,
-          concepto: 'erssan' as const,
-          descripcion: 'Aporte Ley ERSSAN (2%)',
-          monto: Math.round(factura.total * 0.02),
-        },
-      ];
+  if (esConceptoPersonalizado) {
+    // Concepto personalizado único (< 3 conceptos): sin líneas separadoras, sin ERSSAN 2% ni IVA 10%
+    const descMayus = limpiarDescripcionConceptoPDF(conceptoPersonalizado);
+    const descLines = doc.splitTextToSize(descMayus, contentWidth - 40);
+    const extraH = Math.max(0, descLines.length - 1) * 4.5;
 
-  // Separar conceptos del detalle respetando el orden y filtrando monto > 0
-  const conceptosSinErssan = detalles
-    .filter((d) => d.concepto !== 'erssan' && d.monto > 0)
-    .sort((a, b) => (ordenJerarquia[a.concepto] || 99) - (ordenJerarquia[b.concepto] || 99));
-
-  const detalleErssan = detalles.find((d) => d.concepto === 'erssan' && d.monto > 0);
-
-  // Imprimir cada concepto uno por línea
-  doc.setFontSize(8.5);
-  for (const item of conceptosSinErssan) {
-    doc.setFont('helvetica', 'normal');
-    doc.text(item.descripcion, margin + 3, y);
     doc.setFont('helvetica', 'bold');
-    doc.text(formatGs(item.monto), pageWidth - margin - 3, y, { align: 'right' });
+    doc.setFontSize(9);
+    doc.text(descLines, margin + 3, y);
+    doc.text(formatGs(totalBoletaMostrar), pageWidth - margin - 3, y, { align: 'right' });
+
+    y += extraH + 6.5;
+  } else {
+    const ordenJerarquia: Record<string, number> = {
+      consumo_agua: 1,
+      deuda_anterior: 2,
+      mora: 3,
+      otros_trabajos: 4,
+      cuota_conexion: 5,
+      perdida_financiada: 6,
+      reconexion: 7,
+    };
+
+    const detalles =
+      params.detalles && params.detalles.length > 0
+        ? params.detalles
+        : factura.detalles && factura.detalles.length > 0
+          ? factura.detalles
+          : [
+              {
+                id: '1',
+                factura_id: factura.id,
+                concepto: 'consumo_agua' as const,
+                descripcion: `Consumo de agua potable (${factura.consumo_m3 || 0} m³)`,
+                monto: Math.round(factura.total * 0.98),
+              },
+              {
+                id: '2',
+                factura_id: factura.id,
+                concepto: 'erssan' as const,
+                descripcion: 'Aporte Ley ERSSAN (2%)',
+                monto: Math.round(factura.total * 0.02),
+              },
+            ];
+
+    // Separar conceptos del detalle respetando el orden y filtrando monto > 0
+    const conceptosSinErssan = detalles
+      .filter((d) => d.concepto !== 'erssan' && d.monto > 0)
+      .sort((a, b) => (ordenJerarquia[a.concepto] || 99) - (ordenJerarquia[b.concepto] || 99));
+
+    const detalleErssan = detalles.find((d) => d.concepto === 'erssan' && d.monto > 0);
+
+    // Imprimir cada concepto uno por línea (limpiando paréntesis con regex)
+    doc.setFontSize(8.5);
+    for (const item of conceptosSinErssan) {
+      doc.setFont('helvetica', 'normal');
+      doc.text(limpiarDescripcionConceptoPDF(item.descripcion), margin + 3, y);
+      doc.setFont('helvetica', 'bold');
+      doc.text(formatGs(item.monto), pageWidth - margin - 3, y, { align: 'right' });
+      y += 5;
+    }
+
+    // Subtotal (suma de conceptos sin ERSSAN)
+    const subtotal = conceptosSinErssan.reduce((acc, curr) => acc + curr.monto, 0);
+    y += 1;
+    doc.setLineWidth(0.2);
+    doc.line(margin, y, pageWidth - margin, y);
+    y += 4.5;
+
+    doc.setFont('helvetica', 'bold');
+    doc.setFontSize(8.5);
+    doc.text('Subtotal:', margin + 3, y);
+    doc.text(formatGs(subtotal), pageWidth - margin - 3, y, { align: 'right' });
     y += 5;
-  }
 
-  // Subtotal (suma de conceptos sin ERSSAN)
-  const subtotal = conceptosSinErssan.reduce((acc, curr) => acc + curr.monto, 0);
-  y += 1;
-  doc.setLineWidth(0.2);
-  doc.line(margin, y, pageWidth - margin, y);
-  y += 4.5;
-
-  doc.setFont('helvetica', 'bold');
-  doc.setFontSize(8.5);
-  doc.text('Subtotal:', margin + 3, y);
-  doc.text(formatGs(subtotal), pageWidth - margin - 3, y, { align: 'right' });
-  y += 5;
-
-  // ERSSAN 2%
-  const baseErssanFallback = subtotal;
-  const montoErssan = detalleErssan ? detalleErssan.monto : Math.round(baseErssanFallback * 0.02);
-  if (montoErssan > 0) {
-    doc.setFont('helvetica', 'normal');
-    doc.text('Aporte ERSSAN (2%):', margin + 3, y);
-    doc.setFont('helvetica', 'bold');
-    doc.text(formatGs(montoErssan), pageWidth - margin - 3, y, { align: 'right' });
-    y += 5.5;
+    // ERSSAN 2%
+    const baseErssanFallback = subtotal;
+    const montoErssan = detalleErssan ? detalleErssan.monto : Math.round(baseErssanFallback * 0.02);
+    if (montoErssan > 0) {
+      doc.setFont('helvetica', 'normal');
+      doc.text('APORTE ERSSAN:', margin + 3, y);
+      doc.setFont('helvetica', 'bold');
+      doc.text(formatGs(montoErssan), pageWidth - margin - 3, y, { align: 'right' });
+      y += 5.5;
+    }
   }
 
   // Línea gruesa antes de Total
@@ -301,9 +444,23 @@ export function generarBoletaPDF(params: {
   doc.setFontSize(11);
   doc.text('TOTAL A PAGAR:', margin + 3, y);
   doc.setFontSize(13);
-  doc.text(formatGs(factura.total), pageWidth - margin - 3, y, { align: 'right' });
+  doc.text(formatGs(totalBoletaMostrar), pageWidth - margin - 3, y, { align: 'right' });
 
-  y += 12;
+  // Concepto informativo IVA 10% solo en Factura Legal estándar
+  if (esFacturaLegal && !esConceptoPersonalizado) {
+    y += 5;
+    doc.setFont('helvetica', 'normal');
+    doc.setFontSize(8);
+    doc.setTextColor(71, 85, 105);
+    doc.text('IVA 10%', margin + 3, y);
+    doc.setFont('helvetica', 'bold');
+    doc.text(formatGs(calcularIva10Incluido(totalBoletaMostrar)), pageWidth - margin - 3, y, {
+      align: 'right',
+    });
+    doc.setTextColor(0, 0, 0);
+  }
+
+  y += 10;
 
   // Pie: Datos de pago + "Gracias por su pago."
   doc.setDrawColor(200, 200, 200);
@@ -492,7 +649,7 @@ export function generarContratoPDF(params: {
 }
 
 export interface ComprobantePagoPDFParams {
-  factura: Factura;
+  factura?: Partial<Factura> | null;
   cliente: Cliente;
   medidor: Medidor;
   pago?: Partial<Pago> & { cobradorNombre?: string };
@@ -504,13 +661,18 @@ export interface ComprobantePagoPDFParams {
   metodoPago?: MetodoPago | string;
   cobradorNombre?: string;
   saldoRestante?: number;
+  tipoComprobante?: TipoComprobantePago;
+  esConceptoPersonalizado?: boolean;
+  conceptoPersonalizado?: string;
 }
 
 /**
- * Genera el Comprobante de Pago / Recibo de Caja en formato A5 vertical (148mm x 210mm).
- * Diseñado para impresoras térmicas o de recibos:
- * - Márgenes amplios (12mm), tipografía base legible (10pt-11pt) y TOTAL ABONADO destacado (15pt).
- * - Sin marca de agua gigante superpuesta: usa un sello compacto en la esquina superior derecha.
+ * Genera el Comprobante de Pago en formato A5 vertical (148mm x 210mm).
+ * Soporta:
+ * - Factura Legal: Logo + RUC, Timbrado, Vigencias y WhatsApp; número 001-002-XXXXXXX (7 dígitos); IVA 10%.
+ * - Recibo sin valor fiscal: Logo + WhatsApp (SIN RUC, Timbrado, Vigencias ni texto "SIN VALOR FISCAL"); número 001-002-XXXX (4 dígitos); SIN IVA 10%.
+ * - Concepto Personalizado: muestra únicamente el concepto manual en MAYÚSCULAS con línea sólida/lisa,
+ *   SIN ERSSAN 2% y SIN IVA 10%, siendo el total exacto el monto abonado e independiente de la boleta de agua.
  */
 export function generarComprobantePagoPDF(params: ComprobantePagoPDFParams): jsPDF {
   const { factura, cliente, medidor, pago } = params;
@@ -526,10 +688,27 @@ export function generarComprobantePagoPDF(params: ComprobantePagoPDFParams): jsP
   const contentWidth = pageWidth - margin * 2; // 124mm
   const xRight = pageWidth - margin;
 
+  const numeroReciboRef = (params.numeroRecibo || pago?.numero_recibo || '').trim();
+  const tipoComprobante: TipoComprobantePago =
+    params.tipoComprobante ||
+    pago?.tipo_comprobante ||
+    (/^001-002-\d{4}$/.test(numeroReciboRef) ? 'recibo_sin_valor_fiscal' : 'factura_legal');
+  const esFacturaLegal = tipoComprobante === 'factura_legal';
+
+  const conceptoPersonalizadoTexto = (
+    params.conceptoPersonalizado ??
+    pago?.concepto_personalizado ??
+    ''
+  ).trim();
+  const esConceptoPersonalizado = Boolean(
+    (params.esConceptoPersonalizado ?? pago?.es_concepto_personalizado) &&
+      conceptoPersonalizadoTexto
+  );
+
   const rawFecha =
     params.fechaPago ||
     pago?.fecha_pago ||
-    factura.fecha_pago ||
+    factura?.fecha_pago ||
     new Date().toISOString().split('T')[0];
   const fechaBase = rawFecha.includes('T')
     ? rawFecha.split('T')[0]
@@ -543,21 +722,24 @@ export function generarComprobantePagoPDF(params: ComprobantePagoPDFParams): jsP
     params.horaPago || horaExtraida || new Date().toTimeString().slice(0, 5);
   const fechaHoraTexto = `${fechaBase} ${horaTexto}`.trim();
 
+  const totalFacturaRef = Number(factura?.total ?? 0);
   const montoAbonado =
     params.montoAbonado !== undefined
       ? params.montoAbonado
       : pago?.monto !== undefined
         ? pago.monto
-        : factura.monto_pagado && factura.monto_pagado > 0
+        : factura?.monto_pagado && factura.monto_pagado > 0
           ? factura.monto_pagado
-          : factura.total;
+          : totalFacturaRef;
 
   const saldoActual =
-    params.saldoRestante !== undefined
-      ? params.saldoRestante
-      : factura.saldo_pendiente !== undefined
-        ? factura.saldo_pendiente
-        : Math.max(0, factura.total - montoAbonado);
+    esConceptoPersonalizado
+      ? 0
+      : params.saldoRestante !== undefined
+        ? params.saldoRestante
+        : factura?.saldo_pendiente !== undefined
+          ? factura.saldo_pendiente
+          : Math.max(0, totalFacturaRef - montoAbonado);
 
   const metodoRaw = (params.metodoPago || pago?.metodo_pago || 'efectivo').toLowerCase();
   const metodoLabels: Record<string, string> = {
@@ -573,19 +755,29 @@ export function generarComprobantePagoPDF(params: ComprobantePagoPDFParams): jsP
     pago?.cobrador_id ||
     'Caja Central';
 
-  const numeroFacturaSET = resolverNumeroFacturaParaMostrar(factura);
-  const periodoConsumoTexto = factura.periodo_consumo || factura.periodo_facturado;
+  const numeroComprobante = resolverNumeroComprobantePago({
+    tipoComprobante,
+    factura: factura
+      ? {
+          numero_factura: factura.numero_factura,
+          numero_boleta_medidor: factura.numero_boleta_medidor,
+        }
+      : null,
+    numeroReciboActual: numeroReciboRef,
+    esConceptoPersonalizado,
+  });
+  const periodoConsumoTexto = factura?.periodo_consumo || factura?.periodo_facturado;
 
   let y = 10;
 
-  // 1) Logo centrado más grande en la parte superior (5.4 cm x 1.87 cm aprox., x = 47..101 mm)
+  // 1) Logo centrado más grande en la parte superior
   const logoW = 54;
   const logoH = Number((logoW / LOGO_ASPECT_RATIO).toFixed(2));
   const logoX = Number(((pageWidth - logoW) / 2).toFixed(2));
   doc.addImage(LOGO_PNG_DATA_URL, 'PNG', logoX, y, logoW, logoH);
 
   // 2) Sello compacto verde "PAGADO" (sin fecha debajo) en esquina superior izquierda
-  const esPagoParcial = saldoActual > 0;
+  const esPagoParcial = !esConceptoPersonalizado && saldoActual > 0;
   const badgeW = esPagoParcial ? 29 : 25;
   const badgeH = 8.5;
   const badgeX = margin;
@@ -608,56 +800,80 @@ export function generarComprobantePagoPDF(params: ComprobantePagoPDFParams): jsP
     align: 'center',
   });
 
-  // Datos legales alineados a la derecha
-  doc.setTextColor(15, 23, 42);
-  doc.setFont('helvetica', 'bold');
-  doc.setFontSize(7.4);
-  doc.text(`RUC: ${EMPRESA_LEGAL.ruc}`, xRight, y + 3.2, { align: 'right' });
+  // Datos legales alineados a la derecha SOLO en Factura Legal; WhatsApp + teléfono en AMBOS
+  if (esFacturaLegal) {
+    doc.setTextColor(15, 23, 42);
+    doc.setFont('helvetica', 'bold');
+    doc.setFontSize(7.2);
+    doc.text(`RUC: ${EMPRESA_LEGAL.ruc}`, xRight, y + 2.6, { align: 'right' });
 
-  doc.setFont('helvetica', 'normal');
-  doc.setFontSize(6.9);
-  doc.setTextColor(51, 65, 85);
-  doc.text(`TIMBRADO N°: ${EMPRESA_LEGAL.timbrado}`, xRight, y + 7.0, { align: 'right' });
-  doc.text(`Inicio Vigencia: ${EMPRESA_LEGAL.inicioVigencia}`, xRight, y + 10.8, { align: 'right' });
-  doc.text(`Fin Vigencia: ${EMPRESA_LEGAL.finVigencia}`, xRight, y + 14.6, { align: 'right' });
+    doc.setFont('helvetica', 'normal');
+    doc.setFontSize(6.8);
+    doc.setTextColor(51, 65, 85);
+    doc.text(`TIMBRADO N°: ${EMPRESA_LEGAL.timbrado}`, xRight, y + 6.2, { align: 'right' });
+    doc.text(`Inicio Vigencia: ${EMPRESA_LEGAL.inicioVigencia}`, xRight, y + 9.8, { align: 'right' });
+    doc.text(`Fin Vigencia: ${EMPRESA_LEGAL.finVigencia}`, xRight, y + 13.4, { align: 'right' });
+    dibujarWhatsAppYTelefono(doc, xRight, y + 17.8, { align: 'right', fontSize: 7.4 });
+  } else {
+    dibujarWhatsAppYTelefono(doc, xRight, y + 9.4, { align: 'right', fontSize: 8.1 });
+  }
 
-  y += Math.max(logoH, badgeH + 2, 16) + 3.5;
+  y += Math.max(logoH, badgeH + 2, 19.5) + 3.5;
   doc.setDrawColor(148, 163, 184);
   doc.setLineWidth(0.4);
   doc.line(margin, y, xRight, y);
   y += 6;
 
-  // 3) Título único bien destacado
+  // 3) Título destacado
   doc.setTextColor(15, 23, 42);
   doc.setFont('helvetica', 'bold');
   doc.setFontSize(13);
-  doc.text('COMPROBANTE OFICIAL DE PAGO', pageWidth / 2, y, { align: 'center' });
+  doc.text(
+    esFacturaLegal ? 'COMPROBANTE OFICIAL DE PAGO' : 'COMPROBANTE DE PAGO',
+    pageWidth / 2,
+    y,
+    { align: 'center' }
+  );
 
   y += 4.5;
 
-  // 4) Recuadro estructurado: solo Factura N° (y Fecha/hora) a la izquierda; solo Emisión y Vencimiento a la derecha
+  // 4) Recuadro estructurado:
+  //    - Factura Legal estándar: número + fecha/hora a la izquierda, Emisión/Vencimiento a la derecha
+  //    - Recibo sin valor fiscal y Concepto Personalizado: lado derecho TOTALMENTE VACÍO
+  const direccionClienteMostrar = (cliente.direccion || medidor.direccion || '--').trim();
+  const fechaEmisionMostrar = factura?.fecha_emision ? factura.fecha_emision : fechaBase;
+  const metaBoxH = 14;
+
   doc.setFillColor(248, 250, 252);
   doc.setDrawColor(203, 213, 225);
   doc.setLineWidth(0.35);
-  doc.roundedRect(margin, y, contentWidth, 14, 1.5, 1.5, 'FD');
+  doc.roundedRect(margin, y, contentWidth, metaBoxH, 1.5, 1.5, 'FD');
 
   doc.setTextColor(15, 23, 42);
   doc.setFont('helvetica', 'bold');
   doc.setFontSize(9.5);
-  doc.text(`Factura N°: ${numeroFacturaSET}`, margin + 3.5, y + 5.4);
+  doc.text(
+    `${esFacturaLegal ? 'Factura N°' : 'Recibo N°'}: ${numeroComprobante}`,
+    margin + 3.5,
+    y + 5.4
+  );
 
   doc.setFont('helvetica', 'normal');
   doc.setFontSize(8.8);
   doc.text(`Fecha y hora: ${fechaHoraTexto}`, margin + 3.5, y + 10.6);
 
-  doc.setFontSize(8.8);
-  doc.setTextColor(51, 65, 85);
-  doc.text(`Emisión: ${factura.fecha_emision}`, xRight - 3.5, y + 5.4, { align: 'right' });
-  doc.text(`Vencimiento: ${factura.fecha_vencimiento}`, xRight - 3.5, y + 10.6, { align: 'right' });
+  if (esFacturaLegal && !esConceptoPersonalizado) {
+    doc.setFontSize(8.8);
+    doc.setTextColor(51, 65, 85);
+    doc.text(`Emisión: ${fechaEmisionMostrar}`, xRight - 3.5, y + 5.4, { align: 'right' });
+    if (factura?.fecha_vencimiento) {
+      doc.text(`Vencimiento: ${factura.fecha_vencimiento}`, xRight - 3.5, y + 10.6, { align: 'right' });
+    }
+  }
 
-  y += 19.5; // 14mm caja + 5.5mm separación
+  y += metaBoxH + 5.5;
 
-  // 5) Datos del Cliente y Medidor
+  // 5) Datos del Cliente y Medidor (dirección únicamente aquí; lado derecho del medidor libre)
   doc.setFont('helvetica', 'bold');
   doc.setFontSize(10.5);
   doc.setTextColor(15, 23, 42);
@@ -679,8 +895,14 @@ export function generarComprobantePagoPDF(params: ComprobantePagoPDFParams): jsP
   y += 5.5;
 
   doc.setFont('helvetica', 'bold');
+  doc.text('Dirección:', margin, y);
+  doc.setFont('helvetica', 'normal');
+  const direccionLines = doc.splitTextToSize(direccionClienteMostrar, contentWidth - 24);
+  doc.text(direccionLines, margin + 24, y);
+  y += Math.max(5.5, direccionLines.length * 4.8 + 0.8);
+
+  doc.setFont('helvetica', 'bold');
   doc.text(`Medidor N°: ${medidor.numero_medidor}`, margin, y);
-  doc.text(`Período de Consumo: ${periodoConsumoTexto}`, xRight, y, { align: 'right' });
   y += 6;
 
   doc.setDrawColor(203, 213, 225);
@@ -688,12 +910,16 @@ export function generarComprobantePagoPDF(params: ComprobantePagoPDFParams): jsP
   doc.line(margin, y, xRight, y);
   y += 6;
 
-  // 6) Detalle de conceptos en MAYÚSCULAS y líneas inferiores intercaladas estilo Excel
-  doc.setFont('helvetica', 'bold');
-  doc.setFontSize(10.5);
-  doc.setTextColor(15, 23, 42);
-  doc.text('DETALLE DE CONCEPTOS', margin, y);
-  y += 4;
+  // 6) Título de tabla de conceptos:
+  //    - Factura Legal estándar: muestra ÚNICAMENTE "PERÍODO DE CONSUMO: [mes]"
+  //    - Recibo sin valor fiscal y Concepto Personalizado: sin título arriba de la tabla
+  if (esFacturaLegal && !esConceptoPersonalizado && periodoConsumoTexto) {
+    doc.setFont('helvetica', 'bold');
+    doc.setFontSize(9.5);
+    doc.setTextColor(15, 23, 42);
+    doc.text(`PERÍODO DE CONSUMO: ${periodoConsumoTexto}`, margin, y);
+    y += 4;
+  }
 
   // Cabecera de tabla
   doc.setFillColor(241, 245, 249);
@@ -704,85 +930,123 @@ export function generarComprobantePagoPDF(params: ComprobantePagoPDFParams): jsP
   doc.text('MONTO', xRight - 3, y + 4.9, { align: 'right' });
   y += 11;
 
-  const ordenConceptos: Record<string, number> = {
-    consumo_agua: 1,
-    deuda_anterior: 2,
-    mora: 3,
-    otros_trabajos: 4,
-    cuota_conexion: 5,
-    perdida_financiada: 6,
-    reconexion: 7,
-    erssan: 8,
-  };
+  const conceptoMaxWidth = contentWidth - 34; // Reserva espacio para montos alineados a la derecha
 
-  const detallesFuente =
-    (params.detalles && params.detalles.length > 0
-      ? params.detalles
-      : factura.detalles && factura.detalles.length > 0
-        ? factura.detalles
-        : [
-            {
-              id: '1',
-              factura_id: factura.id,
-              concepto: 'consumo_agua' as const,
-              descripcion: `Consumo de agua potable (${factura.consumo_m3 ?? 0} m³)`,
-              monto: factura.total,
-            },
-          ]
+  if (esConceptoPersonalizado) {
+    // MODO CONCEPTO PERSONALIZADO (1 solo concepto -> sin líneas divisorias):
+    // Limpia paréntesis con regex y muestra en MAYÚSCULAS; NO calcula ERSSAN 2% ni IVA 10%.
+    const conceptoMayuscula = limpiarDescripcionConceptoPDF(conceptoPersonalizadoTexto);
+    const descLines = doc.splitTextToSize(conceptoMayuscula, conceptoMaxWidth);
+    const extraLinesHeight = Math.max(0, descLines.length - 1) * 4.8;
+    const rowAdvance = extraLinesHeight + 7.5;
+
+    doc.setFont('helvetica', 'bold');
+    doc.setFontSize(9.8);
+    doc.setTextColor(30, 41, 59);
+    doc.text(descLines, margin + 3, y);
+    doc.text(formatGs(montoAbonado), xRight - 3, y, { align: 'right' });
+
+    y += rowAdvance;
+  } else {
+    const ordenConceptos: Record<string, number> = {
+      consumo_agua: 1,
+      deuda_anterior: 2,
+      mora: 3,
+      otros_trabajos: 4,
+      cuota_conexion: 5,
+      perdida_financiada: 6,
+      reconexion: 7,
+      erssan: 8,
+    };
+
+    const detallesFuente = (
+      params.detalles && params.detalles.length > 0
+        ? params.detalles
+        : factura?.detalles && factura.detalles.length > 0
+          ? factura.detalles
+          : [
+              {
+                id: '1',
+                factura_id: factura?.id || 'sin-factura',
+                concepto: 'consumo_agua' as const,
+                descripcion: `Consumo de agua potable (${factura?.consumo_m3 ?? 0} m³)`,
+                monto: totalFacturaRef,
+              },
+            ]
     )
       .filter((d) => d.monto > 0)
       .sort((a, b) => (ordenConceptos[a.concepto] || 99) - (ordenConceptos[b.concepto] || 99));
 
-  const conceptoMaxWidth = contentWidth - 34; // Reserva espacio para montos alineados a la derecha
+    const conceptosFilas: Array<{ descripcion: string; monto: number; esInformativoIva?: boolean }> =
+      detallesFuente.map((d) => ({
+        descripcion: limpiarDescripcionConceptoPDF(d.descripcion || ''),
+        monto: d.monto,
+      }));
 
-  for (let idx = 0; idx < detallesFuente.length; idx++) {
-    const item = detallesFuente[idx];
-    const conceptoMayuscula = (item.descripcion || '').toUpperCase();
-    const descLines = doc.splitTextToSize(conceptoMayuscula, conceptoMaxWidth);
-    const extraLinesHeight = Math.max(0, descLines.length - 1) * 4.8;
-    const borderY = y + extraLinesHeight + 2.0;
-    const rowAdvance = extraLinesHeight + 6.8;
-
-    if (y + rowAdvance > pageHeight - 52) {
-      doc.addPage('a5', 'portrait');
-      y = margin + 4;
+    // Factura Legal estándar incluye al final el concepto informativo "IVA 10%" = Total / 11
+    if (esFacturaLegal) {
+      const totalBaseIva = montoAbonado > 0 ? montoAbonado : totalFacturaRef;
+      conceptosFilas.push({
+        descripcion: 'IVA 10%',
+        monto: calcularIva10Incluido(totalBaseIva),
+        esInformativoIva: true,
+      });
     }
 
-    doc.setFont('helvetica', 'normal');
-    doc.setFontSize(9.8);
-    doc.setTextColor(30, 41, 59);
-    doc.text(descLines, margin + 3, y);
+    // Solo dibujar líneas divisorias cuando existan 3 o más conceptos
+    const debeDibujarLineas = conceptosFilas.length >= 3;
 
-    doc.setFont('helvetica', 'bold');
-    doc.text(formatGs(item.monto), xRight - 3, y, { align: 'right' });
+    for (let idx = 0; idx < conceptosFilas.length; idx++) {
+      const item = conceptosFilas[idx];
+      const descLines = doc.splitTextToSize(item.descripcion, conceptoMaxWidth);
+      const extraLinesHeight = Math.max(0, descLines.length - 1) * 4.8;
+      const borderY = y + extraLinesHeight + 2.0;
+      const rowAdvance = extraLinesHeight + 6.8;
 
-    // Líneas inferiores intercaladas tipo Excel:
-    // 1° concepto (idx=0): sin línea, 2° (idx=1): con línea, 3° (idx=2): sin línea, 4° (idx=3): con línea...
-    if (idx % 2 === 1) {
-      doc.setDrawColor(148, 163, 184);
-      doc.setLineWidth(0.3);
-      doc.line(margin, borderY, xRight, borderY);
+      if (y + rowAdvance > pageHeight - 52) {
+        doc.addPage('a5', 'portrait');
+        y = margin + 4;
+      }
+
+      doc.setFont('helvetica', 'normal');
+      doc.setFontSize(item.esInformativoIva ? 9.0 : 9.8);
+      if (item.esInformativoIva) {
+        doc.setTextColor(71, 85, 105);
+      } else {
+        doc.setTextColor(30, 41, 59);
+      }
+      doc.text(descLines, margin + 3, y);
+
+      doc.setFont('helvetica', 'bold');
+      doc.text(formatGs(item.monto), xRight - 3, y, { align: 'right' });
+
+      // Líneas inferiores intercaladas tipo Excel: solo si hay 3 o más conceptos
+      if (debeDibujarLineas && idx % 2 === 1) {
+        doc.setDrawColor(148, 163, 184);
+        doc.setLineWidth(0.3);
+        doc.line(margin, borderY, xRight, borderY);
+      }
+
+      y += rowAdvance;
     }
 
-    y += rowAdvance;
-  }
-
-  if (esPagoParcial) {
-    y += 1.5;
-    doc.setDrawColor(226, 232, 240);
-    doc.line(margin, y, xRight, y);
-    y += 5;
-    doc.setFontSize(10);
-    doc.setFont('helvetica', 'normal');
-    doc.setTextColor(71, 85, 105);
-    doc.text('Total factura:', margin + 3, y);
-    doc.text(formatGs(factura.total), xRight - 3, y, { align: 'right' });
-    y += 5.5;
-    doc.setFont('helvetica', 'bold');
-    doc.setTextColor(180, 83, 9);
-    doc.text('Saldo pendiente:', margin + 3, y);
-    doc.text(formatGs(saldoActual), xRight - 3, y, { align: 'right' });
-    y += 3;
+    if (esPagoParcial) {
+      y += 1.5;
+      doc.setDrawColor(226, 232, 240);
+      doc.line(margin, y, xRight, y);
+      y += 5;
+      doc.setFontSize(10);
+      doc.setFont('helvetica', 'normal');
+      doc.setTextColor(71, 85, 105);
+      doc.text('Total factura:', margin + 3, y);
+      doc.text(formatGs(totalFacturaRef), xRight - 3, y, { align: 'right' });
+      y += 5.5;
+      doc.setFont('helvetica', 'bold');
+      doc.setTextColor(180, 83, 9);
+      doc.text('Saldo pendiente:', margin + 3, y);
+      doc.text(formatGs(saldoActual), xRight - 3, y, { align: 'right' });
+      y += 3;
+    }
   }
 
   y += 3;
@@ -824,7 +1088,7 @@ export function generarComprobantePagoPDF(params: ComprobantePagoPDFParams): jsP
   doc.text(cobradorLines, margin + 38, y);
   y += Math.max(7, cobradorLines.length * 4.8 + 3);
 
-  // Pie del comprobante
+  // Pie del comprobante (omite RUC cuando es Recibo sin valor fiscal)
   doc.setDrawColor(203, 213, 225);
   doc.setLineWidth(0.3);
   doc.line(margin, y, xRight, y);
@@ -839,7 +1103,10 @@ export function generarComprobantePagoPDF(params: ComprobantePagoPDFParams): jsP
   doc.setFont('helvetica', 'normal');
   doc.setFontSize(9);
   doc.setTextColor(71, 85, 105);
-  doc.text(`Pozo Artesiano San Gabriel (${EMPRESA_LEGAL.titular}) • RUC: ${EMPRESA_LEGAL.ruc}`, pageWidth / 2, y, {
+  const lineaPieEmpresa = esFacturaLegal
+    ? `Pozo Artesiano San Gabriel (${EMPRESA_LEGAL.titular}) • RUC: ${EMPRESA_LEGAL.ruc}`
+    : `Pozo Artesiano San Gabriel (${EMPRESA_LEGAL.titular})`;
+  doc.text(lineaPieEmpresa, pageWidth / 2, y, {
     align: 'center',
   });
 

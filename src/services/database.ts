@@ -23,6 +23,7 @@ import {
   ConsumoZonaReport,
   ReporteRecaudacionDetalle,
   OpcionesReconexion,
+  TipoComprobantePago,
 } from '../types';
 import {
   TARIFAS_DEFAULT,
@@ -57,7 +58,11 @@ import {
   validarSolicitudFacturaIndividual,
   calcularSiguienteSecuencialFactura,
   extraerSecuencialFacturaSET,
+  formatearNumeroFactura,
   formatearNumeroFacturaSET,
+  generarSiguienteNumeroFacturaLegal7Digitos,
+  generarSiguienteNumeroRecibo4Digitos,
+  resolverNumeroFacturaParaMostrar,
 } from './facturacionHelpers';
 import { generarFotoPlaceholder } from '../utils/imageCompressor';
 import {
@@ -546,15 +551,30 @@ class DatabaseEngine {
         };
       });
 
-      const pagos: Pago[] = (pagosRes.data || []).map((p: any) => ({
-        id: p.id,
-        factura_id: p.factura_id,
-        fecha_pago: p.fecha_pago,
-        monto: Number(p.monto_pagado || p.monto || 0),
-        metodo_pago: p.metodo || p.metodo_pago || 'efectivo',
-        numero_recibo: p.numero_comprobante || p.numero_recibo || '',
-        cobrador_id: p.cajero || p.cobrador_id || 'caja',
-      }));
+      const pagos: Pago[] = (pagosRes.data || []).map((p: any) => {
+        const numRecibo = p.numero_comprobante || p.numero_recibo || '';
+        const tipoComprobante: TipoComprobantePago =
+          p.tipo_comprobante === 'recibo_sin_valor_fiscal' || p.tipo_comprobante === 'factura_legal'
+            ? p.tipo_comprobante
+            : /^001-002-\d{4}$/.test(String(numRecibo).trim())
+              ? 'recibo_sin_valor_fiscal'
+              : 'factura_legal';
+        return {
+          id: p.id,
+          factura_id: p.factura_id || null,
+          cliente_id: p.cliente_id || null,
+          medidor_id: p.medidor_id || null,
+          fecha_pago: p.fecha_pago,
+          monto: Number(p.monto_pagado || p.monto || 0),
+          metodo_pago: p.metodo || p.metodo_pago || 'efectivo',
+          numero_recibo: numRecibo,
+          cobrador_id: p.cajero || p.cobrador_id || 'caja',
+          tipo_comprobante: tipoComprobante,
+          es_concepto_personalizado: Boolean(p.es_concepto_personalizado),
+          concepto_personalizado: p.concepto_personalizado || null,
+          created_at: p.created_at || null,
+        };
+      });
 
       const cargos_pendientes: CargoPendiente[] = (cargosRes.data || []).map((cg: any) => {
         const medidorRel = medidores.find((m) => m.id === cg.medidor_id);
@@ -3684,59 +3704,245 @@ class DatabaseEngine {
   }
 
   /**
+   * Devuelve el siguiente número correlativo de 4 dígitos para Recibo sin valor fiscal (001-002-XXXX).
+   */
+  public getSiguienteNumeroReciboSinValorFiscal(): string {
+    return generarSiguienteNumeroRecibo4Digitos(this.data.pagos);
+  }
+
+  /**
+   * Devuelve el siguiente número de 7 dígitos (001-002-XXXXXXX) para cobros independientes con Factura Legal.
+   */
+  public getSiguienteNumeroFacturaLegalIndependiente(): string {
+    return generarSiguienteNumeroFacturaLegal7Digitos(this.data.facturas, this.data.pagos);
+  }
+
+  /**
+   * Devuelve el número oficial de 7 dígitos (001-002-XXXXXXX) de la factura a cobrar,
+   * o el siguiente correlativo independiente si es Concepto Personalizado.
+   */
+  public getNumeroFacturaParaCobro(facturaId?: string | null, esConceptoPersonalizado = false): string {
+    if (esConceptoPersonalizado || !facturaId) {
+      return this.getSiguienteNumeroFacturaLegalIndependiente();
+    }
+    const factura = this.data.facturas.find((f) => f.id === facturaId);
+    if (!factura) {
+      return this.getSiguienteNumeroFacturaLegalIndependiente();
+    }
+    if (factura.numero_factura && factura.numero_factura.trim()) {
+      return factura.numero_factura.trim();
+    }
+    return resolverNumeroFacturaParaMostrar(factura);
+  }
+
+  /**
+   * Resuelve el número único del comprobante para `pagos.numero_recibo` según el tipo elegido:
+   * - `recibo_sin_valor_fiscal`: secuencia independiente de 4 dígitos (`001-002-0001`, `001-002-0002`, ...).
+   * - `factura_legal` con Concepto Personalizado (independiente): nuevo correlativo de 7 dígitos (`001-002-XXXXXXX`).
+   * - `factura_legal` de factura de agua: utiliza el número oficial de la factura (`001-002-XXXXXXX`), o sufijo `-P2` si ya hubo pago parcial.
+   */
+  private resolverNumeroComprobantePago(params: {
+    tipoComprobante: TipoComprobantePago;
+    factura?: Factura | null;
+    numeroReciboExplicito?: string;
+    esConceptoPersonalizado?: boolean;
+  }): string {
+    const existingSet = new Set(
+      this.data.pagos.map((p) => (p.numero_recibo || '').trim().toUpperCase()).filter(Boolean)
+    );
+
+    if (params.tipoComprobante === 'recibo_sin_valor_fiscal') {
+      const explicito = (params.numeroReciboExplicito || '').trim();
+      if (/^001-002-\d{4}$/.test(explicito) && !existingSet.has(explicito.toUpperCase())) {
+        return explicito;
+      }
+      return generarSiguienteNumeroRecibo4Digitos(this.data.pagos);
+    }
+
+    if (params.esConceptoPersonalizado || !params.factura) {
+      const explicito = (params.numeroReciboExplicito || '').trim().slice(0, 30);
+      if (explicito && !existingSet.has(explicito.toUpperCase())) {
+        return explicito;
+      }
+      return this.getSiguienteNumeroFacturaLegalIndependiente();
+    }
+
+    if (!params.factura.numero_factura || !params.factura.numero_factura.trim()) {
+      params.factura.numero_factura = formatearNumeroFacturaSET(
+        calcularSiguienteSecuencialFactura(this.data.facturas)
+      );
+    }
+
+    const explicito = (params.numeroReciboExplicito || '').trim().slice(0, 30);
+    if (explicito) {
+      return explicito;
+    }
+
+    const base7 = resolverNumeroFacturaParaMostrar(params.factura).slice(0, 30);
+    if (!existingSet.has(base7.toUpperCase())) {
+      return base7;
+    }
+
+    let suffix = 2;
+    let candidate = `${base7.slice(0, 26)}-P${suffix}`;
+    while (existingSet.has(candidate.toUpperCase())) {
+      suffix += 1;
+      candidate = `${base7.slice(0, 26)}-P${suffix}`;
+    }
+    return candidate;
+  }
+
+  /**
    * Registro de Pago en Caja (Cobrador):
-   * - Soporta pago total o parcial por factura.
-   * - Actualiza saldo y estado de la factura.
-   * - Si la factura queda pagada y tenía cuotas de planes_financiamiento, avanza cuotas_pagadas.
-   * - Si un medidor tiene todas sus facturas pagadas, pasa de moroso o pendiente_corte a activo automáticamente.
+   * - Cobro estándar de factura: actualiza saldo_pendiente, estado de la factura y estado del medidor.
+   * - Cobro con Concepto Personalizado: cobro TOTALMENTE INDEPENDIENTE con factura_id = null,
+   *   asociado únicamente a cliente_id y medidor_id, SIN modificar el saldo_pendiente ni el estado de ninguna boleta de agua.
    */
   public registrarCobro(params: {
-    facturaId: string;
+    facturaId?: string | null;
+    clienteId?: string;
+    medidorId?: string;
     monto: number;
     metodoPago: MetodoPago;
     cobradorId?: string;
+    tipoComprobante?: TipoComprobantePago;
+    esConceptoPersonalizado?: boolean;
+    conceptoPersonalizado?: string;
   }): {
     pago: Pago;
-    factura: Factura;
+    factura: Factura | null;
     estadoMedidorActualizado: EstadoMedidor;
     saldoRestante: number;
     medidorPasoAActivo: boolean;
     salioDePendienteCorte: boolean;
     eraTerceraBoleta: boolean;
   } {
-    const factura = this.data.facturas.find((f) => f.id === params.facturaId);
-    if (!factura) {
+    const tipoComprobante: TipoComprobantePago =
+      params.tipoComprobante === 'recibo_sin_valor_fiscal'
+        ? 'recibo_sin_valor_fiscal'
+        : 'factura_legal';
+    const esConceptoPersonalizado = Boolean(params.esConceptoPersonalizado);
+    const conceptoPersonalizado = esConceptoPersonalizado
+      ? (params.conceptoPersonalizado || '').trim()
+      : null;
+
+    if (esConceptoPersonalizado && !conceptoPersonalizado) {
+      throw new Error('Debe ingresar la descripción del concepto personalizado.');
+    }
+
+    const factura = params.facturaId
+      ? this.data.facturas.find((f) => f.id === params.facturaId) || null
+      : null;
+
+    if (!esConceptoPersonalizado && !factura) {
       throw new Error('Factura no encontrada');
     }
 
-    const medidor = this.data.medidores.find((m) => m.id === factura.medidor_id);
+    const medidorIdRef = params.medidorId || factura?.medidor_id;
+    const medidor = this.data.medidores.find((m) => m.id === medidorIdRef);
     if (!medidor) {
       throw new Error('Medidor asociado no encontrado');
     }
+    const clienteIdFinal = params.clienteId || factura?.cliente_id || medidor.cliente_id;
 
-    if (factura.estado === 'anulada') {
+    const montoCobrado = Math.round(params.monto);
+    if (isNaN(montoCobrado) || montoCobrado <= 0) {
+      throw new Error('El monto a pagar debe ser mayor a 0 Gs.');
+    }
+
+    const ahora = new Date().toISOString().split('T')[0];
+
+    // MODO CONCEPTO PERSONALIZADO: totalmente independiente (factura_id = null, no toca deuda de agua)
+    if (esConceptoPersonalizado) {
+      const numeroComprobante = this.resolverNumeroComprobantePago({
+        tipoComprobante,
+        factura: null,
+        esConceptoPersonalizado: true,
+      });
+
+      const pago: Pago = {
+        id: generarUUID(),
+        factura_id: null,
+        cliente_id: clienteIdFinal,
+        medidor_id: medidor.id,
+        fecha_pago: ahora,
+        monto: montoCobrado,
+        metodo_pago: params.metodoPago,
+        numero_recibo: numeroComprobante,
+        cobrador_id: params.cobradorId || 'cobrador-caja',
+        tipo_comprobante: tipoComprobante,
+        es_concepto_personalizado: true,
+        concepto_personalizado: conceptoPersonalizado,
+        created_at: new Date().toISOString(),
+      };
+      this.data.pagos.unshift(pago);
+
+      if (supabase && isSupabaseConfigured) {
+        const sb = supabase;
+        const esUuidValido = (v?: string | null) =>
+          Boolean(v && /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(v));
+
+        sb.auth.getSession().then(async ({ data: { session } }) => {
+          const cobradorUuid = esUuidValido(pago.cobrador_id) ? pago.cobrador_id : session?.user?.id;
+          if (!cobradorUuid) return;
+          pago.cobrador_id = cobradorUuid;
+
+          const { error: pagoErr } = await sb.from('pagos').insert({
+            id: pago.id,
+            factura_id: null,
+            cliente_id: clienteIdFinal,
+            medidor_id: medidor.id,
+            fecha_pago: pago.fecha_pago,
+            monto: pago.monto,
+            metodo_pago: pago.metodo_pago,
+            numero_recibo: pago.numero_recibo,
+            cobrador_id: cobradorUuid,
+            tipo_comprobante: tipoComprobante,
+            es_concepto_personalizado: true,
+            concepto_personalizado: conceptoPersonalizado,
+          });
+          if (pagoErr) {
+            console.warn('[DatabaseEngine] Error persistiendo pago personalizado en Supabase:', pagoErr);
+          }
+        });
+      }
+
+      this.saveData(this.data);
+      const saldoOriginal = factura
+        ? (factura.saldo_pendiente ?? factura.saldo ?? factura.total)
+        : 0;
+
+      return {
+        pago,
+        factura,
+        estadoMedidorActualizado: medidor.estado,
+        saldoRestante: saldoOriginal,
+        medidorPasoAActivo: false,
+        salioDePendienteCorte: false,
+        eraTerceraBoleta: Boolean(factura?.es_tercera_boleta),
+      };
+    }
+
+    // MODO ESTÁNDAR DE FACTURA DE AGUA
+    const facturaSegura = factura!;
+    if (facturaSegura.estado === 'anulada') {
       throw new Error('No se puede registrar un pago sobre una factura anulada.');
     }
 
-    if (factura.estado === 'refinanciada') {
+    if (facturaSegura.estado === 'refinanciada') {
       throw new Error('No se puede cobrar una factura refinanciada/consolidada en una factura posterior.');
     }
 
-    if (factura.estado === 'pagada') {
+    if (facturaSegura.estado === 'pagada') {
       throw new Error('Esta factura ya se encuentra totalmente cancelada.');
     }
 
     const saldoActual =
-      factura.saldo_pendiente !== undefined
-        ? factura.saldo_pendiente
-        : factura.saldo !== undefined
-          ? factura.saldo
-          : factura.total;
-    const montoCobrado = Math.round(params.monto);
-
-    if (isNaN(montoCobrado) || montoCobrado <= 0) {
-      throw new Error('El monto a pagar debe ser mayor a 0 Gs.');
-    }
+      facturaSegura.saldo_pendiente !== undefined
+        ? facturaSegura.saldo_pendiente
+        : facturaSegura.saldo !== undefined
+          ? facturaSegura.saldo
+          : facturaSegura.total;
 
     if (montoCobrado > saldoActual) {
       throw new Error(
@@ -3744,20 +3950,22 @@ class DatabaseEngine {
       );
     }
 
-    const ahora = new Date().toISOString().split('T')[0];
-    const nuevoMontoPagado = (factura.monto_pagado || 0) + montoCobrado;
-    const nuevoSaldo = Math.max(0, factura.total - nuevoMontoPagado);
+    const nuevoMontoPagado = Math.min(
+      facturaSegura.total,
+      (facturaSegura.monto_pagado || 0) + montoCobrado
+    );
+    const nuevoSaldo = Math.max(0, facturaSegura.total - nuevoMontoPagado);
 
-    factura.monto_pagado = nuevoMontoPagado;
-    factura.saldo_pendiente = nuevoSaldo;
-    factura.saldo = nuevoSaldo;
+    facturaSegura.monto_pagado = nuevoMontoPagado;
+    facturaSegura.saldo_pendiente = nuevoSaldo;
+    facturaSegura.saldo = nuevoSaldo;
 
     if (nuevoSaldo === 0) {
-      factura.estado = 'pagada';
-      factura.fecha_pago = ahora;
+      facturaSegura.estado = 'pagada';
+      facturaSegura.fecha_pago = ahora;
 
       // Avanzar cuotas de planes de financiamiento al PAGAR la factura
-      const detallesPlan = (factura.detalles || []).filter(
+      const detallesPlan = (facturaSegura.detalles || []).filter(
         (d) => d.concepto === 'cuota_conexion' || d.concepto === 'perdida_financiada'
       );
 
@@ -3785,16 +3993,28 @@ class DatabaseEngine {
       }
     }
 
+    const numeroComprobante = this.resolverNumeroComprobantePago({
+      tipoComprobante,
+      factura: facturaSegura,
+      esConceptoPersonalizado: false,
+    });
+
     const pago: Pago = {
       id: generarUUID(),
-      factura_id: factura.id,
+      factura_id: facturaSegura.id,
+      cliente_id: clienteIdFinal,
+      medidor_id: medidor.id,
       fecha_pago: ahora,
       monto: montoCobrado,
       metodo_pago: params.metodoPago,
-      numero_recibo: `REC-${Date.now().toString().slice(-6)}-${Math.floor(Math.random() * 100)}`,
+      numero_recibo: numeroComprobante,
       cobrador_id: params.cobradorId || 'cobrador-caja',
+      tipo_comprobante: tipoComprobante,
+      es_concepto_personalizado: false,
+      concepto_personalizado: null,
+      created_at: new Date().toISOString(),
     };
-    this.data.pagos.push(pago);
+    this.data.pagos.unshift(pago);
 
     const estadoAnterior = medidor.estado;
 
@@ -3808,7 +4028,6 @@ class DatabaseEngine {
     );
 
     if (facturasRestantes.length === 0) {
-      // Si un medidor tiene todas sus facturas activas pagadas (las refinanciadas quedan con saldo 0), pasa a activo
       if (medidor.estado !== 'cortado' && medidor.estado !== 'retirado') {
         medidor.estado = 'activo';
       }
@@ -3823,7 +4042,7 @@ class DatabaseEngine {
       }
     }
 
-    // Persistir cobro en Supabase (el trigger SECURITY DEFINER actualiza saldo_pendiente/estado en facturas y medidores)
+    // Persistir cobro en Supabase
     if (supabase && isSupabaseConfigured) {
       const sb = supabase;
       const esUuidValido = (v?: string | null) =>
@@ -3837,7 +4056,7 @@ class DatabaseEngine {
         }
         pago.cobrador_id = cobradorUuid;
 
-        const { error: pagoErr } = await sb.from('pagos').insert({
+        const basePayload = {
           id: pago.id,
           factura_id: pago.factura_id,
           fecha_pago: pago.fecha_pago,
@@ -3845,7 +4064,26 @@ class DatabaseEngine {
           metodo_pago: pago.metodo_pago,
           numero_recibo: pago.numero_recibo,
           cobrador_id: cobradorUuid,
+        };
+
+        let { error: pagoErr } = await sb.from('pagos').insert({
+          ...basePayload,
+          cliente_id: clienteIdFinal,
+          medidor_id: medidor.id,
+          tipo_comprobante: tipoComprobante,
+          es_concepto_personalizado: false,
+          concepto_personalizado: null,
         });
+
+        if (
+          pagoErr &&
+          (pagoErr.code === '42703' ||
+            pagoErr.code === 'PGRST204' ||
+            /column|schema cache/i.test(pagoErr.message || ''))
+        ) {
+          const retryRes = await sb.from('pagos').insert(basePayload);
+          pagoErr = retryRes.error;
+        }
 
         if (pagoErr) {
           console.warn('[DatabaseEngine] Error persistiendo pago en Supabase:', pagoErr);
@@ -3860,75 +4098,99 @@ class DatabaseEngine {
 
     return {
       pago,
-      factura,
+      factura: facturaSegura,
       estadoMedidorActualizado: medidor.estado,
       saldoRestante: nuevoSaldo,
       medidorPasoAActivo,
       salioDePendienteCorte,
-      eraTerceraBoleta: Boolean(factura.es_tercera_boleta),
+      eraTerceraBoleta: Boolean(facturaSegura.es_tercera_boleta),
     };
   }
 
   /**
-   * Registro de Pago asíncrono (para UI de Ficha de Factura):
-   * - Acepta fechaPago y numeroRecibo editables.
-   * - Espera confirmación real de Supabase (donde el trigger procesar_pago_factura
-   *   actualiza saldo_pendiente, estado de la factura y estado del medidor).
-   * - No corrompe el estado local si Supabase rechaza el insert.
+   * Registro de Pago asíncrono (para Modal de Cobro y Ficha de Factura):
+   * - Soporta Factura Legal (001-002-XXXXXXX, 7 dígitos) y Recibo sin valor fiscal (001-002-XXXX, 4 dígitos).
+   * - Cobro con Concepto Personalizado: funciona TOTALMENTE INDEPENDIENTE con factura_id = null,
+   *   guardando cliente_id y medidor_id sin tocar ni descontar el saldo_pendiente de ninguna boleta de agua.
+   * - Cobro estándar de factura: espera confirmación real de Supabase (trigger procesar_pago_factura).
    */
   public async registrarCobroAsync(params: {
-    facturaId: string;
+    facturaId?: string | null;
+    clienteId?: string;
+    medidorId?: string;
     monto: number;
     metodoPago: MetodoPago;
     fechaPago?: string;
     numeroRecibo?: string;
     cobradorId?: string;
     cobradorNombre?: string;
+    tipoComprobante?: TipoComprobantePago;
+    esConceptoPersonalizado?: boolean;
+    conceptoPersonalizado?: string;
     clientOverride?: any;
   }): Promise<{
     pago: Pago;
-    factura: Factura;
+    factura: Factura | null;
     estadoMedidorActualizado: EstadoMedidor;
     saldoRestante: number;
     medidorPasoAActivo: boolean;
     salioDePendienteCorte: boolean;
     eraTerceraBoleta: boolean;
   }> {
-    const factura = this.data.facturas.find((f) => f.id === params.facturaId);
-    if (!factura) {
+    const tipoComprobante: TipoComprobantePago =
+      params.tipoComprobante === 'recibo_sin_valor_fiscal'
+        ? 'recibo_sin_valor_fiscal'
+        : 'factura_legal';
+    const esConceptoPersonalizado = Boolean(params.esConceptoPersonalizado);
+    const conceptoPersonalizado = esConceptoPersonalizado
+      ? (params.conceptoPersonalizado || '').trim()
+      : null;
+
+    if (esConceptoPersonalizado && !conceptoPersonalizado) {
+      throw new Error('Debe ingresar la descripción del concepto personalizado.');
+    }
+
+    const factura = params.facturaId
+      ? this.data.facturas.find((f) => f.id === params.facturaId) || null
+      : null;
+
+    if (!esConceptoPersonalizado && !factura) {
       throw new Error('Factura no encontrada');
     }
 
-    const medidor = this.data.medidores.find((m) => m.id === factura.medidor_id);
+    const medidorIdRef = params.medidorId || factura?.medidor_id;
+    const medidor = this.data.medidores.find((m) => m.id === medidorIdRef);
     if (!medidor) {
       throw new Error('Medidor asociado no encontrado');
     }
+    const clienteIdFinal = params.clienteId || factura?.cliente_id || medidor.cliente_id;
 
-    if (factura.estado === 'anulada') {
-      throw new Error('No se puede registrar un pago sobre una factura anulada.');
+    if (!esConceptoPersonalizado && factura) {
+      if (factura.estado === 'anulada') {
+        throw new Error('No se puede registrar un pago sobre una factura anulada.');
+      }
+      if (factura.estado === 'refinanciada') {
+        throw new Error('No se puede cobrar una factura refinanciada/consolidada en una factura posterior.');
+      }
+      if (factura.estado === 'pagada') {
+        throw new Error('Esta factura ya se encuentra totalmente cancelada.');
+      }
     }
 
-    if (factura.estado === 'refinanciada') {
-      throw new Error('No se puede cobrar una factura refinanciada/consolidada en una factura posterior.');
-    }
-
-    if (factura.estado === 'pagada') {
-      throw new Error('Esta factura ya se encuentra totalmente cancelada.');
-    }
-
-    const saldoActual =
-      factura.saldo_pendiente !== undefined
+    const saldoActual = factura
+      ? factura.saldo_pendiente !== undefined
         ? factura.saldo_pendiente
         : factura.saldo !== undefined
           ? factura.saldo
-          : factura.total;
+          : factura.total
+      : 0;
     const montoCobrado = Math.round(params.monto);
 
     if (isNaN(montoCobrado) || montoCobrado <= 0) {
       throw new Error('El monto a pagar debe ser mayor a 0 Gs.');
     }
 
-    if (montoCobrado > saldoActual) {
+    if (!esConceptoPersonalizado && montoCobrado > saldoActual) {
       throw new Error(
         `El monto a pagar (${montoCobrado.toLocaleString('es-PY')} Gs.) no puede superar el saldo pendiente (${saldoActual.toLocaleString('es-PY')} Gs.).`
       );
@@ -3939,15 +4201,15 @@ class DatabaseEngine {
       throw new Error('La fecha de pago debe tener formato YYYY-MM-DD.');
     }
 
-    const numeroRecibo = (
-      params.numeroRecibo ||
-      `REC-${Date.now().toString().slice(-6)}-${Math.floor(Math.random() * 100)}`
-    )
-      .trim()
-      .slice(0, 30);
+    const numeroRecibo = this.resolverNumeroComprobantePago({
+      tipoComprobante,
+      factura: esConceptoPersonalizado ? null : factura,
+      numeroReciboExplicito: params.numeroRecibo,
+      esConceptoPersonalizado,
+    });
 
     if (!numeroRecibo) {
-      throw new Error('Debe ingresar un número de recibo válido.');
+      throw new Error('Debe ingresar un número de comprobante válido.');
     }
 
     if (
@@ -3955,7 +4217,7 @@ class DatabaseEngine {
         (p) => (p.numero_recibo || '').trim().toLowerCase() === numeroRecibo.toLowerCase()
       )
     ) {
-      throw new Error(`El número de recibo "${numeroRecibo}" ya fue utilizado.`);
+      throw new Error(`El número de comprobante "${numeroRecibo}" ya fue utilizado.`);
     }
 
     const esUuidValido = (v?: string | null) =>
@@ -3964,6 +4226,109 @@ class DatabaseEngine {
     let cobradorIdFinal = params.cobradorId || 'cobrador-caja';
 
     const sb = params.clientOverride ?? (supabase && isSupabaseConfigured ? supabase : null);
+
+    // =========================================================================
+    // RAMA A: COBRO CON CONCEPTO PERSONALIZADO (TOTALMENTE INDEPENDIENTE)
+    // - factura_id = null (NO se vincula a ninguna factura de agua)
+    // - Guarda cliente_id y medidor_id
+    // - NO modifica saldo_pendiente, estado ni historial de facturas de agua
+    // =========================================================================
+    let pagoId = generarUUID();
+
+    if (esConceptoPersonalizado) {
+      if (sb) {
+        const {
+          data: { session },
+          error: sessErr,
+        } = await sb.auth.getSession();
+
+        if (sessErr || !session?.user?.id) {
+          throw new Error('Sesión de Supabase no válida. Volvé a iniciar sesión.');
+        }
+
+        cobradorIdFinal = esUuidValido(params.cobradorId) ? params.cobradorId! : session.user.id;
+
+        const payloadSinMetaCliente = {
+          id: pagoId,
+          factura_id: null,
+          fecha_pago: fechaPago,
+          monto: montoCobrado,
+          metodo_pago: params.metodoPago,
+          numero_recibo: numeroRecibo,
+          cobrador_id: cobradorIdFinal,
+          tipo_comprobante: tipoComprobante,
+          es_concepto_personalizado: true,
+          concepto_personalizado: conceptoPersonalizado,
+        };
+
+        let { error: pagoErr } = await sb.from('pagos').insert({
+          ...payloadSinMetaCliente,
+          cliente_id: clienteIdFinal,
+          medidor_id: medidor.id,
+        });
+
+        // Fallback si el usuario aún no agregó cliente_id/medidor_id pero sí permitió factura_id NULL
+        if (
+          pagoErr &&
+          (pagoErr.code === '42703' ||
+            pagoErr.code === 'PGRST204' ||
+            /cliente_id|medidor_id|column|schema cache/i.test(pagoErr.message || ''))
+        ) {
+          const retryRes = await sb.from('pagos').insert(payloadSinMetaCliente);
+          pagoErr = retryRes.error;
+        }
+
+        if (pagoErr) {
+          if (pagoErr.code === '23502' && /factura_id/i.test(pagoErr.message || '')) {
+            throw new Error(
+              'Falta actualizar Supabase para cobros independientes (ALTER TABLE public.pagos ALTER COLUMN factura_id DROP NOT NULL y actualizar trigger procesar_pago_factura).'
+            );
+          }
+          if (pagoErr.code === '23505') {
+            throw new Error(`El número de comprobante "${numeroRecibo}" ya existe en la base de datos.`);
+          }
+          throw new Error(`Error registrando cobro personalizado en Supabase: ${pagoErr.message}`);
+        }
+      }
+
+      if (params.cobradorNombre) {
+        this.usuariosMap.set(cobradorIdFinal, params.cobradorNombre);
+      }
+
+      const pago: Pago = {
+        id: pagoId,
+        factura_id: null,
+        cliente_id: clienteIdFinal,
+        medidor_id: medidor.id,
+        fecha_pago: fechaPago,
+        monto: montoCobrado,
+        metodo_pago: params.metodoPago,
+        numero_recibo: numeroRecibo,
+        cobrador_id: cobradorIdFinal,
+        tipo_comprobante: tipoComprobante,
+        es_concepto_personalizado: true,
+        concepto_personalizado: conceptoPersonalizado,
+        created_at: new Date().toISOString(),
+      };
+      this.data.pagos.unshift(pago);
+      this.saveData(this.data);
+      this.notify();
+
+      return {
+        pago,
+        factura,
+        estadoMedidorActualizado: medidor.estado,
+        saldoRestante: saldoActual,
+        medidorPasoAActivo: false,
+        salioDePendienteCorte: false,
+        eraTerceraBoleta: Boolean(factura?.es_tercera_boleta),
+      };
+    }
+
+    // =========================================================================
+    // RAMA B: COBRO ESTÁNDAR DE FACTURA DE AGUA
+    // =========================================================================
+    const facturaSegura = factura!;
     if (sb) {
       const {
         data: { session },
@@ -3977,19 +4342,39 @@ class DatabaseEngine {
       cobradorIdFinal = esUuidValido(params.cobradorId) ? params.cobradorId! : session.user.id;
       const pagoId = generarUUID();
 
-      const { error: pagoErr } = await sb.from('pagos').insert({
+      const basePayload = {
         id: pagoId,
-        factura_id: factura.id,
+        factura_id: facturaSegura.id,
         fecha_pago: fechaPago,
         monto: montoCobrado,
         metodo_pago: params.metodoPago,
         numero_recibo: numeroRecibo,
         cobrador_id: cobradorIdFinal,
+      };
+
+      let { error: pagoErr } = await sb.from('pagos').insert({
+        ...basePayload,
+        cliente_id: clienteIdFinal,
+        medidor_id: medidor.id,
+        tipo_comprobante: tipoComprobante,
+        es_concepto_personalizado: false,
+        concepto_personalizado: null,
       });
+
+      // Fallback compatible si el usuario aún no ejecutó el SQL de las nuevas columnas en Supabase
+      if (
+        pagoErr &&
+        (pagoErr.code === '42703' ||
+          pagoErr.code === 'PGRST204' ||
+          /column|schema cache/i.test(pagoErr.message || ''))
+      ) {
+        const retryRes = await sb.from('pagos').insert(basePayload);
+        pagoErr = retryRes.error;
+      }
 
       if (pagoErr) {
         if (pagoErr.code === '23505') {
-          throw new Error(`El número de recibo "${numeroRecibo}" ya existe en la base de datos.`);
+          throw new Error(`El número de comprobante "${numeroRecibo}" ya existe en la base de datos.`);
         }
         throw new Error(`Error registrando pago en Supabase: ${pagoErr.message}`);
       }
@@ -4000,18 +4385,24 @@ class DatabaseEngine {
 
       const pago: Pago = {
         id: pagoId,
-        factura_id: factura.id,
+        factura_id: facturaSegura.id,
+        cliente_id: clienteIdFinal,
+        medidor_id: medidor.id,
         fecha_pago: fechaPago,
         monto: montoCobrado,
         metodo_pago: params.metodoPago,
         numero_recibo: numeroRecibo,
         cobrador_id: cobradorIdFinal,
+        tipo_comprobante: tipoComprobante,
+        es_concepto_personalizado: false,
+        concepto_personalizado: null,
+        created_at: new Date().toISOString(),
       };
       this.data.pagos.unshift(pago);
 
       // Re-consultar factura y medidor desde Supabase para reflejar exactamente el trigger procesar_pago_factura
       const [facRes, medRes] = await Promise.all([
-        sb.from('facturas').select('*').eq('id', factura.id).maybeSingle(),
+        sb.from('facturas').select('*').eq('id', facturaSegura.id).maybeSingle(),
         sb.from('medidores').select('estado').eq('id', medidor.id).maybeSingle(),
       ]);
 
@@ -4019,28 +4410,28 @@ class DatabaseEngine {
       const nuevoMontoPagado =
         facRes.data && facRes.data.monto_pagado !== undefined && facRes.data.monto_pagado !== null
           ? Number(facRes.data.monto_pagado)
-          : (factura.monto_pagado || 0) + montoCobrado;
+          : (facturaSegura.monto_pagado || 0) + montoCobrado;
       const nuevoSaldo =
         facRes.data && facRes.data.saldo_pendiente !== undefined && facRes.data.saldo_pendiente !== null
           ? Number(facRes.data.saldo_pendiente)
           : Math.max(0, saldoActual - montoCobrado);
 
-      factura.monto_pagado = Math.min(factura.total, nuevoMontoPagado);
-      factura.saldo_pendiente = nuevoSaldo;
-      factura.saldo = nuevoSaldo;
+      facturaSegura.monto_pagado = Math.min(facturaSegura.total, nuevoMontoPagado);
+      facturaSegura.saldo_pendiente = nuevoSaldo;
+      facturaSegura.saldo = nuevoSaldo;
       if (facRes.data?.estado) {
-        factura.estado = facRes.data.estado as EstadoFactura;
+        facturaSegura.estado = facRes.data.estado as EstadoFactura;
       } else if (nuevoSaldo === 0) {
-        factura.estado = 'pagada';
+        facturaSegura.estado = 'pagada';
       }
       if (facRes.data?.fecha_pago) {
-        factura.fecha_pago = facRes.data.fecha_pago;
-      } else if (nuevoSaldo === 0) {
-        factura.fecha_pago = fechaPago;
+        facturaSegura.fecha_pago = facRes.data.fecha_pago;
+      } else if (nuevoSaldo === 0 && !facturaSegura.fecha_pago) {
+        facturaSegura.fecha_pago = fechaPago;
       }
 
       if (nuevoSaldo === 0) {
-        const detallesPlan = (factura.detalles || []).filter(
+        const detallesPlan = (facturaSegura.detalles || []).filter(
           (d) => d.concepto === 'cuota_conexion' || d.concepto === 'perdida_financiada'
         );
         for (const det of detallesPlan) {
@@ -4094,29 +4485,29 @@ class DatabaseEngine {
       this.notify();
       return {
         pago,
-        factura,
+        factura: facturaSegura,
         estadoMedidorActualizado: medidor.estado,
         saldoRestante: nuevoSaldo,
         medidorPasoAActivo: estadoAnterior !== 'activo' && medidor.estado === 'activo',
         salioDePendienteCorte: estadoAnterior === 'pendiente_corte' && medidor.estado !== 'pendiente_corte',
-        eraTerceraBoleta: Boolean(factura.es_tercera_boleta),
+        eraTerceraBoleta: Boolean(facturaSegura.es_tercera_boleta),
       };
     }
 
-    // Modo sin Supabase (tests/demo local): ejecutar flujo en memoria con fechaPago y numeroRecibo personalizados
+    // Modo sin Supabase (tests/demo local)
     if (params.cobradorNombre) {
       this.usuariosMap.set(cobradorIdFinal, params.cobradorNombre);
     }
     const estadoAnterior = medidor.estado;
     const nuevoSaldo = Math.max(0, saldoActual - montoCobrado);
-    factura.monto_pagado = (factura.monto_pagado || 0) + montoCobrado;
-    factura.saldo_pendiente = nuevoSaldo;
-    factura.saldo = nuevoSaldo;
+    facturaSegura.monto_pagado = Math.min(facturaSegura.total, (facturaSegura.monto_pagado || 0) + montoCobrado);
+    facturaSegura.saldo_pendiente = nuevoSaldo;
+    facturaSegura.saldo = nuevoSaldo;
 
-    if (nuevoSaldo === 0) {
-      factura.estado = 'pagada';
-      factura.fecha_pago = fechaPago;
-      const detallesPlan = (factura.detalles || []).filter(
+    if (nuevoSaldo === 0 && facturaSegura.estado !== 'pagada') {
+      facturaSegura.estado = 'pagada';
+      facturaSegura.fecha_pago = fechaPago;
+      const detallesPlan = (facturaSegura.detalles || []).filter(
         (d) => d.concepto === 'cuota_conexion' || d.concepto === 'perdida_financiada'
       );
       for (const det of detallesPlan) {
@@ -4135,12 +4526,17 @@ class DatabaseEngine {
 
     const pago: Pago = {
       id: generarUUID(),
-      factura_id: factura.id,
+      factura_id: facturaSegura.id,
+      cliente_id: clienteIdFinal,
+      medidor_id: medidor.id,
       fecha_pago: fechaPago,
       monto: montoCobrado,
       metodo_pago: params.metodoPago,
       numero_recibo: numeroRecibo,
       cobrador_id: cobradorIdFinal,
+      tipo_comprobante: tipoComprobante,
+      es_concepto_personalizado: false,
+      concepto_personalizado: null,
     };
     this.data.pagos.unshift(pago);
 
@@ -4167,12 +4563,12 @@ class DatabaseEngine {
     this.notify();
     return {
       pago,
-      factura,
+      factura: facturaSegura,
       estadoMedidorActualizado: medidor.estado,
       saldoRestante: nuevoSaldo,
       medidorPasoAActivo: estadoAnterior !== 'activo' && medidor.estado === 'activo',
       salioDePendienteCorte: estadoAnterior === 'pendiente_corte' && medidor.estado !== 'pendiente_corte',
-      eraTerceraBoleta: Boolean(factura.es_tercera_boleta),
+      eraTerceraBoleta: Boolean(facturaSegura.es_tercera_boleta),
     };
   }
 
@@ -6572,7 +6968,9 @@ class DatabaseEngine {
 
     const pagosCountMap = new Map<string, number>();
     for (const p of this.data.pagos) {
-      pagosCountMap.set(p.factura_id, (pagosCountMap.get(p.factura_id) || 0) + 1);
+      if (p.factura_id) {
+        pagosCountMap.set(p.factura_id, (pagosCountMap.get(p.factura_id) || 0) + 1);
+      }
     }
 
     let filtradas = this.data.facturas;
@@ -6706,8 +7104,15 @@ class DatabaseEngine {
   public getPagosPorFactura(facturaId: string): (Pago & { cobradorNombre: string })[] {
     return this.data.pagos
       .filter((p) => p.factura_id === facturaId)
-      .sort((a, b) => (b.fecha_pago || '').localeCompare(a.fecha_pago || ''))
-      .map((p) => ({
+      .map((p, index) => ({ p, index }))
+      .sort((a, b) => {
+        const fCmp = (b.p.fecha_pago || '').localeCompare(a.p.fecha_pago || '');
+        if (fCmp !== 0) return fCmp;
+        const cCmp = (b.p.created_at || '').localeCompare(a.p.created_at || '');
+        if (cCmp !== 0) return cCmp;
+        return a.index - b.index;
+      })
+      .map(({ p }) => ({
         ...p,
         cobradorNombre:
           this.usuariosMap.get(p.cobrador_id) ||
@@ -6715,6 +7120,144 @@ class DatabaseEngine {
             ? 'Caja Central'
             : p.cobrador_id.slice(0, 8)),
       }));
+  }
+
+  /**
+   * Historial completo de pagos (incluye pagos de facturas y cobros independientes con factura_id = null).
+   * Los ordena del más reciente al más antiguo y los enriquece con Cliente, Medidor y Descripción.
+   */
+  public getHistorialPagos(params?: {
+    medidorId?: string;
+    clienteId?: string;
+    search?: string;
+    tipoFiltro?: 'todos' | 'facturas' | 'personalizados';
+    page?: number;
+    limit?: number;
+  }): {
+    pagos: Array<
+      Pago & {
+        cobradorNombre: string;
+        clienteNombre: string;
+        clienteDoc: string;
+        clienteDireccion: string;
+        numeroMedidor: number;
+        medidorDireccion: string;
+        factura: Factura | null;
+        cliente: Cliente | null;
+        medidor: Medidor | null;
+        esPersonalizado: boolean;
+        descripcionConcepto: string;
+      }
+    >;
+    total: number;
+    page: number;
+    totalPages: number;
+  } {
+    const clientesMap = new Map<string, Cliente>();
+    for (const c of this.data.clientes) clientesMap.set(c.id, c);
+
+    const medidoresMap = new Map<string, Medidor>();
+    for (const m of this.data.medidores) medidoresMap.set(m.id, m);
+
+    const facturasMap = new Map<string, Factura>();
+    for (const f of this.data.facturas) facturasMap.set(f.id, f);
+
+    const enrichedAll = this.data.pagos
+      .map((p, index) => {
+        const factura = p.factura_id ? facturasMap.get(p.factura_id) || null : null;
+        const medidorIdRef = p.medidor_id || factura?.medidor_id || null;
+        const medidor = medidorIdRef ? medidoresMap.get(medidorIdRef) || null : null;
+        const clienteIdRef = p.cliente_id || factura?.cliente_id || medidor?.cliente_id || null;
+        const cliente = clienteIdRef ? clientesMap.get(clienteIdRef) || null : null;
+        const esPersonalizado = Boolean(p.es_concepto_personalizado || !p.factura_id);
+        const cobradorNombre =
+          this.usuariosMap.get(p.cobrador_id) ||
+          (p.cobrador_id === 'cobrador-caja' || p.cobrador_id === 'caja'
+            ? 'Caja Central'
+            : p.cobrador_id.slice(0, 8));
+
+        const descripcionConcepto = esPersonalizado
+          ? (p.concepto_personalizado || 'COBRO PERSONALIZADO').trim().toUpperCase()
+          : factura
+            ? `Factura ${formatearNumeroFactura(factura)} (${factura.periodo_facturado})`
+            : 'Pago de factura';
+
+        return {
+          _index: index,
+          item: {
+            ...p,
+            cliente_id: clienteIdRef,
+            medidor_id: medidorIdRef,
+            cobradorNombre,
+            clienteNombre: cliente?.nombre_completo || 'Cliente',
+            clienteDoc: cliente?.documento || '',
+            clienteDireccion: cliente?.direccion || medidor?.direccion || '',
+            numeroMedidor: medidor?.numero_medidor || 0,
+            medidorDireccion: medidor?.direccion || '',
+            factura,
+            cliente,
+            medidor,
+            esPersonalizado,
+            descripcionConcepto,
+          },
+        };
+      })
+      .sort((a, b) => {
+        const fCmp = (b.item.fecha_pago || '').localeCompare(a.item.fecha_pago || '');
+        if (fCmp !== 0) return fCmp;
+        const cCmp = (b.item.created_at || '').localeCompare(a.item.created_at || '');
+        if (cCmp !== 0) return cCmp;
+        return a._index - b._index;
+      })
+      .map((x) => x.item);
+
+    let filtrados = enrichedAll;
+
+    if (params?.medidorId) {
+      filtrados = filtrados.filter((p) => p.medidor_id === params.medidorId);
+    }
+    if (params?.clienteId) {
+      filtrados = filtrados.filter((p) => p.cliente_id === params.clienteId);
+    }
+    if (params?.tipoFiltro === 'personalizados') {
+      filtrados = filtrados.filter((p) => p.esPersonalizado);
+    } else if (params?.tipoFiltro === 'facturas') {
+      filtrados = filtrados.filter((p) => !p.esPersonalizado);
+    }
+
+    const search = (params?.search || '').trim().toLowerCase();
+    if (search) {
+      filtrados = filtrados.filter(
+        (p) =>
+          p.clienteNombre.toLowerCase().includes(search) ||
+          p.clienteDoc.toLowerCase().includes(search) ||
+          (p.numeroMedidor > 0 && String(p.numeroMedidor).includes(search)) ||
+          (p.numero_recibo || '').toLowerCase().includes(search) ||
+          p.descripcionConcepto.toLowerCase().includes(search)
+      );
+    }
+
+    const page = Math.max(1, params?.page || 1);
+    const limit = Math.min(200, Math.max(1, params?.limit || 50));
+    const total = filtrados.length;
+    const totalPages = Math.ceil(total / limit) || 1;
+    const safePage = Math.min(page, totalPages);
+    const offset = (safePage - 1) * limit;
+
+    return {
+      pagos: filtrados.slice(offset, offset + limit),
+      total,
+      page: safePage,
+      totalPages,
+    };
+  }
+
+  public getPagosPorMedidor(medidorId: string) {
+    return this.getHistorialPagos({ medidorId, limit: 200 }).pagos;
+  }
+
+  public getUltimoPagoPorMedidor(medidorId: string) {
+    return this.getPagosPorMedidor(medidorId)[0] || null;
   }
 
   public getPeriodosFacturacion(): {

@@ -665,8 +665,8 @@ test('20. Pagos: registro de pago total o parcial por factura, cálculo exacto d
   });
 
   assert.equal(resParcial.saldoRestante, saldoInicial - montoParcial);
-  assert.equal(resParcial.factura.saldo, saldoInicial - montoParcial);
-  assert.notEqual(resParcial.factura.estado, 'pagada'); // No está pagada aún
+  assert.equal(resParcial.factura?.saldo, saldoInicial - montoParcial);
+  assert.notEqual(resParcial.factura?.estado, 'pagada'); // No está pagada aún
 
   // 2. Pago restante total
   const resTotal = db.registrarCobro({
@@ -677,9 +677,9 @@ test('20. Pagos: registro de pago total o parcial por factura, cálculo exacto d
   });
 
   assert.equal(resTotal.saldoRestante, 0);
-  assert.equal(resTotal.factura.saldo, 0);
-  assert.equal(resTotal.factura.estado, 'pagada');
-  assert.ok(resTotal.factura.fecha_pago);
+  assert.equal(resTotal.factura?.saldo, 0);
+  assert.equal(resTotal.factura?.estado, 'pagada');
+  assert.ok(resTotal.factura?.fecha_pago);
 });
 
 test('21. Pagos: Si un medidor tiene todas sus facturas pagadas, pasa de moroso o pendiente_corte a activo automáticamente', async () => {
@@ -855,7 +855,7 @@ test('24. Ciclo completo de 3ra boleta, corte físico, mora congelada y regulari
       metodoPago: 'efectivo',
     });
 
-    assert.equal(resCobro3ra.factura.estado, 'pagada');
+    assert.equal(resCobro3ra.factura?.estado, 'pagada');
     // El medidor ya no debe estar en pendiente_corte
     assert.notEqual(resCobro3ra.estadoMedidorActualizado, 'pendiente_corte');
     assert.ok(resCobro3ra.salioDePendienteCorte);

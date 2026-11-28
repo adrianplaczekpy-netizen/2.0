@@ -11,7 +11,6 @@ import { generarComprobantePagoPDF } from '../services/pdfService';
 import {
   ordenarYFiltrarDetalles,
   formatearNumeroFactura,
-  generarNumeroReciboSugerido,
   formatearAvisoDesconexion,
   formatearMensajePagoExitoso,
   puedeAnularFactura,
@@ -19,7 +18,7 @@ import {
   ETIQUETAS_CONCEPTO_FACTURA,
 } from '../services/facturacionHelpers';
 import { useAuth } from '../context/AuthContext';
-import { MetodoPago } from '../types';
+import { MetodoPago, TipoComprobantePago } from '../types';
 import {
   X,
   ShieldAlert,
@@ -71,6 +70,10 @@ export const FacturaDetalleModal: React.FC<FacturaDetalleModalProps> = ({
   const [metodoPago, setMetodoPago] = useState<MetodoPago>('efectivo');
   const [fechaPago, setFechaPago] = useState<string>(() => new Date().toISOString().split('T')[0]);
   const [numeroRecibo, setNumeroRecibo] = useState<string>('');
+  const [tipoComprobante, setTipoComprobante] = useState<TipoComprobantePago>('factura_legal');
+  const [esConceptoPersonalizado, setEsConceptoPersonalizado] = useState(false);
+  const [conceptoPersonalizado, setConceptoPersonalizado] = useState('');
+  const [montoPersonalizado, setMontoPersonalizado] = useState('');
   const [savingPago, setSavingPago] = useState(false);
 
   // Estado formulario de anulación (solo admin)
@@ -156,43 +159,81 @@ export const FacturaDetalleModal: React.FC<FacturaDetalleModalProps> = ({
     setMontoPago(String(saldoPendiente));
     setMetodoPago('efectivo');
     setFechaPago(new Date().toISOString().split('T')[0]);
-    const recibosExistentes = db.getFullData().pagos.map((p) => p.numero_recibo || '');
-    setNumeroRecibo(generarNumeroReciboSugerido(new Date(), recibosExistentes));
+    setTipoComprobante('factura_legal');
+    setEsConceptoPersonalizado(false);
+    setConceptoPersonalizado('');
+    setMontoPersonalizado('');
+    setNumeroRecibo(db.getNumeroFacturaParaCobro(factura.id));
     setShowPagoForm(true);
+  };
+
+  const handleCambiarTipoComprobante = (nuevoTipo: TipoComprobantePago) => {
+    setTipoComprobante(nuevoTipo);
+    if (nuevoTipo === 'recibo_sin_valor_fiscal') {
+      setNumeroRecibo(db.getSiguienteNumeroReciboSinValorFiscal());
+    } else {
+      setNumeroRecibo(db.getNumeroFacturaParaCobro(factura.id, esConceptoPersonalizado));
+    }
   };
 
   const handleGuardarPago = async (e: React.FormEvent) => {
     e.preventDefault();
     setLocalError(null);
-    const montoNum = Number(montoPago);
 
-    if (!Number.isFinite(montoNum) || montoNum <= 0) {
-      setLocalError('Ingresá un monto válido mayor a 0 Gs.');
-      return;
+    let montoNum: number;
+    if (esConceptoPersonalizado) {
+      if (!conceptoPersonalizado.trim()) {
+        setLocalError('Ingresá la descripción del concepto personalizado.');
+        return;
+      }
+      montoNum = Number(montoPersonalizado);
+      if (!Number.isFinite(montoNum) || montoNum <= 0) {
+        setLocalError('Ingresá un monto válido mayor a 0 Gs. para el concepto personalizado.');
+        return;
+      }
+    } else {
+      montoNum = Number(montoPago);
+      if (!Number.isFinite(montoNum) || montoNum <= 0) {
+        setLocalError('Ingresá un monto válido mayor a 0 Gs.');
+        return;
+      }
+      if (Math.round(montoNum) > saldoPendiente) {
+        setLocalError(`El monto no puede superar el saldo pendiente (${formatGs(saldoPendiente)}).`);
+        return;
+      }
     }
-    if (Math.round(montoNum) > saldoPendiente) {
-      setLocalError(`El monto no puede superar el saldo pendiente (${formatGs(saldoPendiente)}).`);
-      return;
-    }
+
     if (!numeroRecibo.trim()) {
-      setLocalError('El número de recibo es obligatorio.');
+      setLocalError('El número de comprobante es obligatorio.');
       return;
     }
 
     setSavingPago(true);
     try {
       const res = await db.registrarCobroAsync({
-        facturaId: factura.id,
+        facturaId: esConceptoPersonalizado ? undefined : factura.id,
+        clienteId: cliente.id,
+        medidorId: medidor.id,
         monto: Math.round(montoNum),
         metodoPago,
         fechaPago,
         numeroRecibo: numeroRecibo.trim(),
         cobradorId: user?.id,
         cobradorNombre: user?.nombre,
+        tipoComprobante,
+        esConceptoPersonalizado,
+        conceptoPersonalizado: esConceptoPersonalizado ? conceptoPersonalizado.trim() : undefined,
       });
 
-      const msgInfo = formatearMensajePagoExitoso(res.saldoRestante, formatGs);
-      onNotify({ type: 'success', message: msgInfo.titulo });
+      if (esConceptoPersonalizado) {
+        onNotify({
+          type: 'success',
+          message: `Cobro personalizado (${conceptoPersonalizado.trim().toUpperCase()}) registrado por ${formatGs(Math.round(montoNum))}. No modificó el saldo de la boleta.`,
+        });
+      } else {
+        const msgInfo = formatearMensajePagoExitoso(res.saldoRestante, formatGs);
+        onNotify({ type: 'success', message: msgInfo.titulo });
+      }
       setShowPagoForm(false);
     } catch (err: any) {
       const msg = err?.message || 'No se pudo registrar el pago.';
@@ -232,6 +273,27 @@ export const FacturaDetalleModal: React.FC<FacturaDetalleModalProps> = ({
     }
   };
 
+  const pagosMedidor = db.getPagosPorMedidor(medidor.id);
+  const pagosPersonalizadosMedidor = pagosMedidor.filter((p) => p.esPersonalizado);
+
+  const construirDocPersonalizado = (pagoPers: (typeof pagosPersonalizadosMedidor)[number]) =>
+    generarComprobantePagoPDF({
+      factura: null,
+      cliente,
+      medidor,
+      pago: pagoPers,
+      numeroRecibo: pagoPers.numero_recibo,
+      fechaPago: pagoPers.fecha_pago,
+      montoAbonado: pagoPers.monto,
+      metodoPago: pagoPers.metodo_pago,
+      cobradorNombre: pagoPers.cobradorNombre || user?.nombre || 'Caja Central',
+      saldoRestante: 0,
+      tipoComprobante: pagoPers.tipo_comprobante,
+      esConceptoPersonalizado: true,
+      conceptoPersonalizado:
+        pagoPers.concepto_personalizado || pagoPers.descripcionConcepto || 'COBRO PERSONALIZADO',
+    });
+
   const obtenerUltimoPagoParaComprobante = () => {
     const pagosFac = db
       .getPagosPorFactura(factura.id)
@@ -254,6 +316,9 @@ export const FacturaDetalleModal: React.FC<FacturaDetalleModalProps> = ({
           detalles: factura.detalles,
           cobradorNombre: ultimoPago?.cobradorNombre || user?.nombre || 'Caja Central',
           saldoRestante: 0,
+          tipoComprobante: ultimoPago?.tipo_comprobante,
+          esConceptoPersonalizado: ultimoPago?.es_concepto_personalizado,
+          conceptoPersonalizado: ultimoPago?.concepto_personalizado || undefined,
         });
         const recTag = ultimoPago?.numero_recibo || factura.periodo_facturado;
         doc.save(`Recibo_${recTag}_Med_${medidor.numero_medidor}.pdf`);
@@ -282,6 +347,9 @@ export const FacturaDetalleModal: React.FC<FacturaDetalleModalProps> = ({
           detalles: factura.detalles,
           cobradorNombre: ultimoPago?.cobradorNombre || user?.nombre || 'Caja Central',
           saldoRestante: 0,
+          tipoComprobante: ultimoPago?.tipo_comprobante,
+          esConceptoPersonalizado: ultimoPago?.es_concepto_personalizado,
+          conceptoPersonalizado: ultimoPago?.concepto_personalizado || undefined,
         });
         const blob = doc.output('blob');
         const blobUrl = window.URL.createObjectURL(blob);
@@ -554,42 +622,118 @@ export const FacturaDetalleModal: React.FC<FacturaDetalleModalProps> = ({
                 </button>
               </div>
 
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-                <div>
-                  <label htmlFor="pago-monto" className="text-xs font-bold text-stone-700 block mb-1">
-                    Monto a cobrar (Gs.) *
-                  </label>
-                  <input
-                    id="pago-monto"
-                    type="number"
-                    min={1}
-                    max={saldoPendiente}
-                    step={1}
-                    required
-                    value={montoPago}
-                    onChange={(e) => setMontoPago(e.target.value)}
-                    className="w-full min-h-[44px] px-3 py-2 bg-white border border-stone-300 rounded-lg text-sm font-bold text-stone-900 tabular-nums focus:outline-hidden focus:border-emerald-600"
-                  />
-                  <span className="text-[11px] text-stone-600 block mt-0.5 tabular-nums">
-                    Saldo pendiente máximo: {formatGs(saldoPendiente)}
+              {/* Checkbox: Cobro con Concepto Personalizado */}
+              <label className="flex items-center gap-2 p-2.5 bg-amber-50 border border-amber-200 rounded-lg text-xs font-bold text-amber-950 cursor-pointer select-none">
+                <input
+                  type="checkbox"
+                  checked={esConceptoPersonalizado}
+                  onChange={(e) => {
+                    const checked = e.target.checked;
+                    setEsConceptoPersonalizado(checked);
+                    setLocalError(null);
+                    if (tipoComprobante === 'factura_legal') {
+                      setNumeroRecibo(db.getNumeroFacturaParaCobro(factura.id, checked));
+                    }
+                  }}
+                  className="w-4 h-4 rounded-sm border-amber-400 text-amber-600 focus:ring-amber-500"
+                />
+                <span>Cobro con Concepto Personalizado</span>
+              </label>
+
+              {esConceptoPersonalizado ? (
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 p-3 bg-white border border-stone-200 rounded-lg">
+                  <div>
+                    <label htmlFor="pago-concepto-pers" className="text-xs font-bold text-stone-700 block mb-1">
+                      Descripción del Concepto *
+                    </label>
+                    <input
+                      id="pago-concepto-pers"
+                      type="text"
+                      required
+                      value={conceptoPersonalizado}
+                      onChange={(e) => setConceptoPersonalizado(e.target.value)}
+                      placeholder="Ej: Reparación de cañería"
+                      className="w-full min-h-[44px] px-3 py-2 bg-white border border-stone-300 rounded-lg text-sm font-semibold text-stone-900 focus:outline-hidden focus:border-emerald-600"
+                    />
+                  </div>
+                  <div>
+                    <label htmlFor="pago-monto-pers" className="text-xs font-bold text-stone-700 block mb-1">
+                      Monto (Gs.) *
+                    </label>
+                    <input
+                      id="pago-monto-pers"
+                      type="number"
+                      min={1}
+                      step={1}
+                      required
+                      value={montoPersonalizado}
+                      onChange={(e) => setMontoPersonalizado(e.target.value)}
+                      placeholder="Ej: 150000"
+                      className="w-full min-h-[44px] px-3 py-2 bg-white border border-stone-300 rounded-lg text-sm font-bold text-stone-900 tabular-nums focus:outline-hidden focus:border-emerald-600"
+                    />
+                  </div>
+                  <span className="sm:col-span-2 text-[11px] text-stone-600">
+                    Cobro independiente: NO modificará el saldo de esta factura. Sin ERSSAN 2% ni IVA 10%.
                   </span>
                 </div>
+              ) : (
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                  <div>
+                    <label htmlFor="pago-monto" className="text-xs font-bold text-stone-700 block mb-1">
+                      Monto a cobrar (Gs.) *
+                    </label>
+                    <input
+                      id="pago-monto"
+                      type="number"
+                      min={1}
+                      max={saldoPendiente}
+                      step={1}
+                      required
+                      value={montoPago}
+                      onChange={(e) => setMontoPago(e.target.value)}
+                      className="w-full min-h-[44px] px-3 py-2 bg-white border border-stone-300 rounded-lg text-sm font-bold text-stone-900 tabular-nums focus:outline-hidden focus:border-emerald-600"
+                    />
+                    <span className="text-[11px] text-stone-600 block mt-0.5 tabular-nums">
+                      Saldo pendiente máximo: {formatGs(saldoPendiente)}
+                    </span>
+                  </div>
 
-                <div>
-                  <label htmlFor="pago-metodo" className="text-xs font-bold text-stone-700 block mb-1">
-                    Método de pago *
-                  </label>
-                  <select
-                    id="pago-metodo"
-                    value={metodoPago}
-                    onChange={(e) => setMetodoPago(e.target.value as MetodoPago)}
-                    className="w-full min-h-[44px] px-3 py-2 bg-white border border-stone-300 rounded-lg text-sm font-semibold text-stone-900 focus:outline-hidden focus:border-emerald-600"
-                  >
-                    <option value="efectivo">Efectivo</option>
-                    <option value="transferencia">Transferencia</option>
-                    <option value="cheque">Cheque</option>
-                  </select>
+                  <div>
+                    <label htmlFor="pago-metodo" className="text-xs font-bold text-stone-700 block mb-1">
+                      Método de pago *
+                    </label>
+                    <select
+                      id="pago-metodo"
+                      value={metodoPago}
+                      onChange={(e) => setMetodoPago(e.target.value as MetodoPago)}
+                      className="w-full min-h-[44px] px-3 py-2 bg-white border border-stone-300 rounded-lg text-sm font-semibold text-stone-900 focus:outline-hidden focus:border-emerald-600"
+                    >
+                      <option value="efectivo">Efectivo</option>
+                      <option value="transferencia">Transferencia</option>
+                      <option value="cheque">Cheque</option>
+                    </select>
+                  </div>
                 </div>
+              )}
+
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                {esConceptoPersonalizado && (
+                  <div>
+                    <label htmlFor="pago-metodo-pers" className="text-xs font-bold text-stone-700 block mb-1">
+                      Método de pago *
+                    </label>
+                    <select
+                      id="pago-metodo-pers"
+                      value={metodoPago}
+                      onChange={(e) => setMetodoPago(e.target.value as MetodoPago)}
+                      className="w-full min-h-[44px] px-3 py-2 bg-white border border-stone-300 rounded-lg text-sm font-semibold text-stone-900 focus:outline-hidden focus:border-emerald-600"
+                    >
+                      <option value="efectivo">Efectivo</option>
+                      <option value="transferencia">Transferencia</option>
+                      <option value="cheque">Cheque</option>
+                    </select>
+                  </div>
+                )}
 
                 <div>
                   <label htmlFor="pago-fecha" className="text-xs font-bold text-stone-700 block mb-1">
@@ -607,7 +751,7 @@ export const FacturaDetalleModal: React.FC<FacturaDetalleModalProps> = ({
 
                 <div>
                   <label htmlFor="pago-recibo" className="text-xs font-bold text-stone-700 block mb-1">
-                    Número de recibo *
+                    Número de comprobante *
                   </label>
                   <input
                     id="pago-recibo"
@@ -616,9 +760,48 @@ export const FacturaDetalleModal: React.FC<FacturaDetalleModalProps> = ({
                     maxLength={30}
                     value={numeroRecibo}
                     onChange={(e) => setNumeroRecibo(e.target.value)}
-                    placeholder="REC-20261115-001"
+                    placeholder="001-002-0000001"
                     className="w-full min-h-[44px] px-3 py-2 bg-white border border-stone-300 rounded-lg text-sm font-mono font-semibold text-stone-900 focus:outline-hidden focus:border-emerald-600"
                   />
+                </div>
+              </div>
+
+              {/* Selector de Tipo de Comprobante (antes de Confirmar pago) */}
+              <div className="space-y-1.5">
+                <span className="text-xs font-bold text-stone-700 block">Tipo de Comprobante:</span>
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                  <label
+                    className={`flex items-center gap-2 p-2.5 rounded-lg border cursor-pointer ${
+                      tipoComprobante === 'factura_legal'
+                        ? 'bg-white border-emerald-600 text-emerald-950'
+                        : 'bg-emerald-50/40 border-stone-200 text-stone-700'
+                    }`}
+                  >
+                    <input
+                      type="radio"
+                      name="detalleTipoComprobante"
+                      checked={tipoComprobante === 'factura_legal'}
+                      onChange={() => handleCambiarTipoComprobante('factura_legal')}
+                      className="text-emerald-600"
+                    />
+                    <span className="text-xs font-bold">FACTURA LEGAL</span>
+                  </label>
+                  <label
+                    className={`flex items-center gap-2 p-2.5 rounded-lg border cursor-pointer ${
+                      tipoComprobante === 'recibo_sin_valor_fiscal'
+                        ? 'bg-white border-blue-600 text-blue-950'
+                        : 'bg-emerald-50/40 border-stone-200 text-stone-700'
+                    }`}
+                  >
+                    <input
+                      type="radio"
+                      name="detalleTipoComprobante"
+                      checked={tipoComprobante === 'recibo_sin_valor_fiscal'}
+                      onChange={() => handleCambiarTipoComprobante('recibo_sin_valor_fiscal')}
+                      className="text-blue-600"
+                    />
+                    <span className="text-xs font-bold">RECIBO SIN VALOR FISCAL</span>
+                  </label>
                 </div>
               </div>
 
@@ -732,6 +915,63 @@ export const FacturaDetalleModal: React.FC<FacturaDetalleModalProps> = ({
                     <span className="font-bold text-emerald-700 text-sm tabular-nums">
                       {formatGs(p.monto)}
                     </span>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+          {/* Sección de Cobros Independientes (Concepto Personalizado) del Medidor */}
+          {pagosPersonalizadosMedidor.length > 0 && (
+            <div className="space-y-2">
+              <div className="flex items-center justify-between gap-2">
+                <h4 className="font-bold text-amber-900 uppercase tracking-wider text-[11px] flex items-center gap-1.5">
+                  <Receipt className="w-3.5 h-3.5 text-amber-600" />
+                  <span>Cobros con Concepto Personalizado del Medidor ({pagosPersonalizadosMedidor.length})</span>
+                </h4>
+              </div>
+              <div className="border border-amber-200 bg-amber-50/40 rounded-lg overflow-hidden divide-y divide-amber-100">
+                {pagosPersonalizadosMedidor.map((p) => (
+                  <div
+                    key={p.id}
+                    className="px-3.5 py-2.5 flex flex-col sm:flex-row sm:items-center justify-between gap-2"
+                  >
+                    <div className="space-y-0.5">
+                      <div className="font-bold text-stone-900 flex flex-wrap items-center gap-1.5">
+                        <span className="text-[10px] px-1.5 py-0.5 rounded bg-amber-100 text-amber-900 border border-amber-300 uppercase">
+                          Concepto Personalizado
+                        </span>
+                        <span>{p.descripcionConcepto}</span>
+                      </div>
+                      <div className="text-[11px] text-stone-600 flex flex-wrap items-center gap-2">
+                        <span className="tabular-nums">{p.fecha_pago}</span>
+                        <span>·</span>
+                        <span>{METODO_LABELS[p.metodo_pago] || p.metodo_pago}</span>
+                        {p.numero_recibo && (
+                          <>
+                            <span>·</span>
+                            <span className="font-mono font-semibold text-stone-800">{p.numero_recibo}</span>
+                          </>
+                        )}
+                        <span>·</span>
+                        <span>Cobrador: {p.cobradorNombre}</span>
+                      </div>
+                    </div>
+                    <div className="flex items-center gap-2.5">
+                      <span className="font-bold text-emerald-700 text-sm tabular-nums">
+                        {formatGs(p.monto)}
+                      </span>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          const doc = construirDocPersonalizado(p);
+                          doc.save(`Recibo_Personalizado_${p.numero_recibo || p.fecha_pago}_Med_${medidor.numero_medidor}.pdf`);
+                        }}
+                        className="px-2.5 py-1.5 bg-white hover:bg-stone-100 text-stone-800 border border-stone-300 rounded-md text-[11px] font-bold inline-flex items-center gap-1 cursor-pointer"
+                      >
+                        <FileDown className="w-3.5 h-3.5" />
+                        <span>PDF</span>
+                      </button>
+                    </div>
                   </div>
                 ))}
               </div>

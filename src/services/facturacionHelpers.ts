@@ -3,7 +3,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { DetalleFactura, Factura, Lectura, UserRole } from '../types';
+import { DetalleFactura, Factura, Lectura, Pago, TipoComprobantePago, UserRole } from '../types';
 import type { MedidorOmitidoFacturacion } from './billingEngine';
 
 export const ORDEN_CONCEPTOS_FACTURA: Record<DetalleFactura['concepto'], number> = {
@@ -83,6 +83,7 @@ export const EMPRESA_LEGAL = {
   inicioVigencia: '01/10/2026',
   finVigencia: '31/10/2027',
   prefijoFactura: '001-002-',
+  whatsapp: '0986 977 631',
 } as const;
 
 /**
@@ -128,6 +129,143 @@ export function resolverNumeroFacturaParaMostrar(
     return factura.numero_factura.trim();
   }
   return formatearNumeroFacturaSET(Number(factura.numero_boleta_medidor) || 1);
+}
+
+/**
+ * Formatea un número secuencial de 4 dígitos para Recibos sin valor fiscal: 001-002-0001.
+ */
+export function formatearNumeroRecibo4Digitos(secuencial: number): string {
+  const n = Math.max(1, Math.floor(Number(secuencial) || 1));
+  return `${EMPRESA_LEGAL.prefijoFactura}${String(n).padStart(4, '0')}`;
+}
+
+/**
+ * Extrae el contador numérico de un recibo sin valor fiscal (formato estricto de 4 dígitos: 001-002-0001 -> 1).
+ * No colisiona con las facturas legales de 7 dígitos (001-002-0000001).
+ */
+export function extraerSecuencialRecibo4Digitos(numeroRecibo?: string | null): number {
+  if (!numeroRecibo) return 0;
+  const match = /^001-002-(\d{4})$/.exec(numeroRecibo.trim());
+  if (!match) return 0;
+  const parsed = parseInt(match[1], 10);
+  return isNaN(parsed) || parsed < 0 ? 0 : parsed;
+}
+
+/**
+ * Calcula el siguiente número secuencial para recibos sin valor fiscal (4 dígitos).
+ */
+export function calcularSiguienteSecuencialRecibo4Digitos(
+  pagosExistentes: Array<Pick<Pago, 'numero_recibo' | 'tipo_comprobante'>>
+): number {
+  let maxSec = 0;
+  for (const p of pagosExistentes) {
+    const sec = extraerSecuencialRecibo4Digitos(p.numero_recibo);
+    if (sec > maxSec) maxSec = sec;
+  }
+  return maxSec + 1;
+}
+
+/**
+ * Genera el próximo número de recibo de 4 dígitos único (001-002-XXXX).
+ */
+export function generarSiguienteNumeroRecibo4Digitos(
+  pagosExistentes: Array<Pick<Pago, 'numero_recibo' | 'tipo_comprobante'>>
+): string {
+  const existingSet = new Set(
+    pagosExistentes.map((p) => (p.numero_recibo || '').trim().toUpperCase()).filter(Boolean)
+  );
+  let seq = calcularSiguienteSecuencialRecibo4Digitos(pagosExistentes);
+  let candidate = formatearNumeroRecibo4Digitos(seq);
+  while (existingSet.has(candidate.toUpperCase())) {
+    seq += 1;
+    candidate = formatearNumeroRecibo4Digitos(seq);
+  }
+  return candidate;
+}
+
+/**
+ * Extrae el contador numérico de 7 dígitos (formato estricto: 001-002-0000001 -> 1).
+ */
+export function extraerSecuencial7Digitos(numero?: string | null): number {
+  if (!numero) return 0;
+  const match = /^001-002-(\d{7})(?:-P\d+)?$/.exec(numero.trim());
+  if (!match) return 0;
+  const parsed = parseInt(match[1], 10);
+  return isNaN(parsed) || parsed < 0 ? 0 : parsed;
+}
+
+/**
+ * Genera el próximo número de Factura Legal de 7 dígitos (001-002-XXXXXXX)
+ * considerando tanto facturas emitidas como pagos independientes previos para evitar colisiones.
+ */
+export function generarSiguienteNumeroFacturaLegal7Digitos(
+  facturasExistentes: Array<Pick<Factura, 'numero_factura'>>,
+  pagosExistentes: Array<Pick<Pago, 'numero_recibo'>> = []
+): string {
+  const existingSet = new Set<string>();
+  let maxSec = 0;
+
+  for (const f of facturasExistentes) {
+    const raw = (f.numero_factura || '').trim();
+    if (raw) existingSet.add(raw.toUpperCase());
+    const sec = extraerSecuencialFacturaSET(raw);
+    if (sec > maxSec) maxSec = sec;
+  }
+
+  for (const p of pagosExistentes) {
+    const raw = (p.numero_recibo || '').trim();
+    if (raw) existingSet.add(raw.toUpperCase());
+    const sec = extraerSecuencial7Digitos(raw);
+    if (sec > maxSec) maxSec = sec;
+  }
+
+  let seq = maxSec + 1;
+  let candidate = formatearNumeroFacturaSET(seq);
+  while (existingSet.has(candidate.toUpperCase())) {
+    seq += 1;
+    candidate = formatearNumeroFacturaSET(seq);
+  }
+  return candidate;
+}
+
+/**
+ * Resuelve el número a imprimir en el comprobante según tipo:
+ * - factura_legal -> 7 dígitos (001-002-XXXXXXX)
+ * - recibo_sin_valor_fiscal -> 4 dígitos (001-002-XXXX)
+ */
+export function resolverNumeroComprobantePago(params: {
+  tipoComprobante: TipoComprobantePago;
+  factura?: Pick<Factura, 'numero_factura' | 'numero_boleta_medidor'> | null;
+  facturasExistentes?: Array<Pick<Factura, 'numero_factura'>>;
+  pagosExistentes?: Array<Pick<Pago, 'numero_recibo' | 'tipo_comprobante'>>;
+  numeroReciboActual?: string | null;
+  esConceptoPersonalizado?: boolean;
+}): string {
+  if (params.tipoComprobante === 'recibo_sin_valor_fiscal') {
+    if (params.numeroReciboActual && /^001-002-\d{4}$/.test(params.numeroReciboActual.trim())) {
+      return params.numeroReciboActual.trim();
+    }
+    return generarSiguienteNumeroRecibo4Digitos(params.pagosExistentes || []);
+  }
+  if (params.numeroReciboActual && /^001-002-\d{7}/.test(params.numeroReciboActual.trim())) {
+    return params.numeroReciboActual.trim();
+  }
+  if (params.esConceptoPersonalizado || !params.factura) {
+    return generarSiguienteNumeroFacturaLegal7Digitos(
+      params.facturasExistentes || [],
+      params.pagosExistentes || []
+    );
+  }
+  return resolverNumeroFacturaParaMostrar(params.factura);
+}
+
+/**
+ * Calcula el IVA 10% incluido en un monto total (Total / 11 redondeado a guaraníes enteros).
+ */
+export function calcularIva10Incluido(totalGs: number): number {
+  const val = Number(totalGs) || 0;
+  if (val <= 0) return 0;
+  return Math.round(val / 11);
 }
 
 /**

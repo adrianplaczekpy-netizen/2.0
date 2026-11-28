@@ -27,8 +27,18 @@ import { AuthProvider } from '../context/AuthContext';
 import fs from 'node:fs';
 import { ModalRegistrarReconexion } from '../components/ModalRegistrarReconexion';
 import { FacturaDetalleModal } from '../components/FacturaDetalleModal';
-import { generarBoletaPDF, generarComprobantePagoPDF } from './pdfService';
+import { CajaCobranzasView } from '../components/CajaCobranzasView';
+import { FacturacionView } from '../components/FacturacionView';
+import {
+  generarBoletaPDF,
+  generarComprobantePagoPDF,
+  limpiarDescripcionConceptoPDF,
+} from './pdfService';
 import { LOGO_PNG_BASE64 } from '../assets/logoData';
+import {
+  calcularIva10Incluido,
+  generarSiguienteNumeroRecibo4Digitos,
+} from './facturacionHelpers';
 
 const medidorBase: Medidor = {
   id: 'med-test-01',
@@ -1850,7 +1860,7 @@ test('24. Regresión Medidor 132: deuda_anterior = 82.394 (85.394 - 3.000), mora
     monto: 126882,
     metodoPago: 'efectivo',
   });
-  assert.equal(cobro.factura.estado, 'pagada');
+  assert.equal(cobro.factura?.estado, 'pagada');
   assert.equal(cobro.estadoMedidorActualizado, 'activo');
   assert.equal(db.getFullData().facturas.find((f) => f.id === fac202609Ref.id)?.estado, 'refinanciada');
   assert.equal(db.getFullData().facturas.find((f) => f.id === fac202609Ref.id)?.saldo_pendiente, 0);
@@ -2933,7 +2943,7 @@ test('33. Mes siguiente incluye cargo diferido RECONEXIÓN con concepto reconexi
     monto: 97920,
     metodoPago: 'efectivo',
   });
-  assert.equal(cobro331.factura.estado, 'pagada');
+  assert.equal(cobro331.factura?.estado, 'pagada');
   assert.equal(cobro331.estadoMedidorActualizado, 'activo');
   assert.equal(db.getMedidorDetalle(medPagoDirecto.id)?.totalDeuda, 0);
 });
@@ -3087,10 +3097,14 @@ test('35. generarComprobantePagoPDF genera recibo A5 vertical (148x210mm), sin m
   assert.ok(pdfText.includes('2026-11-25 10:42'), 'Debe incluir fecha y hora del pago');
   assert.ok(pdfText.includes('2026-11-01'), 'Debe incluir fecha de emisión');
   assert.ok(pdfText.includes('2026-11-30'), 'Debe incluir fecha de vencimiento');
-  assert.ok(pdfText.includes('de Consumo: 2026-10'), 'Debe incluir Período de Consumo con el mes de consumo');
+  assert.ok(!pdfText.includes('Per\\355odo de Consumo:') && !pdfText.includes('Período de Consumo:'), 'Debe quitar Período de Consumo del lado derecho del Medidor');
+  assert.ok(!pdfText.includes('DETALLE DE CONCEPTOS'), 'Debe reemplazar DETALLE DE CONCEPTOS por período de consumo');
+  assert.ok(pdfText.includes('DE CONSUMO: 2026-10'), 'Título de tabla debe incluir PERÍODO DE CONSUMO');
+  assert.ok(!pdfText.includes('| EMISI'), 'Factura Legal no debe mostrar | EMISIÓN en el título de la tabla');
   assert.ok(pdfText.includes('DEUDA ANTERIOR'), 'Concepto DEUDA ANTERIOR debe estar en MAYÚSCULAS');
   assert.ok(pdfText.includes('RECARGO POR MORA'), 'Concepto RECARGO POR MORA debe estar en MAYÚSCULAS');
   assert.ok(pdfText.includes('APORTE LEY ERSSAN'), 'Concepto ERSSAN debe estar en MAYÚSCULAS');
+  assert.ok(!pdfText.includes('(2%)') && !pdfText.includes('(6 m'), 'Debe eliminar paréntesis y su contenido en conceptos');
   assert.ok(!pdfText.includes('Deuda anterior'), 'No debe quedar concepto en minúsculas');
   assert.ok(!pdfText.includes('Recargo por mora'), 'No debe quedar concepto en minúsculas');
   // Verificar que los 4 conceptos generaron exactamente 2 líneas horizontales intercaladas (idx 1 y idx 3) en la tabla
@@ -3317,6 +3331,453 @@ test('36. Numeración secuencial SET (001-002-XXXXXXX) es única e incremental e
   });
   assert.equal(reg.facturaRegularizacion.numero_factura, '001-002-0000004');
 });
+
+test('37. Numeración independiente 4 dígitos vs 7 dígitos y Concepto Personalizado totalmente independiente (factura_id = null, sin tocar deuda de agua)', async () => {
+  db.clearData();
+
+  // La secuencia de 4 dígitos ignora facturas/recibos de 7 dígitos
+  const seqInicial = generarSiguienteNumeroRecibo4Digitos([
+    { numero_recibo: '001-002-0000040', tipo_comprobante: 'factura_legal' },
+  ]);
+  assert.equal(seqInicial, '001-002-0001');
+
+  const cli = db.agregarCliente({
+    nombre_completo: 'Carlos Recibo Fiscal',
+    documento: '3.222.111',
+    direccion: 'Calle Palma 120',
+    telefono: '0981444555',
+    email: 'carlos@example.com',
+  });
+  const med = db.agregarMedidor({
+    cliente_id: cli.id,
+    numero_medidor: 501,
+    fecha_instalacion: '2026-01-01',
+    direccion: 'Lote 501',
+    zona: 'San Gabriel',
+    latitud: -25.39,
+    longitud: -57.38,
+    estado: 'moroso',
+  });
+
+  const fac1: Factura = {
+    id: 'fac-37-1',
+    medidor_id: med.id,
+    cliente_id: cli.id,
+    periodo_consumo: '2026-10',
+    periodo_facturado: '2026-11',
+    fecha_emision: '2026-11-01',
+    fecha_vencimiento: '2026-11-30',
+    estado: 'pendiente',
+    total: 36720,
+    saldo_pendiente: 36720,
+    saldo: 36720,
+    monto_pagado: 0,
+    es_tercera_boleta: false,
+    alerta_consumo_elevado: false,
+    numero_boleta_medidor: 1,
+    numero_factura: '001-002-0000045',
+    consumo_m3: 8,
+  };
+  const fac2: Factura = {
+    ...fac1,
+    id: 'fac-37-2',
+    periodo_consumo: '2026-11',
+    periodo_facturado: '2026-12',
+    estado: 'vencida',
+    numero_boleta_medidor: 2,
+    numero_factura: '001-002-0000046',
+  };
+  db.getFullData().facturas.push(fac1, fac2);
+
+  // 1) Cobro estándar con RECIBO SIN VALOR FISCAL -> 001-002-0001 (4 dígitos) sí cancela fac1
+  const pagoRecibo1 = await db.registrarCobroAsync({
+    facturaId: fac1.id,
+    monto: 36720,
+    metodoPago: 'efectivo',
+    tipoComprobante: 'recibo_sin_valor_fiscal',
+  });
+  assert.equal(pagoRecibo1.pago.tipo_comprobante, 'recibo_sin_valor_fiscal');
+  assert.equal(pagoRecibo1.pago.numero_recibo, '001-002-0001');
+  assert.equal(pagoRecibo1.pago.factura_id, fac1.id);
+  assert.equal(fac1.estado, 'pagada');
+  assert.equal(fac1.saldo_pendiente, 0);
+  assert.equal(db.getSiguienteNumeroReciboSinValorFiscal(), '001-002-0002');
+
+  // 2) Concepto Personalizado con FACTURA LEGAL -> TOTALMENTE INDEPENDIENTE
+  //    - factura_id = null
+  //    - cliente_id = cli.id, medidor_id = med.id
+  //    - NO toca fac2.saldo_pendiente (sigue en 36.720 Gs.), ni fac2.monto_pagado (0), ni fac2.estado ('vencida'), ni med.estado ('moroso')
+  //    - Usa un correlativo propio de 7 dígitos (001-002-0000047) sin quemar el 001-002-0000046 de fac2
+  const pagoFacturaPers = await db.registrarCobroAsync({
+    facturaId: fac2.id,
+    clienteId: cli.id,
+    medidorId: med.id,
+    monto: 150000,
+    metodoPago: 'transferencia',
+    tipoComprobante: 'factura_legal',
+    esConceptoPersonalizado: true,
+    conceptoPersonalizado: 'Reparación de cañería principal',
+  });
+  assert.equal(pagoFacturaPers.pago.tipo_comprobante, 'factura_legal');
+  assert.equal(pagoFacturaPers.pago.factura_id, null, 'Concepto personalizado debe guardar factura_id = null');
+  assert.equal(pagoFacturaPers.pago.cliente_id, cli.id);
+  assert.equal(pagoFacturaPers.pago.medidor_id, med.id);
+  assert.equal(pagoFacturaPers.pago.numero_recibo, '001-002-0000047');
+  assert.equal(pagoFacturaPers.pago.es_concepto_personalizado, true);
+  assert.equal(pagoFacturaPers.pago.concepto_personalizado, 'Reparación de cañería principal');
+  assert.equal(pagoFacturaPers.pago.monto, 150000);
+  assert.equal(fac2.saldo_pendiente, 36720, 'La deuda pendiente de fac2 NO debe modificarse');
+  assert.equal(fac2.monto_pagado, 0, 'El monto pagado de fac2 debe seguir en 0');
+  assert.equal(fac2.estado, 'vencida', 'El estado de fac2 debe seguir intacto');
+  assert.equal(med.estado, 'moroso', 'El estado del medidor no debe alterarse');
+  assert.equal(db.getPagosPorFactura(fac2.id).length, 0, 'fac2 no debe mostrar el cobro personalizado en su historial');
+
+  // 3) Otro RECIBO SIN VALOR FISCAL con Concepto Personalizado sin pasar facturaId -> 001-002-0002
+  const pagoRecibo2 = await db.registrarCobroAsync({
+    clienteId: cli.id,
+    medidorId: med.id,
+    monto: 85000,
+    metodoPago: 'efectivo',
+    tipoComprobante: 'recibo_sin_valor_fiscal',
+    esConceptoPersonalizado: true,
+    conceptoPersonalizado: 'Cambio de llave de paso',
+  });
+  assert.equal(pagoRecibo2.pago.factura_id, null);
+  assert.equal(pagoRecibo2.pago.cliente_id, cli.id);
+  assert.equal(pagoRecibo2.pago.medidor_id, med.id);
+  assert.equal(pagoRecibo2.pago.numero_recibo, '001-002-0002');
+  assert.equal(pagoRecibo2.pago.monto, 85000);
+  assert.equal(fac2.saldo_pendiente, 36720);
+
+  // 4) Verificar payload enviado a Supabase en cobro personalizado independiente
+  const insertedPayloads: any[] = [];
+  const sbMock: any = {
+    auth: {
+      async getSession() {
+        return { data: { session: { user: { id: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa' } } }, error: null };
+      },
+    },
+    from(table: string) {
+      return {
+        insert: async (payload: any) => {
+          if (table === 'pagos') insertedPayloads.push(payload);
+          return { error: null };
+        },
+      };
+    },
+  };
+  await db.registrarCobroAsync({
+    clienteId: cli.id,
+    medidorId: med.id,
+    monto: 95000,
+    metodoPago: 'efectivo',
+    tipoComprobante: 'recibo_sin_valor_fiscal',
+    esConceptoPersonalizado: true,
+    conceptoPersonalizado: 'Traslado de medidor',
+    clientOverride: sbMock,
+  });
+  assert.equal(insertedPayloads.length, 1);
+  assert.equal(insertedPayloads[0].factura_id, null);
+  assert.equal(insertedPayloads[0].cliente_id, cli.id);
+  assert.equal(insertedPayloads[0].medidor_id, med.id);
+  assert.equal(insertedPayloads[0].es_concepto_personalizado, true);
+  assert.equal(insertedPayloads[0].concepto_personalizado, 'Traslado de medidor');
+  assert.equal(fac2.saldo_pendiente, 36720);
+});
+
+test('38. PDF Factura Legal vs Recibo sin Valor Fiscal vs Concepto Personalizado (sin paréntesis, sin dirección arriba, título período|emisión, líneas solo con 3+ conceptos)', () => {
+  // Verificar regex de limpieza de paréntesis en nombres de conceptos
+  assert.equal(limpiarDescripcionConceptoPDF('CONSUMO DE AGUA (12 M³)'), 'CONSUMO DE AGUA');
+  assert.equal(limpiarDescripcionConceptoPDF('DEUDA ANTERIOR (PERÍODO 2026-10)'), 'DEUDA ANTERIOR');
+  assert.equal(limpiarDescripcionConceptoPDF('RECARGO POR MORA (1 BOLETA × 3.000)'), 'RECARGO POR MORA');
+
+  const cli = {
+    id: 'cli-pdf-38',
+    nombre_completo: 'Lucía Ramírez',
+    documento: '2.987.654',
+    direccion: 'Fracción San Gabriel Mboi y',
+    telefono: '0981555666',
+    email: 'lucia@example.com',
+    fecha_alta: '2026-01-01',
+  };
+  const med: Medidor = {
+    ...medidorBase,
+    id: 'med-pdf-38',
+    cliente_id: cli.id,
+    numero_medidor: 380,
+  };
+  const fac: Factura = {
+    id: 'fac-pdf-38',
+    medidor_id: med.id,
+    cliente_id: cli.id,
+    periodo_consumo: '2026-10',
+    periodo_facturado: '2026-11',
+    fecha_emision: '2026-11-01',
+    fecha_vencimiento: '2026-11-30',
+    fecha_pago: '2026-11-26',
+    estado: 'pagada',
+    total: 110000,
+    saldo_pendiente: 0,
+    saldo: 0,
+    monto_pagado: 110000,
+    es_tercera_boleta: false,
+    alerta_consumo_elevado: false,
+    numero_boleta_medidor: 21,
+    numero_factura: '001-002-0000021',
+    consumo_m3: 25,
+    detalles: [
+      { id: 'd1', factura_id: 'fac-pdf-38', concepto: 'consumo_agua', descripcion: 'Consumo de agua (25 m³)', monto: 107843 },
+      { id: 'd2', factura_id: 'fac-pdf-38', concepto: 'erssan', descripcion: 'Aporte Ley ERSSAN (2%)', monto: 2157 },
+    ],
+  };
+
+  assert.equal(calcularIva10Incluido(110000), 10000);
+  const contarLineasTablaFullWidth = (rawPdf: string) =>
+    rawPdf.split(/\r?\n/).filter((l) => l.includes('385.511811') && l.endsWith(' l')).length;
+
+  // A) FACTURA LEGAL (3 conceptos: CONSUMO DE AGUA, APORTE LEY ERSSAN, IVA 10% -> >= 3 conceptos, dibuja 1 línea divisoria + 3 estructurales = 4)
+  const docFactura = generarComprobantePagoPDF({
+    factura: fac,
+    cliente: cli,
+    medidor: med,
+    tipoComprobante: 'factura_legal',
+    montoAbonado: 110000,
+    metodoPago: 'efectivo',
+    saldoRestante: 0,
+  });
+  const rawFactura = docFactura.output();
+  assert.ok(rawFactura.includes('/XObject'), 'Factura Legal debe embeber logo');
+  assert.ok(rawFactura.includes('3950638-0'), 'Factura Legal debe mostrar RUC');
+  assert.ok(rawFactura.includes('19148339'), 'Factura Legal debe mostrar Timbrado');
+  assert.ok(rawFactura.includes('01/10/2026'), 'Factura Legal debe mostrar Inicio Vigencia');
+  assert.ok(rawFactura.includes('31/10/2027'), 'Factura Legal debe mostrar Fin Vigencia');
+  assert.ok(rawFactura.includes('0986 977 631'), 'Factura Legal debe mostrar el teléfono WhatsApp 0986 977 631');
+  assert.ok(/0\.15\d*\s+0\.83\d*\s+0\.4\d*\s+rg/i.test(rawFactura), 'Factura Legal debe dibujar el ícono verde de WhatsApp');
+  assert.ok(rawFactura.includes('001-002-0000021'), 'Factura Legal debe mostrar número de 7 dígitos');
+  assert.ok(rawFactura.includes(cli.direccion), 'Factura Legal debe mostrar la dirección en DATOS DEL CLIENTE Y MEDIDOR');
+  assert.ok(!rawFactura.includes('(25 m') && !rawFactura.includes('(2%)'), 'Debe eliminar paréntesis de los conceptos');
+  assert.ok(rawFactura.includes('CONSUMO DE AGUA'), 'Concepto sin paréntesis');
+  assert.ok(!rawFactura.includes('DETALLE DE CONCEPTOS'), 'Debe reemplazar DETALLE DE CONCEPTOS');
+  assert.ok(rawFactura.includes('DE CONSUMO: 2026-10'), 'Factura Legal debe mostrar PERÍODO DE CONSUMO: 2026-10');
+  assert.ok(!rawFactura.includes('| EMISI'), 'Factura Legal NO debe mostrar | EMISIÓN en el título de la tabla');
+  assert.ok((rawFactura.includes('Emisión: 2026-11-01') || rawFactura.includes('Emisi\\363n: 2026-11-01')) && rawFactura.includes('Vencimiento: 2026-11-30'), 'Factura Legal mantiene Emisión y Vencimiento en el recuadro superior derecho');
+  assert.ok(!rawFactura.includes('Per\\355odo de Consumo:'), 'Debe quitar Período de Consumo de la línea del medidor');
+  assert.ok(rawFactura.includes('IVA 10%'), 'Factura Legal debe mostrar concepto IVA 10%');
+  assert.ok(!rawFactura.includes('(INCLUIDO)'), 'Factura Legal debe decir "IVA 10%" y no "IVA 10% (INCLUIDO)"');
+  assert.ok(rawFactura.includes('10.000 Gs.'), 'IVA 10% debe calcularse como Total / 11');
+  assert.ok(!rawFactura.includes('SIN VALOR FISCAL'), 'No debe mostrar texto SIN VALOR FISCAL');
+  assert.equal(contarLineasTablaFullWidth(rawFactura), 6, 'Con 3 conceptos debe dibujar línea separadora en la tabla (5 base + 1 separadora)');
+
+  // B) RECIBO SIN VALOR FISCAL (2 conceptos: CONSUMO DE AGUA + APORTE LEY ERSSAN -> < 3 conceptos, NO debe dibujar líneas separadoras entre ellos)
+  const docRecibo = generarComprobantePagoPDF({
+    factura: fac,
+    cliente: cli,
+    medidor: med,
+    tipoComprobante: 'recibo_sin_valor_fiscal',
+    numeroRecibo: '001-002-0001',
+    montoAbonado: 110000,
+    metodoPago: 'efectivo',
+    saldoRestante: 0,
+  });
+  const rawRecibo = docRecibo.output();
+  const textRecibo = rawRecibo.split(/\r?\n/).filter((l) => l.includes('Tj')).join('\n');
+  assert.ok(rawRecibo.includes('/XObject'), 'Recibo debe mantener el logo');
+  assert.ok(textRecibo.includes('0986 977 631'), 'Recibo debe mostrar el teléfono WhatsApp 0986 977 631');
+  assert.ok(/0\.15\d*\s+0\.83\d*\s+0\.4\d*\s+rg/i.test(rawRecibo), 'Recibo debe dibujar el ícono verde de WhatsApp');
+  assert.ok(textRecibo.includes('San Gabriel Mboi y'), 'Recibo debe mostrar la dirección del cliente');
+  assert.ok(!textRecibo.includes('SIN VALOR FISCAL'), 'Recibo NO debe mostrar el texto SIN VALOR FISCAL');
+  assert.ok(textRecibo.includes('001-002-0001'), 'Recibo debe usar formato 4 dígitos');
+  assert.ok(!textRecibo.includes('Emisi') && !textRecibo.includes('EMISI'), 'Recibo debe dejar vacío el lado derecho del recuadro superior y sin título EMISIÓN arriba de la tabla');
+  assert.ok(!textRecibo.includes('Vencimiento:'), 'Recibo no debe mostrar Vencimiento en el recuadro superior');
+  assert.ok(!textRecibo.includes('DE CONSUMO:'), 'Recibo no debe mostrar título arriba de la tabla de conceptos');
+  assert.ok(!textRecibo.includes('001-002-0000021'), 'Recibo no debe mostrar número de 7 dígitos');
+  assert.ok(!textRecibo.includes('3950638-0'), 'Recibo NO debe mostrar RUC');
+  assert.ok(!textRecibo.includes('19148339'), 'Recibo NO debe mostrar Timbrado');
+  assert.ok(!textRecibo.includes('01/10/2026'), 'Recibo NO debe mostrar Inicio Vigencia');
+  assert.ok(!textRecibo.includes('31/10/2027'), 'Recibo NO debe mostrar Fin Vigencia');
+  assert.ok(!textRecibo.includes('IVA 10%'), 'Recibo NO debe incluir IVA 10%');
+  assert.equal(contarLineasTablaFullWidth(rawRecibo), 5, 'Con 2 conceptos NO debe dibujar líneas separadoras en la tabla (solo 5 líneas base)');
+
+  // C) CONCEPTO PERSONALIZADO independiente (1 concepto -> sin líneas separadoras; recuadro derecho vacío y sin título arriba de la tabla)
+  const docPers = generarComprobantePagoPDF({
+    factura: null,
+    cliente: cli,
+    medidor: med,
+    tipoComprobante: 'factura_legal',
+    numeroRecibo: '001-002-0000099',
+    esConceptoPersonalizado: true,
+    conceptoPersonalizado: 'Reparacion de caneria matriz (Tramo Norte)',
+    montoAbonado: 150000,
+    metodoPago: 'transferencia',
+    fechaPago: '2026-11-27',
+  });
+  const rawPers = docPers.output();
+  const textPers = rawPers.split(/\r?\n/).filter((l) => l.includes('Tj')).join('\n');
+  assert.ok(textPers.includes('0986 977 631'), 'Comprobante personalizado debe mostrar teléfono WhatsApp');
+  assert.ok(textPers.includes('001-002-0000099'), 'Debe mostrar el comprobante asignado');
+  assert.ok(textPers.includes('REPARACION DE CANERIA MATRIZ'), 'Concepto personalizado debe renderizarse en MAYÚSCULAS');
+  assert.ok(!textPers.includes('Tramo Norte') && !textPers.includes('TRAMO NORTE'), 'Debe limpiar paréntesis en concepto personalizado');
+  assert.ok(textPers.includes('150.000 Gs.'), 'Debe mostrar el monto exacto ingresado');
+  const ocurrenciasDireccion = textPers.split('San Gabriel Mboi y').length - 1;
+  assert.equal(ocurrenciasDireccion, 1, 'La dirección debe aparecer únicamente en DATOS DEL CLIENTE Y MEDIDOR, nunca en el recuadro superior');
+  assert.ok(!textPers.includes('Emisi') && !textPers.includes('EMISI'), 'Concepto personalizado debe dejar el recuadro derecho vacío y sin título EMISIÓN arriba de la tabla');
+  assert.ok(!textPers.includes('DE CONSUMO:'), 'Concepto personalizado no debe mostrar título arriba de la tabla');
+  assert.ok(!textPers.includes('Cobro Independiente'), 'Concepto personalizado NO debe mostrar "Cobro Independiente"');
+  assert.ok(!textPers.includes('ERSSAN 2%') && !textPers.includes('APORTE LEY ERSSAN') && !textPers.includes('2.157 Gs.'), 'Concepto personalizado NO debe calcular ni mostrar ERSSAN 2%');
+  assert.ok(!textPers.includes('IVA 10%'), 'Concepto personalizado NO debe calcular ni mostrar IVA 10%');
+  assert.ok(!textPers.includes('CONSUMO DE AGUA'), 'Concepto personalizado debe ocultar conceptos estándar');
+  assert.equal(contarLineasTablaFullWidth(rawPers), 5, 'Con 1 concepto NO debe dibujar líneas separadoras en la tabla (solo 5 líneas base)');
+
+  // D) generarBoletaPDF Factura Legal muestra solo PERÍODO DE CONSUMO: 2026-10 (sin | EMISIÓN) y Recibo omite título arriba de la tabla
+  const docBoletaFactura = generarBoletaPDF({
+    factura: fac,
+    cliente: cli,
+    medidor: med,
+    tipoComprobante: 'factura_legal',
+  });
+  const textBoletaFactura = docBoletaFactura.output().split(/\r?\n/).filter((l) => l.includes('Tj')).join('\n');
+  assert.ok(textBoletaFactura.includes('DE CONSUMO: 2026-10') && !textBoletaFactura.includes('| EMISI'));
+
+  const docBoletaRecibo = generarBoletaPDF({
+    factura: fac,
+    cliente: cli,
+    medidor: med,
+    tipoComprobante: 'recibo_sin_valor_fiscal',
+    numeroRecibo: '001-002-0005',
+  });
+  const rawBoletaRecibo = docBoletaRecibo.output();
+  const textBoletaRecibo = rawBoletaRecibo
+    .split(/\r?\n/)
+    .filter((l) => l.includes('Tj'))
+    .join('\n');
+  assert.ok(textBoletaRecibo.includes('001-002-0005'));
+  assert.ok(textBoletaRecibo.includes('0986 977 631'));
+  assert.ok(textBoletaRecibo.includes('San Gabriel Mboi y'));
+  assert.ok(!textBoletaRecibo.includes('DETALLE DE CONCEPTOS'));
+  assert.ok(!textBoletaRecibo.includes('DE CONSUMO:'), 'Recibo sin valor fiscal en generarBoletaPDF no debe mostrar título arriba de la tabla');
+  assert.ok(textBoletaRecibo.includes('(CONSUMO DE AGUA) Tj'));
+  assert.ok(textBoletaRecibo.includes('(APORTE ERSSAN:) Tj'));
+  assert.ok(!textBoletaRecibo.includes('\\(25 m') && !textBoletaRecibo.includes('\\(2%'));
+  assert.ok(!textBoletaRecibo.includes('SIN VALOR FISCAL'));
+  assert.ok(!textBoletaRecibo.includes('3950638-0'));
+  assert.ok(!textBoletaRecibo.includes('19148339'));
+  assert.ok(!textBoletaRecibo.includes('IVA 10%'));
+});
+
+test('39. CajaCobranzasView renderiza sin errores con soporte de Selector de Comprobante y Concepto Personalizado', () => {
+  const html = renderToStaticMarkup(
+    React.createElement(AuthProvider, null, React.createElement(CajaCobranzasView))
+  );
+  assert.ok(html.includes('Módulo de Caja y Cobranzas'));
+});
+
+test('40. Historial de Pagos incluye factura_id = null y getUltimoPagoPorMedidor detecta cobro personalizado para descarga en Facturación', () => {
+  const data = db.getFullData();
+  const cli = {
+    id: 'cli-hist-40',
+    nombre_completo: 'Carlos Benítez',
+    documento: '3.456.789',
+    direccion: 'Fracción San Gabriel Sector Norte',
+    telefono: '0982111222',
+    email: 'carlos@example.com',
+    fecha_alta: '2026-01-01',
+  };
+  const med: Medidor = {
+    ...medidorBase,
+    id: 'med-hist-40',
+    cliente_id: cli.id,
+    numero_medidor: 404,
+    estado: 'activo',
+  };
+  const fac: Factura = {
+    id: 'fac-hist-40',
+    medidor_id: med.id,
+    cliente_id: cli.id,
+    periodo_consumo: '2026-10',
+    periodo_facturado: '2026-11',
+    fecha_emision: '2026-11-01',
+    fecha_vencimiento: '2026-11-30',
+    fecha_pago: null,
+    estado: 'pendiente',
+    total: 40000,
+    saldo_pendiente: 40000,
+    saldo: 40000,
+    monto_pagado: 0,
+    es_tercera_boleta: false,
+    alerta_consumo_elevado: false,
+    numero_boleta_medidor: 1,
+    numero_factura: '001-002-0000404',
+    consumo_m3: 10,
+  };
+  data.clientes.push(cli);
+  data.medidores.push(med);
+  data.facturas.push(fac);
+
+  // Registrar cobro con concepto personalizado (factura_id = null) teniendo boleta de agua pendiente
+  const resPers = db.registrarCobro({
+    facturaId: fac.id,
+    clienteId: cli.id,
+    medidorId: med.id,
+    monto: 120000,
+    metodoPago: 'efectivo',
+    tipoComprobante: 'recibo_sin_valor_fiscal',
+    esConceptoPersonalizado: true,
+    conceptoPersonalizado: 'Instalación de llave maestra',
+  });
+
+  assert.equal(resPers.pago.factura_id, null);
+  assert.equal(fac.estado, 'pendiente', 'La factura de agua permanece pendiente');
+  assert.equal(fac.saldo_pendiente, 40000, 'El saldo de agua no se toca');
+
+  // Historial global debe incluir el cobro personalizado aunque factura_id sea null
+  const histTodos = db.getHistorialPagos({ search: 'Instalación de llave maestra' });
+  assert.equal(histTodos.total, 1);
+  assert.equal(histTodos.pagos[0].esPersonalizado, true);
+  assert.equal(histTodos.pagos[0].clienteNombre, 'Carlos Benítez');
+  assert.equal(histTodos.pagos[0].numeroMedidor, 404);
+  assert.equal(histTodos.pagos[0].descripcionConcepto, 'INSTALACIÓN DE LLAVE MAESTRA');
+
+  // Filtro solo personalizados
+  const histPers = db.getHistorialPagos({ tipoFiltro: 'personalizados', search: '404' });
+  assert.equal(histPers.total, 1);
+  assert.equal(histPers.pagos[0].id, resPers.pago.id);
+
+  // Historial del medidor y último pago del medidor (usado por FacturaDetalleModal para descargar el recibo personalizado)
+  const pagosMedidor = db.getPagosPorMedidor(med.id);
+  assert.equal(pagosMedidor.length, 1);
+  assert.equal(pagosMedidor[0].esPersonalizado, true);
+
+  const ultimoPago = db.getUltimoPagoPorMedidor(med.id);
+  assert.ok(ultimoPago);
+  assert.equal(ultimoPago.id, resPers.pago.id);
+  assert.equal(ultimoPago.esPersonalizado, true);
+
+  // FacturacionView renderiza limpio (sin sesión activa en SSR aplica RBAC)
+  const htmlFact = renderToStaticMarkup(
+    React.createElement(AuthProvider, null, React.createElement(FacturacionView))
+  );
+  assert.ok(htmlFact.includes('Acceso denegado'));
+
+  // FacturaDetalleModal: botón azul grande SIEMPRE para la boleta de agua ("Descargar PDF"),
+  // mientras el recuadro inferior mantiene el botón pequeño para descargar el Concepto Personalizado
+  const htmlModal = renderToStaticMarkup(
+    React.createElement(
+      AuthProvider,
+      null,
+      React.createElement(FacturaDetalleModal, {
+        facturaId: fac.id,
+        onClose: () => {},
+        onNotify: () => {},
+      })
+    )
+  );
+  assert.ok(htmlModal.includes('Descargar PDF'), 'El botón azul grande debe mantenerse exclusivo para la factura de agua');
+  assert.ok(!htmlModal.includes('Recibo Personalizado'), 'El botón azul grande NO debe cambiar a Recibo Personalizado');
+  assert.ok(htmlModal.includes('Cobros con Concepto Personalizado del Medidor'));
+  assert.ok(htmlModal.includes('INSTALACIÓN DE LLAVE MAESTRA'));
+});
+
+
 
 
 

@@ -189,14 +189,22 @@ export interface ReporteRecaudacionDetalle {
   cantidadPagos: number;
 }
 
+export type TipoComprobantePago = 'factura_legal' | 'recibo_sin_valor_fiscal';
+
 export interface Pago {
   id: string;
-  factura_id: string;
+  factura_id?: string | null;
+  cliente_id?: string | null;
+  medidor_id?: string | null;
   fecha_pago: string;
   monto: number;
   metodo_pago: MetodoPago;
   numero_recibo?: string;
   cobrador_id: string;
+  tipo_comprobante?: TipoComprobantePago;
+  es_concepto_personalizado?: boolean;
+  concepto_personalizado?: string | null;
+  created_at?: string | null;
 }
 
 export interface CargoPendiente {

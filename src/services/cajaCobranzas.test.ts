@@ -243,8 +243,8 @@ test('1. Cobro total exitoso en Caja → factura pagada en Supabase, medidor act
   });
 
   assert.equal(res.saldoRestante, 0);
-  assert.equal(res.factura.estado, 'pagada');
-  assert.equal(res.factura.monto_pagado, 55080);
+  assert.equal(res.factura?.estado, 'pagada');
+  assert.equal(res.factura?.monto_pagado, 55080);
   assert.equal(res.medidorPasoAActivo, true);
   assert.equal(res.estadoMedidorActualizado, 'activo');
 
@@ -276,8 +276,8 @@ test('2. Cobro parcial en Caja → factura pendiente con saldo_pendiente actuali
   });
 
   assert.equal(res.saldoRestante, 16720);
-  assert.equal(res.factura.estado, 'pendiente');
-  assert.equal(res.factura.monto_pagado, 20000);
+  assert.equal(res.factura?.estado, 'pendiente');
+  assert.equal(res.factura?.monto_pagado, 20000);
   assert.equal(mock.tables.facturas[0].estado, 'pendiente');
   assert.equal(mock.tables.facturas[0].saldo_pendiente, 16720);
   assert.equal(mock.tables.facturas[0].monto_pagado, 20000);

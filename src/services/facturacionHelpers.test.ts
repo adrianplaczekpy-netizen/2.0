@@ -307,7 +307,7 @@ test('8. registrarCobroAsync actualiza saldo parcial, completo y getPagosPorFact
     cobradorNombre: 'Cobrador Turno Tarde',
   });
   assert.equal(cobro1.saldoRestante, 20800);
-  assert.equal(cobro1.factura.estado, 'pendiente');
+  assert.equal(cobro1.factura?.estado, 'pendiente');
 
   // No permite anular factura con pago parcial registrado
   await assert.rejects(
@@ -326,7 +326,7 @@ test('8. registrarCobroAsync actualiza saldo parcial, completo y getPagosPorFact
     cobradorNombre: 'Cobrador Turno Tarde',
   });
   assert.equal(cobro2.saldoRestante, 0);
-  assert.equal(cobro2.factura.estado, 'pagada');
+  assert.equal(cobro2.factura?.estado, 'pagada');
 
   const pagos = db.getPagosPorFactura(fac.id);
   assert.equal(pagos.length, 2);
@@ -400,9 +400,9 @@ test('9. Control estricto de monto_pagado, saldo_pendiente y estado en pago tota
     fechaPago: '2026-11-10',
     numeroRecibo: 'REC-PAGO-TOTAL-1',
   });
-  assert.equal(resTotal.factura.monto_pagado, fac1.total);
-  assert.equal(resTotal.factura.saldo_pendiente, 0);
-  assert.equal(resTotal.factura.estado, 'pagada');
+  assert.equal(resTotal.factura?.monto_pagado, fac1.total);
+  assert.equal(resTotal.factura?.saldo_pendiente, 0);
+  assert.equal(resTotal.factura?.estado, 'pagada');
 
   // 2) Pago parcial de 20.000 sobre Factura 2 (36.720) → monto_pagado = 20.000, saldo_pendiente = 16.720, estado = 'pendiente'
   const resParcial1 = await db.registrarCobroAsync({
@@ -412,9 +412,9 @@ test('9. Control estricto de monto_pagado, saldo_pendiente y estado en pago tota
     fechaPago: '2026-11-12',
     numeroRecibo: 'REC-PAGO-PARCIAL-1',
   });
-  assert.equal(resParcial1.factura.monto_pagado, 20000);
-  assert.equal(resParcial1.factura.saldo_pendiente, 16720);
-  assert.equal(resParcial1.factura.estado, 'pendiente');
+  assert.equal(resParcial1.factura?.monto_pagado, 20000);
+  assert.equal(resParcial1.factura?.saldo_pendiente, 16720);
+  assert.equal(resParcial1.factura?.estado, 'pendiente');
 
   // 3) Segundo pago de 16.720 sobre Factura 2 → monto_pagado = 36.720, saldo_pendiente = 0, estado = 'pagada'
   const resParcial2 = await db.registrarCobroAsync({
@@ -424,9 +424,9 @@ test('9. Control estricto de monto_pagado, saldo_pendiente y estado en pago tota
     fechaPago: '2026-11-15',
     numeroRecibo: 'REC-PAGO-PARCIAL-2',
   });
-  assert.equal(resParcial2.factura.monto_pagado, 36720);
-  assert.equal(resParcial2.factura.saldo_pendiente, 0);
-  assert.equal(resParcial2.factura.estado, 'pagada');
+  assert.equal(resParcial2.factura?.monto_pagado, 36720);
+  assert.equal(resParcial2.factura?.saldo_pendiente, 0);
+  assert.equal(resParcial2.factura?.estado, 'pagada');
 });
 
 test('10. Helpers de facturación individual validan medidor, período de consumo y sugieren mes de boleta', () => {

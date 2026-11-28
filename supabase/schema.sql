@@ -455,14 +455,83 @@ CREATE TABLE IF NOT EXISTS public.detalle_factura (
 -- ---------------------------------------------------------------------
 CREATE TABLE IF NOT EXISTS public.pagos (
     id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
-    factura_id UUID NOT NULL REFERENCES public.facturas(id) ON DELETE RESTRICT,
+    factura_id UUID REFERENCES public.facturas(id) ON DELETE RESTRICT,
+    cliente_id UUID REFERENCES public.clientes(id) ON DELETE RESTRICT,
+    medidor_id UUID REFERENCES public.medidores(id) ON DELETE RESTRICT,
     fecha_pago DATE NOT NULL DEFAULT CURRENT_DATE,
     monto INTEGER NOT NULL CHECK (monto > 0),
     metodo_pago VARCHAR(20) NOT NULL CHECK (metodo_pago IN ('efectivo', 'transferencia', 'cheque')),
     numero_recibo VARCHAR(30) NOT NULL UNIQUE,
+    tipo_comprobante VARCHAR(30) NOT NULL DEFAULT 'factura_legal' CHECK (tipo_comprobante IN ('factura_legal', 'recibo_sin_valor_fiscal')),
+    es_concepto_personalizado BOOLEAN NOT NULL DEFAULT FALSE,
+    concepto_personalizado TEXT,
     cobrador_id UUID NOT NULL DEFAULT auth.uid() REFERENCES public.usuarios(id),
-    created_at TIMESTAMPTZ DEFAULT TIMEZONE('utc', NOW())
+    created_at TIMESTAMPTZ DEFAULT TIMEZONE('utc', NOW()),
+    CONSTRAINT chk_pagos_factura_o_personalizado CHECK (factura_id IS NOT NULL OR es_concepto_personalizado = TRUE)
 );
+
+ALTER TABLE public.pagos ALTER COLUMN factura_id DROP NOT NULL;
+ALTER TABLE public.pagos ADD COLUMN IF NOT EXISTS cliente_id UUID REFERENCES public.clientes(id) ON DELETE RESTRICT;
+ALTER TABLE public.pagos ADD COLUMN IF NOT EXISTS medidor_id UUID REFERENCES public.medidores(id) ON DELETE RESTRICT;
+ALTER TABLE public.pagos ADD COLUMN IF NOT EXISTS tipo_comprobante VARCHAR(30) NOT NULL DEFAULT 'factura_legal';
+ALTER TABLE public.pagos ADD COLUMN IF NOT EXISTS es_concepto_personalizado BOOLEAN NOT NULL DEFAULT FALSE;
+ALTER TABLE public.pagos ADD COLUMN IF NOT EXISTS concepto_personalizado TEXT;
+
+DO $$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1 FROM pg_constraint WHERE conname = 'chk_pagos_factura_o_personalizado'
+    ) THEN
+        ALTER TABLE public.pagos
+            ADD CONSTRAINT chk_pagos_factura_o_personalizado
+            CHECK (factura_id IS NOT NULL OR COALESCE(es_concepto_personalizado, FALSE) = TRUE);
+    END IF;
+END $$;
+
+-- Secuencia separada de 4 dígitos para Recibos sin valor fiscal (001-002-XXXX)
+CREATE SEQUENCE IF NOT EXISTS public.recibos_numero_seq START WITH 1 INCREMENT BY 1;
+
+SELECT setval(
+    'public.recibos_numero_seq',
+    GREATEST(
+        COALESCE(
+            (SELECT MAX(SUBSTRING(numero_recibo FROM 9)::INTEGER)
+             FROM public.pagos
+             WHERE numero_recibo ~ '^001-002-[0-9]{4}$'),
+            0
+        ),
+        1
+    ),
+    EXISTS (SELECT 1 FROM public.pagos WHERE numero_recibo ~ '^001-002-[0-9]{4}$')
+);
+
+CREATE OR REPLACE FUNCTION public.asignar_numero_recibo_4_digitos()
+RETURNS TRIGGER
+LANGUAGE plpgsql
+AS $$
+DECLARE
+    v_seq INTEGER;
+BEGIN
+    IF COALESCE(NEW.tipo_comprobante, 'factura_legal') = 'recibo_sin_valor_fiscal' THEN
+        IF NEW.numero_recibo IS NULL OR BTRIM(NEW.numero_recibo) = '' THEN
+            v_seq := nextval('public.recibos_numero_seq');
+            NEW.numero_recibo := '001-002-' || LPAD(v_seq::TEXT, 4, '0');
+        ELSIF NEW.numero_recibo ~ '^001-002-[0-9]{4}$' THEN
+            v_seq := SUBSTRING(NEW.numero_recibo FROM 9)::INTEGER;
+            IF v_seq > COALESCE((SELECT last_value FROM public.recibos_numero_seq), 0) THEN
+                PERFORM setval('public.recibos_numero_seq', v_seq, true);
+            END IF;
+        END IF;
+    END IF;
+    RETURN NEW;
+END;
+$$;
+
+DROP TRIGGER IF EXISTS trg_asignar_numero_recibo_4_digitos ON public.pagos;
+CREATE TRIGGER trg_asignar_numero_recibo_4_digitos
+BEFORE INSERT ON public.pagos
+FOR EACH ROW
+EXECUTE FUNCTION public.asignar_numero_recibo_4_digitos();
 
 -- Migración idempotente para asegurar cobrador_id UUID NOT NULL DEFAULT auth.uid() en bases existentes
 DO $$
@@ -690,6 +759,21 @@ DECLARE
     v_nuevo_saldo INTEGER;
 BEGIN
     IF TG_WHEN = 'BEFORE' THEN
+        IF NEW.cobrador_id IS NULL THEN
+            NEW.cobrador_id := auth.uid();
+        END IF;
+
+        IF NEW.cobrador_id IS NULL THEN
+            RAISE EXCEPTION 'cobrador_id es obligatorio para registrar auditoría del pago';
+        END IF;
+
+        -- Cobro con Concepto Personalizado: totalmente independiente de facturas de consumo de agua
+        IF COALESCE(NEW.es_concepto_personalizado, FALSE) = TRUE OR NEW.factura_id IS NULL THEN
+            NEW.es_concepto_personalizado := TRUE;
+            NEW.factura_id := NULL;
+            RETURN NEW;
+        END IF;
+
         SELECT id, estado, total, saldo_pendiente
         INTO v_factura
         FROM public.facturas
@@ -716,16 +800,13 @@ BEGIN
             RAISE EXCEPTION 'El monto a pagar (%) supera el saldo pendiente (%)', NEW.monto, v_factura.saldo_pendiente;
         END IF;
 
-        IF NEW.cobrador_id IS NULL THEN
-            NEW.cobrador_id := auth.uid();
-        END IF;
-
-        IF NEW.cobrador_id IS NULL THEN
-            RAISE EXCEPTION 'cobrador_id es obligatorio para registrar auditoría del pago';
-        END IF;
-
         RETURN NEW;
     ELSIF TG_WHEN = 'AFTER' THEN
+        -- Si es Concepto Personalizado o sin factura_id, NO tocar saldo_pendiente ni estado de facturas/medidores
+        IF COALESCE(NEW.es_concepto_personalizado, FALSE) = TRUE OR NEW.factura_id IS NULL THEN
+            RETURN NEW;
+        END IF;
+
         SELECT id, medidor_id, total, estado
         INTO v_factura
         FROM public.facturas
@@ -734,7 +815,8 @@ BEGIN
         SELECT COALESCE(SUM(monto), 0)
         INTO v_total_pagado
         FROM public.pagos
-        WHERE factura_id = NEW.factura_id;
+        WHERE factura_id = NEW.factura_id
+          AND COALESCE(es_concepto_personalizado, FALSE) = FALSE;
 
         v_nuevo_saldo := GREATEST(0, v_factura.total - v_total_pagado);
 
